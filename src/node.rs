@@ -170,6 +170,64 @@ impl<'a> NodeConn<'a> {
             .unwrap_or(0)
     }
 
+    /// Everything worth knowing about a node that has stopped moving.
+    ///
+    /// Collected in one round trip while the node still answers. A
+    /// wedged filesystem takes the network with it soon after -- twice
+    /// on 2026-09-01 the node went to "No route to host" before anyone
+    /// had asked it anything -- so the window to gather evidence is
+    /// short and closes without warning.
+    ///
+    /// Returns (stacks, dmesg, mounts). Any part may be empty if the
+    /// node was already too far gone; empty strings are more useful
+    /// than a failed call that returns nothing at all.
+    pub fn stall_evidence(&self) -> (String, String, String) {
+        let stacks = self
+            .run(
+                "for p in $(ps -eo pid,state | awk '$2 ~ /D/ {print $1}' | head -5); do \
+                 echo \"--- pid $p $(ps -o comm= -p $p) $(ps -o etime= -p $p) ---\"; \
+                 sudo cat /proc/$p/stack 2>/dev/null | head -12; done",
+                Duration::from_secs(25),
+            )
+            .unwrap_or_default();
+
+        // Tail rather than the whole buffer: the interesting part is
+        // what the kernel said as it went under, and the rest is mount
+        // messages from every test that came before.
+        let dmesg = self
+            .run("sudo dmesg | tail -40", Duration::from_secs(25))
+            .unwrap_or_default();
+
+        let mounts = self
+            .run("mount | grep beamfs; echo '--- df ---'; df -h /mnt/test /mnt/scratch 2>&1",
+                 Duration::from_secs(20))
+            .unwrap_or_default();
+
+        (stacks, dmesg, mounts)
+    }
+
+    /// The harness output for a test that failed.
+    ///
+    /// The runner writes these under /tmp/xfs-failures as it goes. Read
+    /// back rather than streamed, because a failing test produces
+    /// hundreds of lines of diff and interleaving four nodes' worth of
+    /// that into one terminal helps nobody.
+    pub fn failure_log(&self, test: &str) -> Option<String> {
+        let name = test.replace('/', "-");
+        self.run(&format!("cat /tmp/xfs-failures/{name}.log 2>/dev/null"),
+                 Duration::from_secs(20))
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Which failure logs the node has.
+    pub fn failure_list(&self) -> Vec<String> {
+        self.run("ls /tmp/xfs-failures/ 2>/dev/null | sed 's/\\.log$//'",
+                 Duration::from_secs(20))
+            .map(|s| s.lines().map(|l| l.replace('-', "/")).collect())
+            .unwrap_or_default()
+    }
+
     /// Kill the shard and release the mounts.
     pub fn stop(&self) {
         let _ = self.run(

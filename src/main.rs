@@ -17,6 +17,7 @@
 //! TCG, and the suite is around 737 tests.
 
 mod config;
+mod journal;
 mod node;
 mod progress;
 mod result;
@@ -25,6 +26,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use config::Config;
+use journal::Journal;
 use node::NodeConn;
 use progress::{Progress, StallDetector};
 use result::{Outcome, Summary, TestResult};
@@ -66,6 +68,12 @@ fn usage() -> std::process::ExitCode {
 }
 
 fn run(cfg: &Config) -> std::process::ExitCode {
+    // Opened before anything is touched, so a run that dies during
+    // preflight still says why. Thirty-minute runs leaving eight-line
+    // logs is the specific thing this is here to stop.
+    let mut jr = Journal::create(&std::env::temp_dir());
+    println!();
+    println!("  journal : {}", jr.path().display());
     println!();
     println!("  === PREFLIGHT ===");
 
@@ -80,11 +88,15 @@ fn run(cfg: &Config) -> std::process::ExitCode {
                 let bad = info.contains("MISSING") || info.contains("=NO");
                 println!("    {:<10} {}{}", n.name, info.trim(),
                          if bad { "   <-- unusable" } else { "" });
+                jr.command(&n.name, "preflight", &info, !bad);
                 if !bad {
                     ready.push(n);
                 }
             }
-            Err(e) => println!("    {:<10} {e}", n.name),
+            Err(e) => {
+                println!("    {:<10} {e}", n.name);
+                jr.command(&n.name, "preflight", &e.to_string(), false);
+            }
         }
     }
     if ready.is_empty() {
@@ -117,8 +129,14 @@ fn run(cfg: &Config) -> std::process::ExitCode {
             u8::from(cfg.resume),
         );
         match c.run(&cmd, Duration::from_secs(30)) {
-            Ok(_) => println!("    {:<10} shard {idx}/{nshard}", n.name),
-            Err(e) => println!("    {:<10} launch failed: {e}", n.name),
+            Ok(o) => {
+                println!("    {:<10} shard {idx}/{nshard}", n.name);
+                jr.command(&n.name, &cmd, &o, true);
+            }
+            Err(e) => {
+                println!("    {:<10} launch failed: {e}", n.name);
+                jr.command(&n.name, &cmd, &e.to_string(), false);
+            }
         }
     }
 
@@ -151,7 +169,15 @@ fn run(cfg: &Config) -> std::process::ExitCode {
                     bar.clear();
                     println!("  >>> {} wedged: {count} tests done, {blocked} blocked, on {cur}",
                              n.name);
-                    dump_stacks(&c);
+                    // Gathered before stopping anything: killing the
+                    // shard first destroys the state that explains why
+                    // it stopped.
+                    let (stacks, dmesg, mounts) = c.stall_evidence();
+                    jr.stall_evidence(&n.name, &cur, &stacks, &dmesg, &mounts);
+                    for l in stacks.lines().take(10) {
+                        println!("      {l}");
+                    }
+                    println!("      full evidence in {}", jr.path().display());
                     c.stop();
                 }
             }
@@ -175,26 +201,26 @@ fn run(cfg: &Config) -> std::process::ExitCode {
 
     bar.clear();
     println!("  === DONE in {} min ===", bar.elapsed().as_secs() / 60);
-    println!();
-    report(cfg)
-}
 
-/// Ask a wedged node what its stuck tasks are doing.
-///
-/// Best effort: a node this far gone often stops answering ssh
-/// altogether, which is itself the answer.
-fn dump_stacks(c: &NodeConn) {
-    let cmd = "for p in $(ps -eo pid,state | awk '$2 ~ /D/ {print $1}' | head -3); do \
-               echo \"pid $p $(ps -o comm= -p $p)\"; \
-               sudo cat /proc/$p/stack 2>/dev/null | head -8; done";
-    match c.run(cmd, Duration::from_secs(25)) {
-        Ok(s) if !s.trim().is_empty() => {
-            for l in s.lines() {
-                println!("      {l}");
+    // Pulled once at the end rather than as they happen: a failing test
+    // produces hundreds of lines of diff, and four nodes' worth
+    // interleaved into a live terminal helps nobody.
+    jr.section("FAILURE ARTIFACTS");
+    let mut pulled = 0usize;
+    for n in &ready {
+        let c = NodeConn::new(n, cfg);
+        for t in c.failure_list() {
+            if let Some(log) = c.failure_log(&t) {
+                jr.artifact(&t, &log);
+                pulled += 1;
             }
         }
-        _ => println!("      (no stacks; node is not answering)"),
     }
+    if pulled > 0 {
+        println!("  {pulled} failure logs in {}", jr.artifacts().display());
+    }
+    println!();
+    report(cfg)
 }
 
 fn stop(cfg: &Config) -> std::process::ExitCode {

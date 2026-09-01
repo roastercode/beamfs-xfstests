@@ -73,6 +73,24 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
   if [ $RC -eq 124 ]; then
     # Killed. Anything it left behind holds a lock on the filesystem and
     # would wedge the next test too.
+    #
+    # The stacks are taken here, before the kill, because a node this
+    # far gone often stops answering the network within seconds and the
+    # orchestrator's own attempt arrives too late.
+    mkdir -p /tmp/xfs-failures
+    {
+      echo "=== blocked tasks at kill time ==="
+      for p in $(ps -eo pid,state | awk '$2 ~ /D/ {print $1}' | head -5); do
+        echo "--- pid $p $(ps -o comm= -p $p) $(ps -o etime= -p $p) ---"
+        sudo cat /proc/$p/stack 2>/dev/null | head -12
+      done
+      echo ""
+      echo "=== kernel messages ==="
+      sudo dmesg | tail -40
+      echo ""
+      echo "=== mounts ==="
+      mount | grep beamfs
+    } > "/tmp/xfs-failures/generic-$t.log" 2>&1
     echo "generic/$t HANG ${EL}s" >> $R
     sudo pkill -9 -f "tests/generic" 2>/dev/null
     sudo pkill -9 -f "/usr/xfstests/check" 2>/dev/null
@@ -84,8 +102,21 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
     echo "generic/$t PASS ${EL}s" >> $R
   else
     echo "generic/$t FAIL ${EL}s" >> $R
+    # The whole harness output, plus what the kernel said while the test
+    # ran. A failure line in a results file names the test and nothing
+    # else; the diff and the dmesg around it are what say why.
     mkdir -p /tmp/xfs-failures
-    echo "$OUT" > "/tmp/xfs-failures/generic-$t.log"
+    {
+      echo "=== check output ==="
+      echo "$OUT"
+      echo ""
+      echo "=== expected vs got ==="
+      diff -u "/usr/xfstests/tests/generic/$t.out" \
+              "/usr/xfstests/results/generic/$t.out.bad" 2>/dev/null | head -60
+      echo ""
+      echo "=== kernel messages ==="
+      sudo dmesg | tail -30
+    } > "/tmp/xfs-failures/generic-$t.log" 2>&1
   fi
 done
 
