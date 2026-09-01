@@ -88,6 +88,7 @@ impl<'a> NodeConn<'a> {
             .args(["-o", "StrictHostKeyChecking=no"])
             .args(["-o", "UserKnownHostsFile=/dev/null"])
             .args(["-o", "LogLevel=ERROR"])
+            .arg("-O")
             .arg(local)
             .arg(format!("{}@{}:{remote}", self.user, self.node.host))
             .stdin(Stdio::null())

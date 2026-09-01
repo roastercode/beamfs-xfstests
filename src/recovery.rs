@@ -26,6 +26,7 @@
 //! Evidence is collected at every step and before every action, because
 //! each step destroys the state that explains the one before.
 
+use std::io::Write;
 use std::process::Command;
 use std::time::Duration;
 
@@ -85,6 +86,7 @@ impl<'a> Recovery<'a> {
         jr.stall_evidence(&name, "(stall)", &stacks, &dmesg, &mounts);
 
         // Step 1: the cheap one.
+        println!("      step 1: killing the shard");
         jr.line(&format!("{name}: step 1, killing the shard"));
         conn.stop();
         if self.responsive(conn) {
@@ -97,6 +99,7 @@ impl<'a> Recovery<'a> {
         // to get stacks out of a node that has stopped answering ssh --
         // and 'u' remounts everything read-only, which releases tasks
         // waiting on writeback.
+        println!("      step 2: sysrq w (task dump) then u (remount ro)");
         jr.line(&format!("{name}: step 2, sysrq w then u"));
         self.sysrq(domain, "w");
         std::thread::sleep(Duration::from_secs(2));
@@ -118,18 +121,61 @@ impl<'a> Recovery<'a> {
         // Step 3: the hammer. Two minutes, and whatever the shard had
         // written to /tmp survives only if it was flushed -- which is
         // why results are copied to the orchestrator as they appear.
+        println!("      step 3: restarting {domain}");
         jr.line(&format!("{name}: step 3, restarting domain {domain}"));
         self.virsh(&["destroy", domain]);
         std::thread::sleep(Duration::from_secs(5));
         self.virsh(&["start", domain]);
 
+        // Watch the console while it boots rather than sleeping blind.
+        //
+        // Two reasons. The console says what the kernel is doing, so a
+        // boot that is stuck looks different from one that is slow --
+        // and the previous version simply waited four minutes in
+        // silence either way. And "login:" appears well before sshd
+        // accepts connections, so a machine that has reached userspace
+        // can be declared back without waiting out the full timeout.
+        let mut last_len = 0u64;
+        let mut quiet = 0u32;
         for i in 1..=24 {
-            std::thread::sleep(Duration::from_secs(10));
+            std::thread::sleep(Duration::from_secs(5));
+            let tail = self.console_tail(domain, 3);
+            let len = tail.len() as u64;
+
+            let last = tail.lines().last().unwrap_or("").trim();
+            let shown: String = last.chars().take(58).collect();
+            print!("\r      boot {:3}s  {shown:<58}", i * 5);
+            let _ = std::io::stdout().flush();
+
+            if len == last_len {
+                quiet += 1;
+            } else {
+                quiet = 0;
+                last_len = len;
+                jr.line(&format!("{name} console: {last}"));
+            }
+
+            // Userspace is up; ssh is a formality from here.
+            if tail.contains("login:") || tail.contains("systemd") {
+                jr.line(&format!("{name}: userspace up after {}s", i * 5));
+            }
+
             if self.responsive(conn) {
-                jr.line(&format!("{name}: back after {}s", i * 10));
+                println!("\r      back after {}s{:40}", i * 5, " ");
+                jr.line(&format!("{name}: back after {}s", i * 5));
                 return RecoveryOutcome::Restarted;
             }
+
+            // Silent console and no ssh for a minute: it is not booting,
+            // it is stuck. Saying so beats waiting out the remaining
+            // three minutes for the same answer.
+            if quiet >= 12 && i > 8 {
+                println!("\r      console silent for 60s, boot is stuck{:24}", " ");
+                jr.line(&format!("{name}: console went silent during boot"));
+                break;
+            }
         }
+        println!();
 
         jr.line(&format!("{name}: unrecoverable, redistributing its work"));
         RecoveryOutcome::Lost

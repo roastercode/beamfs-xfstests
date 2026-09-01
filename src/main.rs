@@ -20,6 +20,7 @@ mod config;
 mod history;
 mod journal;
 mod node;
+mod probe;
 mod recovery;
 mod progress;
 mod result;
@@ -31,6 +32,7 @@ use config::Config;
 use history::History;
 use journal::Journal;
 use node::NodeConn;
+use probe::Probe;
 use recovery::Recovery;
 use progress::{Progress, StallDetector};
 use result::{Outcome, Summary, TestResult};
@@ -48,6 +50,7 @@ fn main() -> std::process::ExitCode {
 
     match args.get(1).map(String::as_str) {
         Some("report") => report(&cfg),
+        Some("probe") => do_probe(&cfg, args.get(2), args.get(3)),
         Some("history") => show_history(),
         Some("compare") => compare_runs(args.get(2), args.get(3)),
         Some("stop") => stop(&cfg),
@@ -58,9 +61,10 @@ fn main() -> std::process::ExitCode {
 
 fn usage() -> std::process::ExitCode {
     eprintln!(
-        "usage: beamfs-xfstests [run|report|history|compare|stop]\n\
+        "usage: beamfs-xfstests [run|probe|report|history|compare|stop]\n\
          \n\
          run      shard the suite across the nodes and follow it (default)\n\
+         probe    run one test with console capture and sampling\n\
          report   summarise what the nodes have recorded so far\n\
          history  list saved runs\n\
          compare  diff two runs; last two if unnamed\n\
@@ -128,10 +132,16 @@ fn run(cfg: &Config) -> std::process::ExitCode {
             println!("    {:<10} push failed: {e}", n.name);
             continue;
         }
+        // setsid and all three descriptors redirected, or ssh waits
+        // for the shard to finish: nohup detaches from the terminal but
+        // leaves stdout attached to the connection, so the session stays
+        // open for the whole run and the launch times out while the
+        // shard is in fact running perfectly well.
         let cmd = format!(
             "chmod +x /tmp/xfs-runner.sh && \
-             nohup /tmp/xfs-runner.sh {} {} {idx} {nshard} {} '{}' {} \
-             > /tmp/xfs-shard.log 2>&1 & echo started",
+             setsid /tmp/xfs-runner.sh {} {} {idx} {nshard} {} '{}' {} \
+             < /dev/null > /tmp/xfs-shard.log 2>&1 & \
+             sleep 1; pgrep -f xfs-runner.sh >/dev/null && echo started || echo failed",
             n.test_dev, n.scratch_dev,
             cfg.per_test_timeout.as_secs(), cfg.mkfs_options,
             u8::from(cfg.resume),
@@ -190,8 +200,9 @@ fn run(cfg: &Config) -> std::process::ExitCode {
                         // Relaunch its shard; the runner resumes from
                         // what it already recorded.
                         let cmd = format!(
-                            "nohup /tmp/xfs-runner.sh {} {} {} {} {} '{}' 1 \
-                             > /tmp/xfs-shard.log 2>&1 & echo restarted",
+                            "setsid /tmp/xfs-runner.sh {} {} {} {} {} '{}' 1 \
+                             < /dev/null > /tmp/xfs-shard.log 2>&1 & \
+                             sleep 1; echo restarted",
                             n.test_dev, n.scratch_dev,
                             ready.iter().position(|x| x.name == n.name).unwrap_or(0),
                             ready.len(),
@@ -284,6 +295,52 @@ fn run_tag() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{s:012}")
+}
+
+/// Run one test with everything watched.
+///
+/// For a test that is known to misbehave: the run subcommand records
+/// what happened, this records what the machine was doing while it did.
+fn do_probe(cfg: &Config, test: Option<&String>, node: Option<&String>)
+    -> std::process::ExitCode
+{
+    let Some(test) = test else {
+        eprintln!("\n  usage: beamfs-xfstests probe generic/NNN [node]\n");
+        return std::process::ExitCode::from(2);
+    };
+    let node = node.map_or_else(
+        || cfg.nodes.first().map_or_else(String::new, |n| n.name.clone()),
+        Clone::clone,
+    );
+    let out = std::env::temp_dir().join("beamfs-probe");
+    let mut jr = Journal::create(&out);
+    println!();
+    println!("  probing {test} on {node}");
+    println!("  journal : {}", jr.path().display());
+    println!();
+
+    let p = Probe::new(cfg, &out);
+    let end = p.run(&node, test, Duration::from_secs(900), &mut jr);
+
+    println!();
+    println!("  outcome : {end:?}");
+
+    // A lost node is left recovered, not left dead. The next command
+    // should not have to start with a reboot.
+    if end == probe::ProbeEnd::NodeLost {
+        println!();
+        println!("  === RECOVERY ===");
+        if let Some(n) = cfg.nodes.iter().find(|n| n.name == node) {
+            let c = NodeConn::new(n, cfg);
+            let r = Recovery::new(cfg);
+            let outcome = r.recover(&c, &r.domain_for(&node), &mut jr);
+            println!("  {}", outcome.as_str());
+        }
+    }
+    println!();
+    println!("  artefacts in {}", out.display());
+    println!();
+    std::process::ExitCode::SUCCESS
 }
 
 fn show_history() -> std::process::ExitCode {

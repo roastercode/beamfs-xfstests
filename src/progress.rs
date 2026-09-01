@@ -48,14 +48,22 @@ impl Progress {
 
         // Node columns last: they are the widest and the least likely to
         // be read at a glance, so truncation eats them first.
+        // Fixed width per node, or a long test name shifts every
+        // column after it and the line becomes unreadable exactly when
+        // it matters. Node names truncated to two chars -- m1, c1, c2 --
+        // and test numbers to four, which covers generic/NNNN.
         let mut nodes = String::new();
         for (name, test, blocked) in per_node {
-            let short = name.get(..4).unwrap_or(name);
-            let t = if test.is_empty() { "-" } else { test.as_str() };
+            let short: String = name.chars().filter(|c| c.is_ascii_digit())
+                .take(2).collect();
+            let tag = if short.is_empty() { "m".to_string() } else { format!("c{short}") };
+            let num: String = test.chars().filter(char::is_ascii_digit)
+                .take(4).collect();
+            let cell = if num.is_empty() { "----".to_string() } else { num };
             if *blocked > 0 {
-                nodes.push_str(&format!(" {short}:{t}(D{blocked})"));
+                nodes.push_str(&format!(" {tag}:{cell}D{blocked}"));
             } else {
-                nodes.push_str(&format!(" {short}:{t}"));
+                nodes.push_str(&format!(" {tag}:{cell}  "));
             }
         }
 

@@ -82,12 +82,19 @@ impl Config {
             let nodes: Vec<Node> = v
                 .split(',')
                 .filter_map(|spec| {
-                    let mut p = spec.split(':');
+                    // Collected rather than pulled field by field:
+                    // p.clone().next() for the name left the iterator
+                    // where it was, so host got the name and every ssh
+                    // went to a hostname that does not resolve.
+                    let f: Vec<&str> = spec.split(':').collect();
+                    if f.len() < 2 {
+                        return None;
+                    }
                     Some(Node {
-                        name: p.clone().next()?.into(),
-                        host: p.next()?.into(),
-                        test_dev: p.next().unwrap_or("vdb").into(),
-                        scratch_dev: p.next().unwrap_or("vdc").into(),
+                        name: f[0].into(),
+                        host: f[1].into(),
+                        test_dev: f.get(2).unwrap_or(&"vdb").to_string(),
+                        scratch_dev: f.get(3).unwrap_or(&"vdc").to_string(),
                     })
                 })
                 .collect();
@@ -116,6 +123,20 @@ mod tests {
         // campaigns are not worn down by test formatting.
         assert_eq!(c.nodes[0].scratch_dev, "vdc");
         assert!(c.nodes[1..].iter().all(|n| n.scratch_dev == "vdh"));
+    }
+
+    #[test]
+    fn a_node_spec_parses_into_the_right_fields() {
+        std::env::set_var("XFSTESTS_NODES", "c1:10.0.0.1:vdb:vdh,c2:10.0.0.2");
+        let c = Config::from_env();
+        std::env::remove_var("XFSTESTS_NODES");
+        assert_eq!(c.nodes.len(), 2);
+        assert_eq!(c.nodes[0].name, "c1");
+        assert_eq!(c.nodes[0].host, "10.0.0.1");
+        assert_eq!(c.nodes[0].scratch_dev, "vdh");
+        // Defaults fill in what the spec omits.
+        assert_eq!(c.nodes[1].host, "10.0.0.2");
+        assert_eq!(c.nodes[1].test_dev, "vdb");
     }
 
     #[test]
