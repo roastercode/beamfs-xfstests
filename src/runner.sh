@@ -58,6 +58,10 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
   grep -q "^generic/$t " $R 2>/dev/null && continue
 
   T0=$(date +%s)
+  # A marker in the ring buffer, so the messages belonging to this test
+  # can be told from the ones before it. Without it "dmesg | tail" after
+  # a failure is a mix of this test and the twenty that came first.
+  sudo sh -c "echo 'beamfs-xfstests: BEGIN generic/$t' > /dev/kmsg" 2>/dev/null
   sudo umount /mnt/test /mnt/scratch 2>/dev/null
   sudo mkfs.beamfs $MKFS_OPTS /dev/$TEST_DEV >/dev/null 2>&1
   if ! sudo mount -t beamfs /dev/$TEST_DEV /mnt/test 2>/dev/null; then
@@ -99,7 +103,40 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
     WHY=$(echo "$OUT" | grep -oE '\[not run\].*' | head -1 | cut -c11-70)
     echo "generic/$t NOTRUN ${EL}s $WHY" >> $R
   elif echo "$OUT" | grep -q "^Passed all"; then
-    echo "generic/$t PASS ${EL}s" >> $R
+    # A test can pass while the kernel logs a BUG, a WARNING or an
+    # uncorrectable block. The harness does not look, so the run reports
+    # a green test over a filesystem that just corrupted something.
+    INC=$(sudo dmesg | sed -n "/BEGIN generic\/$t\$/,\$p" \
+          | grep -ciE "BUG:|WARNING:|Oops|call trace|uncorrectable|corrupt" 2>/dev/null)
+    INC=${INC:-0}
+
+    # And fsck after every test, not only after failures. beamfs has a
+    # checker that found four real defects in a day; a test that passes
+    # and leaves the volume inconsistent is exactly what it catches and
+    # exactly what the harness misses.
+    sudo umount /mnt/test 2>/dev/null
+    FSCK=$(sudo fsck.beamfs /dev/$TEST_DEV 2>&1)
+    FRC=$?
+    sudo mount -t beamfs /dev/$TEST_DEV /mnt/test 2>/dev/null
+
+    if [ "$INC" -gt 0 ] || [ $FRC -ne 0 ]; then
+      # Recorded as a failure, because it is one: the test's own
+      # criterion was met and the filesystem is still wrong.
+      echo "generic/$t FAIL ${EL}s dirty-pass incidents=$INC fsck=$FRC" >> $R
+      mkdir -p /tmp/xfs-failures
+      {
+        echo "=== test passed but left evidence ==="
+        echo "kernel incidents: $INC   fsck rc: $FRC"
+        echo ""
+        echo "=== fsck output ==="
+        echo "$FSCK"
+        echo ""
+        echo "=== kernel messages for this test ==="
+        sudo dmesg | sed -n "/BEGIN generic\/$t\$/,\$p" | head -60
+      } > "/tmp/xfs-failures/generic-$t.log" 2>&1
+    else
+      echo "generic/$t PASS ${EL}s" >> $R
+    fi
   else
     echo "generic/$t FAIL ${EL}s" >> $R
     # The whole harness output, plus what the kernel said while the test

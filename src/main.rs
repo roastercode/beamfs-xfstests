@@ -17,8 +17,10 @@
 //! TCG, and the suite is around 737 tests.
 
 mod config;
+mod history;
 mod journal;
 mod node;
+mod recovery;
 mod progress;
 mod result;
 
@@ -26,8 +28,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use config::Config;
+use history::History;
 use journal::Journal;
 use node::NodeConn;
+use recovery::Recovery;
 use progress::{Progress, StallDetector};
 use result::{Outcome, Summary, TestResult};
 
@@ -44,6 +48,8 @@ fn main() -> std::process::ExitCode {
 
     match args.get(1).map(String::as_str) {
         Some("report") => report(&cfg),
+        Some("history") => show_history(),
+        Some("compare") => compare_runs(args.get(2), args.get(3)),
         Some("stop") => stop(&cfg),
         Some("--help" | "-h") => usage(),
         _ => run(&cfg),
@@ -52,11 +58,13 @@ fn main() -> std::process::ExitCode {
 
 fn usage() -> std::process::ExitCode {
     eprintln!(
-        "usage: beamfs-xfstests [run|report|stop]\n\
+        "usage: beamfs-xfstests [run|report|history|compare|stop]\n\
          \n\
-         run     shard the suite across the nodes and follow it (default)\n\
-         report  summarise what the nodes have recorded so far\n\
-         stop    kill the shards and release the mounts\n\
+         run      shard the suite across the nodes and follow it (default)\n\
+         report   summarise what the nodes have recorded so far\n\
+         history  list saved runs\n\
+         compare  diff two runs; last two if unnamed\n\
+         stop     kill the shards and release the mounts\n\
          \n\
          environment:\n\
          \x20 XFSTESTS_TIMEOUT        seconds per test, default 300\n\
@@ -167,18 +175,33 @@ fn run(cfg: &Config) -> std::process::ExitCode {
             if let Some(d) = stalls.get_mut(&n.name) {
                 if d.update(count, blocked) && !done {
                     bar.clear();
-                    println!("  >>> {} wedged: {count} tests done, {blocked} blocked, on {cur}",
+                    println!("  >>> {} wedged: {count} done, {blocked} blocked, on {cur}",
                              n.name);
-                    // Gathered before stopping anything: killing the
-                    // shard first destroys the state that explains why
-                    // it stopped.
-                    let (stacks, dmesg, mounts) = c.stall_evidence();
-                    jr.stall_evidence(&n.name, &cur, &stacks, &dmesg, &mounts);
-                    for l in stacks.lines().take(10) {
-                        println!("      {l}");
+                    // Recover rather than record and move on. A node
+                    // left wedged is a quarter of the run silently
+                    // stopped, which is how two nodes sat at "No route
+                    // to host" for an hour on 2026-09-01 without anyone
+                    // noticing.
+                    let rec = Recovery::new(cfg);
+                    let dom = rec.domain_for(&n.name);
+                    let outcome = rec.recover(&c, &dom, &mut jr);
+                    println!("      recovery: {}", outcome.as_str());
+                    if outcome.usable() {
+                        // Relaunch its shard; the runner resumes from
+                        // what it already recorded.
+                        let cmd = format!(
+                            "nohup /tmp/xfs-runner.sh {} {} {} {} {} '{}' 1 \
+                             > /tmp/xfs-shard.log 2>&1 & echo restarted",
+                            n.test_dev, n.scratch_dev,
+                            ready.iter().position(|x| x.name == n.name).unwrap_or(0),
+                            ready.len(),
+                            cfg.per_test_timeout.as_secs(), cfg.mkfs_options);
+                        match c.run(&cmd, Duration::from_secs(30)) {
+                            Ok(_) => println!("      shard restarted"),
+                            Err(e) => println!("      restart failed: {e}"),
+                        }
                     }
-                    println!("      full evidence in {}", jr.path().display());
-                    c.stop();
+                    println!("      evidence: {}", jr.path().display());
                 }
             }
             per_node.push((n.name.clone(), cur, blocked));
@@ -219,8 +242,112 @@ fn run(cfg: &Config) -> std::process::ExitCode {
     if pulled > 0 {
         println!("  {pulled} failure logs in {}", jr.artifacts().display());
     }
+
+    // Saved before the report, and compared against the last run.
+    // Absolute counts say little; the delta is what a fix is judged on.
+    let hist = History::new(&History::default_root());
+    let mut all: Vec<result::TestResult> = Vec::new();
+    for n in &ready {
+        all.extend(NodeConn::new(n, cfg).results().unwrap_or_default());
+    }
+    let tag = run_tag();
+    match hist.save(&tag, &all) {
+        Ok(p) => println!("  results saved as {tag} in {}", p.display()),
+        Err(e) => println!("  could not save results: {e}"),
+    }
+    if let Some(base) = hist.baseline_for(&tag) {
+        if let Some(prev) = hist.load(&base) {
+            let d = History::compare(&prev, &all);
+            println!();
+            println!("  === AGAINST {base} ===");
+            println!("    unchanged {:>4}", d.unchanged);
+            println!("    fixed     {:>4}", d.fixed.len());
+            println!("    new       {:>4}", d.new.len());
+            println!("    missing   {:>4}", d.missing.len());
+            println!("    REGRESSED {:>4}", d.regressed.len());
+            for (t, o) in d.regressed.iter().take(20) {
+                println!("      {t:<16} passed before, now {}", o.as_str());
+            }
+            for t in d.fixed.iter().take(10) {
+                println!("      {t:<16} fixed");
+            }
+        }
+    }
     println!();
     report(cfg)
+}
+
+/// A sortable tag for this run: comparisons rely on lexical order.
+fn run_tag() -> String {
+    let s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{s:012}")
+}
+
+fn show_history() -> std::process::ExitCode {
+    let h = History::new(&History::default_root());
+    let runs = h.runs();
+    println!();
+    if runs.is_empty() {
+        println!("  no saved runs in {}", History::default_root().display());
+        return std::process::ExitCode::SUCCESS;
+    }
+    println!("  === SAVED RUNS ===");
+    for tag in runs.iter().take(20) {
+        if let Some(rs) = h.load(tag) {
+            let mut s = result::Summary::default();
+            for r in &rs {
+                s.add(r);
+            }
+            println!("    {tag}  {:>4} tests  {:>4} pass  {:>3} fail  {:>3} hang",
+                     s.attempted(), s.pass, s.fail, s.hang);
+        }
+    }
+    println!();
+    std::process::ExitCode::SUCCESS
+}
+
+fn compare_runs(a: Option<&String>, b: Option<&String>) -> std::process::ExitCode {
+    let h = History::new(&History::default_root());
+    let runs = h.runs();
+    let (base, cur) = match (a, b) {
+        (Some(x), Some(y)) => (x.clone(), y.clone()),
+        (Some(x), None) => (x.clone(), runs.first().cloned().unwrap_or_default()),
+        _ => {
+            if runs.len() < 2 {
+                eprintln!("
+  need two runs to compare
+");
+                return std::process::ExitCode::from(2);
+            }
+            (runs[1].clone(), runs[0].clone())
+        }
+    };
+    let (Some(p), Some(c)) = (h.load(&base), h.load(&cur)) else {
+        eprintln!("
+  cannot load {base} or {cur}
+");
+        return std::process::ExitCode::from(2);
+    };
+    let d = History::compare(&p, &c);
+    println!();
+    println!("  === {base} -> {cur} ===");
+    println!("    unchanged {:>4}", d.unchanged);
+    println!("    fixed     {:>4}", d.fixed.len());
+    println!("    new       {:>4}", d.new.len());
+    println!("    missing   {:>4}", d.missing.len());
+    println!("    REGRESSED {:>4}", d.regressed.len());
+    for (t, o) in &d.regressed {
+        println!("      {t:<16} was PASS, now {}", o.as_str());
+    }
+    println!();
+    if d.is_clean() {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
+    }
 }
 
 fn stop(cfg: &Config) -> std::process::ExitCode {
