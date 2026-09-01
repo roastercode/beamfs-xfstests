@@ -1,0 +1,14 @@
+[package]
+name = "beamfs-xfstests"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+authors = ["Aurelien Desbrieres <aurelien@hackers.camp>"]
+description = "Shard the kernel filesystem test suite across a cluster, one test at a time"
+
+[[bin]]
+name = "beamfs-xfstests"
+path = "src/main.rs"
+
+[profile.release]
+overflow-checks = true
