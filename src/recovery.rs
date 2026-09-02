@@ -161,7 +161,8 @@ impl<'a> Recovery<'a> {
             }
 
             if self.responsive(conn) {
-                println!("\r      back after {}s{:40}", i * 5, " ");
+                print!("\r{:100}\r", " ");
+                println!("      back after {}s", i * 5);
                 jr.line(&format!("{name}: back after {}s", i * 5));
                 return RecoveryOutcome::Restarted;
             }
@@ -170,7 +171,8 @@ impl<'a> Recovery<'a> {
             // it is stuck. Saying so beats waiting out the remaining
             // three minutes for the same answer.
             if quiet >= 12 && i > 8 {
-                println!("\r      console silent for 60s, boot is stuck{:24}", " ");
+                print!("\r{:100}\r", " ");
+                println!("      console silent for 60s, boot is stuck");
                 jr.line(&format!("{name}: console went silent during boot"));
                 break;
             }

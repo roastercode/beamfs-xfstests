@@ -111,6 +111,11 @@ impl StallDetector {
     }
 
     /// True when the node should be considered wedged.
+    ///
+    /// `count` is finished tests, `blocked` is tasks in D. Progress
+    /// resets the counter -- but see `update_with_hangs`, which is what
+    /// the run loop should use: a node producing nothing but timeouts
+    /// is progressing by this measure and wedged by any other.
     pub fn update(&mut self, count: usize, blocked: usize) -> bool {
         let moved = self.last_count != Some(count);
         self.last_count = Some(count);
@@ -136,6 +141,22 @@ impl StallDetector {
     #[allow(dead_code)]
     pub fn stalled_polls(&self) -> u32 {
         self.stalls
+    }
+
+    /// Progress that is only timeouts is not progress.
+    ///
+    /// A node whose every test ends in HANG advances its finished count
+    /// by one every twenty minutes, which resets a naive detector
+    /// forever. One node did exactly that overnight: 23 hangs, 14 tests
+    /// in four and a half hours, 130 tasks stuck, and nothing declared
+    /// it wedged because the number kept going up.
+    ///
+    /// Counting only tests that reached a verdict fixes it: hangs are
+    /// subtracted, so a run of pure timeouts looks as still as it is.
+    pub fn update_with_hangs(&mut self, count: usize, hangs: usize, blocked: usize)
+        -> bool
+    {
+        self.update(count.saturating_sub(hangs), blocked)
     }
 }
 
@@ -178,6 +199,27 @@ mod tests {
         assert!(!d.update(5, 1));
         assert!(!d.update(5, 1));
         assert!(d.update(5, 1));
+    }
+
+    #[test]
+    fn nothing_but_hangs_counts_as_stalled() {
+        // 20 finished, all of them timeouts: the raw count rises while
+        // the node achieves nothing.
+        let mut d = StallDetector::new(3);
+        assert!(!d.update_with_hangs(18, 18, 2));
+        assert!(!d.update_with_hangs(19, 19, 2));
+        assert!(!d.update_with_hangs(20, 20, 2));
+        assert!(d.update_with_hangs(21, 21, 2));
+    }
+
+    #[test]
+    fn real_progress_still_resets() {
+        let mut d = StallDetector::new(3);
+        assert!(!d.update_with_hangs(18, 18, 2));
+        assert!(!d.update_with_hangs(19, 19, 2));
+        // One test actually passed: the node is working.
+        assert!(!d.update_with_hangs(20, 19, 2));
+        assert!(!d.update_with_hangs(21, 20, 2));
     }
 
     #[test]

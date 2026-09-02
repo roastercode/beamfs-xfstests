@@ -98,7 +98,25 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
     echo "generic/$t HANG ${EL}s" >> $R
     sudo pkill -9 -f "tests/generic" 2>/dev/null
     sudo pkill -9 -f "/usr/xfstests/check" 2>/dev/null
-    sleep 2
+    # The workers the test spawned are named for themselves, not for the
+    # test, so killing the test leaves them behind. 128 fsstress
+    # processes accumulated this way on one node, each holding a folio
+    # lock the next test then waited on: every test after the first hang
+    # hung too, at 1200s each.
+    sudo pkill -9 fsstress fsx dd aio-dio-regress 2>/dev/null
+    sleep 3
+
+    # A task in uninterruptible sleep does not die on SIGKILL, so if any
+    # remain the node is not usable and no amount of killing will make
+    # it so. Stop here: the orchestrator sees the shard end, restarts
+    # the domain, and relaunches -- which resumes from this file.
+    STUCK=$(ps -eo state | grep -c '^D')
+    if [ "$STUCK" -gt 4 ]; then
+      echo "STUCK $STUCK tasks in D after generic/$t" >> $R
+      sudo umount -l /mnt/test /mnt/scratch 2>/dev/null
+      echo "DONE" >> $R
+      exit 0
+    fi
   elif echo "$OUT" | grep -q "\[not run\]"; then
     WHY=$(echo "$OUT" | grep -oE '\[not run\].*' | head -1 | cut -c11-70)
     echo "generic/$t NOTRUN ${EL}s $WHY" >> $R

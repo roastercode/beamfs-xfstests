@@ -21,6 +21,22 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// Erase the status line before printing anything else.
+///
+/// The status line is written with \r and no newline, so it leaves the
+/// cursor mid-line. A println! after it starts where the cursor sits
+/// and the output walks diagonally down the terminal, which is what
+/// every run of this looked like.
+fn clear_line() {
+    print!("\r{:100}\r", " ");
+    let _ = std::io::stdout().flush();
+}
+
+/// Print a line, having first cleared whatever status was there.
+macro_rules! say {
+    ($($a:tt)*) => {{ clear_line(); println!($($a)*); }};
+}
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -85,6 +101,9 @@ impl<'a> Probe<'a> {
     pub fn run(&self, node_name: &str, test: &str, limit: Duration, jr: &mut Journal)
         -> ProbeEnd
     {
+        // Before the console is opened, so there is nothing to clean up
+        // on this path. Every return after the capture starts goes
+        // through finish(), which kills it.
         let Some(node) = self.cfg.nodes.iter().find(|n| n.name == node_name) else {
             eprintln!("  unknown node {node_name}");
             return ProbeEnd::NodeLost;
@@ -98,9 +117,9 @@ impl<'a> Probe<'a> {
         let console_path = self.out.join(format!("console-{safe}.log"));
         let mut console = self.console_capture(&domain, &console_path);
         if console.is_some() {
-            println!("  console -> {}", console_path.display());
+            say!("  console -> {}", console_path.display());
         } else {
-            println!("  console unavailable; guest-side data only");
+            say!("  console unavailable; guest-side data only");
         }
 
         // Deploy and launch, detached from the ssh session so the
@@ -108,7 +127,7 @@ impl<'a> Probe<'a> {
         let script = include_str!("probe.sh");
         let tmp = std::env::temp_dir().join(format!("probe-{}.sh", std::process::id()));
         if let Err(e) = std::fs::write(&tmp, script) {
-            println!("  cannot stage the probe: {e}");
+            say!("  cannot stage the probe: {e}");
             if let Some(c) = console.as_mut() {
                 let _ = c.kill();
             }
@@ -118,10 +137,10 @@ impl<'a> Probe<'a> {
         // as one destroyed a healthy machine and then declared its boot
         // stuck, which is two wrong answers from one bad assumption.
         if let Err(e) = conn.push(tmp.to_str().unwrap_or_default(), "/tmp/probe.sh") {
-            println!("  cannot deploy the probe: {e}");
+            say!("  cannot deploy the probe: {e}");
             jr.line(&format!("push failed: {e}"));
             let alive = conn.run("true", Duration::from_secs(15)).is_ok();
-            println!("  node is {}", if alive { "alive; not touching it" } else { "unreachable" });
+            say!("  node is {}", if alive { "alive; not touching it" } else { "unreachable" });
             if let Some(c) = console.as_mut() {
                 let _ = c.kill();
             }
@@ -140,9 +159,9 @@ impl<'a> Probe<'a> {
         // timeout here says nothing about whether it started; only
         // looking does.
         match conn.run(&launch, Duration::from_secs(60)) {
-            Ok(o) if o.contains("running") => println!("  probe running"),
+            Ok(o) if o.contains("running") => say!("  probe running"),
             Ok(o) => {
-                println!("  probe did not start: {}", o.trim());
+                say!("  probe did not start: {}", o.trim());
                 jr.command(node_name, &launch, &o, false);
             }
             Err(e) => {
@@ -153,9 +172,9 @@ impl<'a> Probe<'a> {
                     .map(|o| o.contains("yes"))
                     .unwrap_or(false);
                 if up {
-                    println!("  probe running (launch call timed out, process is there)");
+                    say!("  probe running (launch call timed out, process is there)");
                 } else {
-                    println!("  launch failed: {e}");
+                    say!("  launch failed: {e}");
                 }
             }
         }
@@ -211,8 +230,7 @@ impl<'a> Probe<'a> {
                            el.as_secs());
                     let _ = std::io::stdout().flush();
                     if misses >= 3 {
-                        println!();
-                        println!("  NODE LOST after {}s", el.as_secs());
+                        say!("  NODE LOST after {}s", el.as_secs());
                         end = ProbeEnd::NodeLost;
                         break;
                     }
@@ -220,14 +238,13 @@ impl<'a> Probe<'a> {
             }
 
             if el > limit + Duration::from_secs(120) {
-                println!();
-                println!("  limit reached with the probe still running");
+                say!("  limit reached with the probe still running");
                 end = ProbeEnd::Timeout;
                 break;
             }
             std::thread::sleep(Duration::from_secs(10));
         }
-        println!();
+        clear_line();
 
         // Whatever the outcome, take what exists rather than waiting for
         // an archive a dead node will never produce.
@@ -239,7 +256,7 @@ impl<'a> Probe<'a> {
             let _ = c.wait();
         }
         if let Ok(m) = std::fs::metadata(&console_path) {
-            println!("  console: {} bytes", m.len());
+            say!("  console: {} bytes", m.len());
             if m.len() > 0 {
                 if let Ok(s) = std::fs::read_to_string(&console_path) {
                     jr.section("SERIAL CONSOLE");
@@ -287,14 +304,14 @@ impl<'a> Probe<'a> {
                      .unwrap_or("")
                      .to_string())
                 .unwrap_or_default();
-            println!();
-            println!("  archive : {}", dest.display());
-            println!("  size    : {size} bytes");
+            say!("");
+            say!("  archive : {}", dest.display());
+            say!("  size    : {size} bytes");
             if !sum.is_empty() {
-                println!("  sha256  : {sum}");
+                say!("  sha256  : {sum}");
             }
         } else {
-            println!("  could not archive {}", self.out.display());
+            say!("  could not archive {}", self.out.display());
         }
     }
 
@@ -302,7 +319,7 @@ impl<'a> Probe<'a> {
     fn collect(&self, conn: &NodeConn, safe: &str, end: ProbeEnd, jr: &mut Journal) {
         let dir = format!("/tmp/probe-{safe}");
         if end == ProbeEnd::NodeLost {
-            println!("  node is gone; nothing to pull from it");
+            say!("  node is gone; nothing to pull from it");
             jr.line("collection skipped: node unreachable");
             return;
         }
@@ -313,7 +330,7 @@ impl<'a> Probe<'a> {
                 if !body.trim().is_empty() {
                     let p = self.out.join(format!("{safe}-{f}"));
                     let _ = std::fs::write(&p, &body);
-                    println!("  {} ({} bytes)", p.display(), body.len());
+                    say!("  {} ({} bytes)", p.display(), body.len());
                 }
             }
         }

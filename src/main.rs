@@ -146,14 +146,29 @@ fn run(cfg: &Config) -> std::process::ExitCode {
             cfg.per_test_timeout.as_secs(), cfg.mkfs_options,
             u8::from(cfg.resume),
         );
-        match c.run(&cmd, Duration::from_secs(30)) {
+        // A launch command that ends in a sleep keeps the ssh session
+        // open past a short deadline, so a timeout here says nothing
+        // about whether the shard started. Asking is the only way to
+        // know, and reporting failure without asking is how four
+        // healthy shards were declared dead while they ran all night.
+        match c.run(&cmd, Duration::from_secs(60)) {
             Ok(o) => {
                 println!("    {:<10} shard {idx}/{nshard}", n.name);
                 jr.command(&n.name, &cmd, &o, true);
             }
             Err(e) => {
-                println!("    {:<10} launch failed: {e}", n.name);
                 jr.command(&n.name, &cmd, &e.to_string(), false);
+                let up = c
+                    .run("pgrep -f xfs-runner.sh > /dev/null && echo yes || echo no",
+                         Duration::from_secs(20))
+                    .map(|o| o.contains("yes"))
+                    .unwrap_or(false);
+                if up {
+                    println!("    {:<10} shard {idx}/{nshard} (launch call timed out, running)",
+                             n.name);
+                } else {
+                    println!("    {:<10} launch failed: {e}", n.name);
+                }
             }
         }
     }
@@ -175,6 +190,7 @@ fn run(cfg: &Config) -> std::process::ExitCode {
             let c = NodeConn::new(n, cfg);
             let rs = c.results().unwrap_or_default();
             let count = rs.len();
+            let hangs = rs.iter().filter(|r| r.outcome == Outcome::Hang).count();
             let blocked = c.blocked_tasks();
             let cur = c.current_test().unwrap_or_default();
             let done = c.is_done();
@@ -183,7 +199,11 @@ fn run(cfg: &Config) -> std::process::ExitCode {
                 active += 1;
             }
             if let Some(d) = stalls.get_mut(&n.name) {
-                if d.update(count, blocked) && !done {
+                // Hangs excluded from progress: a node timing out every
+                // test advances its count forever without achieving
+                // anything, which kept a wedged node alive in the
+                // detector's eyes all night.
+                if d.update_with_hangs(count, hangs, blocked) && !done {
                     bar.clear();
                     println!("  >>> {} wedged: {count} done, {blocked} blocked, on {cur}",
                              n.name);
@@ -197,20 +217,29 @@ fn run(cfg: &Config) -> std::process::ExitCode {
                     let outcome = rec.recover(&c, &dom, &mut jr);
                     println!("      recovery: {}", outcome.as_str());
                     if outcome.usable() {
-                        // Relaunch its shard; the runner resumes from
-                        // what it already recorded.
+                        // Redeploy first: a restarted domain comes back
+                        // with a fresh filesystem and no runner on it.
+                        // Relaunching without this fails silently and
+                        // the node sits idle for the rest of the run.
+                        let _ = c.push(tmp.to_str().unwrap_or_default(),
+                                       "/tmp/xfs-runner.sh");
                         let cmd = format!(
-                            "setsid /tmp/xfs-runner.sh {} {} {} {} {} '{}' 1 \
+                            "chmod +x /tmp/xfs-runner.sh; \
+                             setsid /tmp/xfs-runner.sh {} {} {} {} {} '{}' 1 \
                              < /dev/null > /tmp/xfs-shard.log 2>&1 & \
                              sleep 1; echo restarted",
                             n.test_dev, n.scratch_dev,
                             ready.iter().position(|x| x.name == n.name).unwrap_or(0),
                             ready.len(),
                             cfg.per_test_timeout.as_secs(), cfg.mkfs_options);
-                        match c.run(&cmd, Duration::from_secs(30)) {
+                        match c.run(&cmd, Duration::from_secs(40)) {
                             Ok(_) => println!("      shard restarted"),
                             Err(e) => println!("      restart failed: {e}"),
                         }
+                        // Fresh detector, or the next poll sees the same
+                        // count it saw before the recovery and declares
+                        // the node wedged again immediately.
+                        *d = StallDetector::new(STALL_LIMIT);
                     }
                     println!("      evidence: {}", jr.path().display());
                 }
@@ -319,10 +348,19 @@ fn do_probe(cfg: &Config, test: Option<&String>, node: Option<&String>)
     println!("  journal : {}", jr.path().display());
     println!();
 
+    // Configurable, because 300 was short enough to class slow tests
+    // as hangs: generic/027 needs more than 900 seconds under TCG and
+    // is not stuck while it takes them.
+    let secs = std::env::var("XFSTESTS_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(900);
     let p = Probe::new(cfg, &out);
-    let end = p.run(&node, test, Duration::from_secs(900), &mut jr);
+    let end = p.run(&node, test, Duration::from_secs(secs), &mut jr);
 
-    println!();
+    // The status line is written with \r and no newline; anything
+    // printed after it without clearing walks across the terminal.
+    print!("\r{:100}\r", " ");
     println!("  outcome : {end:?}");
 
     // A lost node is left recovered, not left dead. The next command
