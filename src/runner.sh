@@ -62,7 +62,29 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
   # can be told from the ones before it. Without it "dmesg | tail" after
   # a failure is a mix of this test and the twenty that came first.
   sudo sh -c "echo 'beamfs-xfstests: BEGIN generic/$t' > /dev/kmsg" 2>/dev/null
-  sudo umount /mnt/test /mnt/scratch 2>/dev/null
+
+  # Unmount until nothing is left, not once.
+  #
+  # A single umount that fails silently -- the volume is busy, a test
+  # left a process on it -- leaves the mount in place, and the mount
+  # below stacks a second one on the same directory. The harness then
+  # refuses to start with "is mounted but not on TEST_DIR", every test
+  # after that fails in six seconds, and a shard produces 167 failures
+  # and 2 passes. That is exactly what one node did.
+  for _ in 1 2 3 4 5; do
+    mountpoint -q /mnt/test || mountpoint -q /mnt/scratch || break
+    sudo umount /mnt/test 2>/dev/null
+    sudo umount /mnt/scratch 2>/dev/null
+    sleep 1
+  done
+  # Anything still there is held by something that will not let go;
+  # lazy-unmount it so the namespace is at least clean for the mount.
+  sudo umount -l /mnt/test /mnt/scratch 2>/dev/null
+
+  if mountpoint -q /mnt/test; then
+    echo "generic/$t MOUNTFAIL $(( $(date +%s) - T0 ))s stale mount on TEST_DIR" >> $R
+    continue
+  fi
   sudo mkfs.beamfs $MKFS_OPTS /dev/$TEST_DEV >/dev/null 2>&1
   if ! sudo mount -t beamfs /dev/$TEST_DEV /mnt/test 2>/dev/null; then
     echo "generic/$t MOUNTFAIL $(( $(date +%s) - T0 ))s" >> $R
@@ -70,8 +92,41 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
   fi
 
   cd /usr/xfstests || exit 1
+
+  # Watched while it runs, not examined afterwards.
+  #
+  # timeout -k kills the test and everything under it, so a capture
+  # taken after the fact finds nothing: the tasks that were stuck are
+  # gone and the log says "blocked tasks at kill time" over an empty
+  # list. Three hangs were recorded that way with no evidence at all.
+  #
+  # The watcher samples every thirty seconds and keeps only the last
+  # sample that had anything in it, so what lands in the log is the
+  # state as close to the kill as this can get.
+  W=/tmp/xfs-watch-$t
+  : > "$W"
+  (
+    while true; do
+      sleep 30
+      N=$(ps -eo state | grep -c '^D')
+      [ "$N" -eq 0 ] && continue
+      {
+        echo "=== $(( $(date +%s) - T0 ))s into generic/$t: $N tasks in D ==="
+        for p in $(ps -eo pid,state | awk '$2 ~ /^D/ {print $1}' | head -6); do
+          echo "--- pid $p $(ps -o comm= -p "$p" 2>/dev/null) $(ps -o etime= -p "$p" 2>/dev/null) ---"
+          sudo cat "/proc/$p/stack" 2>/dev/null | head -12
+        done
+        echo "--- io ---"
+        grep -E " ($TEST_DEV|$SCRATCH_DEV) " /proc/diskstats
+      } > "$W" 2>&1
+    done
+  ) &
+  WATCHER=$!
+
   OUT=$(sudo timeout -k 10 "$LIMIT" ./check "generic/$t" 2>&1)
   RC=$?
+  kill -9 $WATCHER 2>/dev/null
+  wait $WATCHER 2>/dev/null
   EL=$(( $(date +%s) - T0 ))
 
   if [ $RC -eq 124 ]; then
@@ -83,7 +138,10 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
     # orchestrator's own attempt arrives too late.
     mkdir -p /tmp/xfs-failures
     {
-      echo "=== blocked tasks at kill time ==="
+      echo "=== last sample before the kill ==="
+      cat "$W" 2>/dev/null
+      echo ""
+      echo "=== what is left now ==="
       for p in $(ps -eo pid,state | awk '$2 ~ /D/ {print $1}' | head -5); do
         echo "--- pid $p $(ps -o comm= -p $p) $(ps -o etime= -p $p) ---"
         sudo cat /proc/$p/stack 2>/dev/null | head -12
@@ -104,6 +162,7 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
     # lock the next test then waited on: every test after the first hang
     # hung too, at 1200s each.
     sudo pkill -9 fsstress fsx dd aio-dio-regress 2>/dev/null
+    rm -f "$W"
     sleep 3
 
     # A task in uninterruptible sleep does not die on SIGKILL, so if any

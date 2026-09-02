@@ -17,6 +17,7 @@
 //! TCG, and the suite is around 737 tests.
 
 mod config;
+mod console;
 mod history;
 mod journal;
 mod node;
@@ -29,9 +30,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use config::Config;
+use console::ConsoleSet;
 use history::History;
 use journal::Journal;
-use node::NodeConn;
+use node::{NodeConn, ShardState};
 use probe::Probe;
 use recovery::Recovery;
 use progress::{Progress, StallDetector};
@@ -173,6 +175,20 @@ fn run(cfg: &Config) -> std::process::ExitCode {
         }
     }
 
+    // Consoles first, and for every node, not just the one being
+    // watched. A kernel that panics prints to the console and stops;
+    // nothing reaches dmesg because there is no machine left to read
+    // it. Opening the console after noticing the silence returns
+    // nothing, which is how two nodes died overnight unexplained.
+    let mut consoles = ConsoleSet::new(&std::env::temp_dir().join("beamfs-consoles"));
+    println!();
+    println!("  === CONSOLES ===");
+    for n in &ready {
+        let ok = consoles.start(&n.name, &format!("beamfs-{}", n.name));
+        println!("    {:<10} {}", n.name,
+                 if ok { "capturing" } else { "unavailable" });
+    }
+
     println!();
     println!("  === RUNNING ===");
     let mut bar = Progress::new(SUITE_SIZE);
@@ -193,20 +209,49 @@ fn run(cfg: &Config) -> std::process::ExitCode {
             let hangs = rs.iter().filter(|r| r.outcome == Outcome::Hang).count();
             let blocked = c.blocked_tasks();
             let cur = c.current_test().unwrap_or_default();
-            let done = c.is_done();
+            let state = c.shard_state();
 
-            if !done {
+            // Unreachable and Stuck both need recovery; only Done is
+            // finished. Counting Unreachable as working is what kept
+            // the loop alive for hours after three shards had ended.
+            let needs_recovery = matches!(
+                state, ShardState::Unreachable | ShardState::Stuck);
+            if state != ShardState::Done {
                 active += 1;
             }
+
             if let Some(d) = stalls.get_mut(&n.name) {
                 // Hangs excluded from progress: a node timing out every
                 // test advances its count forever without achieving
                 // anything, which kept a wedged node alive in the
                 // detector's eyes all night.
-                if d.update_with_hangs(count, hangs, blocked) && !done {
+                let stalled = d.update_with_hangs(count, hangs, blocked);
+                if (stalled || needs_recovery) && state != ShardState::Done {
                     bar.clear();
-                    println!("  >>> {} wedged: {count} done, {blocked} blocked, on {cur}",
-                             n.name);
+                    println!("  >>> {} {:?}: {count} done, {blocked} blocked, on {cur}",
+                             n.name, state);
+                    // The console already holds the answer if the
+                    // kernel died. Read it before touching anything:
+                    // restarting the domain takes the pty with it.
+                    if let Some(p) = consoles.panic_of(&n.name) {
+                        println!("      KERNEL PANIC on {}:", n.name);
+                        for l in p.lines().take(14) {
+                            println!("        {l}");
+                        }
+                        jr.section(&format!("PANIC on {}", n.name));
+                        for l in p.lines() {
+                            jr.line(l);
+                        }
+                    } else {
+                        let t = consoles.tail(&n.name, 12);
+                        if !t.trim().is_empty() {
+                            jr.section(&format!("CONSOLE TAIL {}", n.name));
+                            for l in t.lines() {
+                                jr.line(l);
+                            }
+                        }
+                    }
+
                     // Recover rather than record and move on. A node
                     // left wedged is a quarter of the run silently
                     // stopped, which is how two nodes sat at "No route
@@ -214,8 +259,12 @@ fn run(cfg: &Config) -> std::process::ExitCode {
                     // noticing.
                     let rec = Recovery::new(cfg);
                     let dom = rec.domain_for(&n.name);
+                    // The pty dies with the domain, so stop reading it
+                    // first and start again once it is back.
+                    consoles.stop(&n.name);
                     let outcome = rec.recover(&c, &dom, &mut jr);
                     println!("      recovery: {}", outcome.as_str());
+                    consoles.start(&n.name, &dom);
                     if outcome.usable() {
                         // Redeploy first: a restarted domain comes back
                         // with a fresh filesystem and no runner on it.
@@ -263,7 +312,14 @@ fn run(cfg: &Config) -> std::process::ExitCode {
     }
 
     bar.clear();
+    consoles.stop_all();
     println!("  === DONE in {} min ===", bar.elapsed().as_secs() / 60);
+    for n in &ready {
+        if let Some(p) = consoles.path_of(&n.name) {
+            let sz = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            println!("    console {:<10} {sz} bytes  {}", n.name, p.display());
+        }
+    }
 
     // Pulled once at the end rather than as they happen: a failing test
     // produces hundreds of lines of diff, and four nodes' worth

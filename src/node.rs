@@ -15,6 +15,21 @@ use std::time::Duration;
 use crate::config::{Config, Node};
 use crate::result::TestResult;
 
+/// What a shard is doing, as far as can be told from outside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShardState {
+    Running,
+    /// Finished its list.
+    Done,
+    /// Gave up: tasks stuck in uninterruptible sleep, which no amount
+    /// of killing clears. Needs the domain restarted and the shard
+    /// relaunched, not to be counted as finished.
+    Stuck,
+    /// No answer. Not the same as finished, and not the same as
+    /// working.
+    Unreachable,
+}
+
 #[derive(Debug)]
 pub enum NodeError {
     Unreachable(String),
@@ -142,12 +157,25 @@ impl<'a> NodeConn<'a> {
             .collect())
     }
 
-    /// Has this node finished its shard?
-    pub fn is_done(&self) -> bool {
-        self.run("grep -qc '^DONE' /tmp/xfs-results.txt 2>/dev/null && echo 1 || echo 0",
-                 Duration::from_secs(15))
-            .map(|s| s.trim() == "1")
-            .unwrap_or(false)
+    /// Where a shard stands.
+    ///
+    /// Three states, not two. A node that cannot be reached is neither
+    /// working nor finished, and calling it either is wrong in a way
+    /// that costs hours: unwrap_or(false) made an unreachable node
+    /// "still working", so the run loop waited on it forever while
+    /// three shards that had actually finished sat idle.
+    pub fn shard_state(&self) -> ShardState {
+        match self.run(
+            "if grep -q '^STUCK' /tmp/xfs-results.txt 2>/dev/null; then echo stuck; \
+             elif grep -q '^DONE' /tmp/xfs-results.txt 2>/dev/null; then echo done; \
+             else echo running; fi",
+            Duration::from_secs(15),
+        ) {
+            Ok(o) if o.contains("stuck") => ShardState::Stuck,
+            Ok(o) if o.contains("done") => ShardState::Done,
+            Ok(_) => ShardState::Running,
+            Err(_) => ShardState::Unreachable,
+        }
     }
 
     /// The test currently running, if any.
