@@ -196,6 +196,12 @@ fn run(cfg: &Config) -> std::process::ExitCode {
         .iter()
         .map(|n| (n.name.clone(), StallDetector::new(STALL_LIMIT)))
         .collect();
+    // Recoveries attempted per node. A node that has been through it
+    // several times gets a shorter escalation, and one that has been
+    // through it many times is written off rather than relaunched into
+    // the same state for the rest of the run.
+    let mut attempts: BTreeMap<String, u32> = BTreeMap::new();
+    let mut written_off: BTreeMap<String, bool> = BTreeMap::new();
 
     loop {
         let mut all = Vec::new();
@@ -226,7 +232,11 @@ fn run(cfg: &Config) -> std::process::ExitCode {
                 // anything, which kept a wedged node alive in the
                 // detector's eyes all night.
                 let stalled = d.update_with_hangs(count, hangs, blocked);
-                if (stalled || needs_recovery) && state != ShardState::Done {
+                if written_off.get(&n.name).copied().unwrap_or(false) {
+                    // Already given up on. Counted as finished so the
+                    // loop can end, and left alone.
+                    active = active.saturating_sub(1);
+                } else if (stalled || needs_recovery) && state != ShardState::Done {
                     bar.clear();
                     println!("  >>> {} {:?}: {count} done, {blocked} blocked, on {cur}",
                              n.name, state);
@@ -262,9 +272,29 @@ fn run(cfg: &Config) -> std::process::ExitCode {
                     // The pty dies with the domain, so stop reading it
                     // first and start again once it is back.
                     consoles.stop(&n.name);
-                    let outcome = rec.recover(&c, &dom, &mut jr);
-                    println!("      recovery: {}", outcome.as_str());
+                    let tries = attempts.entry(n.name.clone()).or_insert(0);
+                    *tries += 1;
+                    let this_try = *tries;
+
+                    let outcome = rec.recover(&c, &dom, this_try - 1, &mut jr);
+                    println!("      recovery: {} (attempt {this_try})",
+                             outcome.as_str());
                     consoles.start(&n.name, &dom);
+
+                    // Six recoveries and still stalling: the node is not
+                    // going to finish, and relaunching it produces
+                    // results from a machine in a state nobody would
+                    // trust. One node did that for a whole run and
+                    // returned 345 results for a 185-test shard.
+                    if this_try >= 6 {
+                        println!("      giving up on {} after {this_try} recoveries",
+                                 n.name);
+                        jr.line(&format!("{}: written off after {this_try} recoveries",
+                                         n.name));
+                        written_off.insert(n.name.clone(), true);
+                        c.stop();
+                        continue;
+                    }
                     if outcome.usable() {
                         // Redeploy first: a restarted domain comes back
                         // with a fresh filesystem and no runner on it.
@@ -337,6 +367,65 @@ fn run(cfg: &Config) -> std::process::ExitCode {
     }
     if pulled > 0 {
         println!("  {pulled} failure logs in {}", jr.artifacts().display());
+    }
+
+    // Everything the run produced, in one archive.
+    //
+    // A campaign leaves a journal, four console logs, a failure log per
+    // failing test and the results themselves -- scattered across two
+    // directories and four machines, and only useful together. Probe
+    // has done this since it was written; run had not, so seven and a
+    // half hours of evidence needed collecting by hand afterwards.
+    {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let stage = std::env::temp_dir().join(format!("xfstests-run-{stamp}"));
+        let _ = std::fs::create_dir_all(&stage);
+
+        // The per-node results, which live nowhere else once the VMs
+        // are redeployed.
+        for n in &ready {
+            let c = NodeConn::new(n, cfg);
+            if let Ok(body) = c.run("cat /tmp/xfs-results.txt 2>/dev/null",
+                                    Duration::from_secs(60)) {
+                let _ = std::fs::write(stage.join(format!("results-{}.txt", n.name)),
+                                       body);
+            }
+        }
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "cp -r {} {} {}/ 2>/dev/null;                  cp {}/console-*.log {}/ 2>/dev/null; true",
+                jr.path().display(), jr.artifacts().display(),
+                stage.display(),
+                std::env::temp_dir().join("beamfs-consoles").display(),
+                stage.display()))
+            .output();
+
+        let dest = std::env::temp_dir().join(format!("xfstests-run-{stamp}.tar.gz"));
+        let ok = std::process::Command::new("tar")
+            .arg("czf").arg(&dest)
+            .arg("-C").arg(std::env::temp_dir())
+            .arg(format!("xfstests-run-{stamp}"))
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+            let sum = std::process::Command::new("sha256sum")
+                .arg(&dest).output().ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout)
+                     .split_whitespace().next().unwrap_or("").to_string())
+                .unwrap_or_default();
+            println!();
+            println!("  archive : {}", dest.display());
+            println!("  size    : {size} bytes");
+            if !sum.is_empty() {
+                println!("  sha256  : {sum}");
+            }
+        }
     }
 
     // Saved before the report, and compared against the last run.
@@ -427,7 +516,8 @@ fn do_probe(cfg: &Config, test: Option<&String>, node: Option<&String>)
         if let Some(n) = cfg.nodes.iter().find(|n| n.name == node) {
             let c = NodeConn::new(n, cfg);
             let r = Recovery::new(cfg);
-            let outcome = r.recover(&c, &r.domain_for(&node), &mut jr);
+            // First recovery for this node: the full escalation.
+            let outcome = r.recover(&c, &r.domain_for(&node), 0, &mut jr);
             println!("  {}", outcome.as_str());
         }
     }

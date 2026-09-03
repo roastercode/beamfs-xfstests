@@ -74,9 +74,15 @@ impl<'a> Recovery<'a> {
         Self { cfg }
     }
 
-    /// Bring `node` back, escalating until it answers or is written off.
-    pub fn recover(&self, conn: &NodeConn, domain: &str, jr: &mut Journal)
-        -> RecoveryOutcome
+    /// Bring `node` back, escalating until it is usable or written off.
+    ///
+    /// `attempt` is how many times this node has already been through
+    /// here during the run. Repeated recoveries are a signal in
+    /// themselves: a node needing a third one is not having bad luck,
+    /// it is failing in a way killing does not address, so the
+    /// escalation starts further along.
+    pub fn recover(&self, conn: &NodeConn, domain: &str, attempt: u32,
+                   jr: &mut Journal) -> RecoveryOutcome
     {
         let name = conn.node.name.clone();
         jr.section(&format!("RECOVERY {name}"));
@@ -85,19 +91,28 @@ impl<'a> Recovery<'a> {
         let (stacks, dmesg, mounts) = conn.stall_evidence();
         jr.stall_evidence(&name, "(stall)", &stacks, &dmesg, &mounts);
 
-        // Step 1: the cheap one.
-        println!("      step 1: killing the shard");
-        jr.line(&format!("{name}: step 1, killing the shard"));
-        conn.stop();
-        if self.responsive(conn) {
-            jr.line(&format!("{name}: recovered by kill"));
-            return RecoveryOutcome::Killed;
+        // Step 1, but only the first two times. A node that has
+        // already been killed twice and come back blocked will come
+        // back blocked a third time; going straight to the restart
+        // saves the round trip and, more to the point, actually works.
+        if attempt < 2 {
+            println!("      step 1: killing the shard");
+            jr.line(&format!("{name}: step 1, killing the shard (attempt {attempt})"));
+            conn.stop();
+            if self.responsive(conn) {
+                jr.line(&format!("{name}: recovered by kill"));
+                return RecoveryOutcome::Killed;
+            }
+        } else {
+            println!("      attempt {attempt}: skipping the kill, it has not worked");
+            jr.line(&format!("{name}: attempt {attempt}, escalating past the kill"));
         }
 
-        // Step 2: sysrq. Runs in interrupt context, so it works when the
-        // filesystem does not. 'w' dumps blocked tasks -- the only way
-        // to get stacks out of a node that has stopped answering ssh --
-        // and 'u' remounts everything read-only, which releases tasks
+        // Step 2: sysrq, and only while the kill is still worth trying.
+        // Runs in interrupt context, so it works when the filesystem
+        // does not. 'w' dumps blocked tasks -- the only way to get
+        // stacks out of a node that has stopped answering ssh -- and
+        // 'u' remounts everything read-only, which releases tasks
         // waiting on writeback.
         println!("      step 2: sysrq w (task dump) then u (remount ro)");
         jr.line(&format!("{name}: step 2, sysrq w then u"));
@@ -183,9 +198,28 @@ impl<'a> Recovery<'a> {
         RecoveryOutcome::Lost
     }
 
-    /// Does the node answer a trivial command?
+    /// Is the node fit to take work again?
+    ///
+    /// Answering ssh is not the same as being usable. A node with eighty
+    /// tasks in uninterruptible sleep replies to every command and
+    /// cannot run a test: the mounts are held, the next test inherits
+    /// them, and it wedges too.
+    ///
+    /// Treating "replies" as "recovered" is why one node was killed and
+    /// relaunched about a hundred and fifty times in a single run,
+    /// staying at eighty blocked tasks throughout, and produced 345
+    /// results for a 185-test shard -- every one of them from a machine
+    /// that was never actually repaired.
+    ///
+    /// SIGKILL does not clear D-state, so if any remain after the kill
+    /// the only remedy is a restart. The threshold is four rather than
+    /// zero: a few tasks are briefly in D on any write, and demanding a
+    /// perfectly idle node would restart healthy ones.
     fn responsive(&self, conn: &NodeConn) -> bool {
-        conn.run("true", Duration::from_secs(12)).is_ok()
+        if conn.run("true", Duration::from_secs(12)).is_err() {
+            return false;
+        }
+        conn.blocked_tasks() <= 4
     }
 
     /// Poke sysrq through the hypervisor.
