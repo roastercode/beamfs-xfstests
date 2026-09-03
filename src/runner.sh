@@ -14,6 +14,15 @@ TEST_DEV=$1; SCRATCH_DEV=$2; SHARD=$3; NSHARD=$4
 LIMIT=${5:-300}; MKFS_OPTS=${6:--N 16384}; RESUME=${7:-1}
 R=/tmp/xfs-results.txt
 
+# The node's own record, running beside the shard for the whole
+# campaign. Every diagnosis this week started with a node that had
+# stopped and no way to say what it had been doing beforehand; this is
+# that record, and it costs a /proc read every ten seconds.
+if [ -x /tmp/xfs-watch.sh ]; then
+	pkill -f xfs-watch.sh 2>/dev/null
+	setsid /tmp/xfs-watch.sh < /dev/null > /dev/null 2>&1 &
+fi
+
 [ "$RESUME" = "1" ] || : > $R
 touch $R
 

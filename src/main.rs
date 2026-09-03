@@ -139,6 +139,14 @@ fn run(cfg: &Config) -> std::process::ExitCode {
         // leaves stdout attached to the connection, so the session stays
         // open for the whole run and the launch times out while the
         // shard is in fact running perfectly well.
+        // The watcher goes over first: the runner starts it, and a
+        // shard that runs without one leaves the same blind spot every
+        // failure this week was found in.
+        let watch = std::env::temp_dir().join("xfs-watch.sh");
+        let _ = std::fs::write(&watch, include_str!("watch.sh"));
+        let _ = c.push(watch.to_str().unwrap_or_default(), "/tmp/xfs-watch.sh");
+        let _ = c.run("chmod +x /tmp/xfs-watch.sh", Duration::from_secs(20));
+
         let cmd = format!(
             "chmod +x /tmp/xfs-runner.sh && \
              setsid /tmp/xfs-runner.sh {} {} {idx} {nshard} {} '{}' {} \
@@ -362,6 +370,15 @@ fn run(cfg: &Config) -> std::process::ExitCode {
                                     Duration::from_secs(30)) {
                 if !body.trim().is_empty() {
                     let p = jr.artifacts().join(format!("results-{}.txt", n.name));
+                    let _ = std::fs::write(p, body);
+                }
+            }
+            // And the watcher's log, which is the only account of what
+            // the node was doing between polls.
+            if let Ok(body) = c.run("cat /tmp/xfs-watch.log 2>/dev/null",
+                                    Duration::from_secs(45)) {
+                if !body.trim().is_empty() {
+                    let p = jr.artifacts().join(format!("watch-{}.log", n.name));
                     let _ = std::fs::write(p, body);
                 }
             }
