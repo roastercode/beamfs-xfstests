@@ -202,6 +202,8 @@ fn run(cfg: &Config) -> std::process::ExitCode {
     // the same state for the rest of the run.
     let mut attempts: BTreeMap<String, u32> = BTreeMap::new();
     let mut written_off: BTreeMap<String, bool> = BTreeMap::new();
+    // Failure logs already pulled, so each is fetched once.
+    let mut have_log: BTreeMap<String, bool> = BTreeMap::new();
 
     loop {
         let mut all = Vec::new();
@@ -323,6 +325,27 @@ fn run(cfg: &Config) -> std::process::ExitCode {
                     println!("      evidence: {}", jr.path().display());
                 }
             }
+            // Pull each failure log as it appears, not at the end.
+            //
+            // Waiting cost this run its evidence: a node was restarted a
+            // hundred and fifty times and its /tmp went with it every
+            // time, so the logs recovered afterwards were whatever the
+            // last incarnation happened to leave. A power cut or a
+            // panicking node would have taken the lot the same way.
+            //
+            // One extra round trip per new failure, against seven and a
+            // half hours of findings living nowhere but on the machines
+            // producing them.
+            for r in rs.iter().filter(|r| r.outcome.is_actionable()) {
+                if have_log.contains_key(&r.name) {
+                    continue;
+                }
+                have_log.insert(r.name.clone(), true);
+                if let Some(body) = c.failure_log(&r.name) {
+                    jr.artifact(&r.name, &body);
+                }
+            }
+
             per_node.push((n.name.clone(), cur, blocked));
             all.extend(rs);
         }
@@ -331,6 +354,19 @@ fn run(cfg: &Config) -> std::process::ExitCode {
         for r in &all {
             s.add(r);
         }
+        // The results file too: it is the only record of what ran, and
+        // it lives on a machine that may not survive the night.
+        for n in &ready {
+            let c = NodeConn::new(n, cfg);
+            if let Ok(body) = c.run("cat /tmp/xfs-results.txt 2>/dev/null",
+                                    Duration::from_secs(30)) {
+                if !body.trim().is_empty() {
+                    let p = jr.artifacts().join(format!("results-{}.txt", n.name));
+                    let _ = std::fs::write(p, body);
+                }
+            }
+        }
+
         bar.draw(s.attempted(),
                  (s.pass, s.fail, s.notrun, s.hang, s.mountfail),
                  &per_node);
@@ -354,13 +390,19 @@ fn run(cfg: &Config) -> std::process::ExitCode {
     // Pulled once at the end rather than as they happen: a failing test
     // produces hundreds of lines of diff, and four nodes' worth
     // interleaved into a live terminal helps nobody.
+    // A last sweep for anything the loop did not see -- a failure
+    // recorded between the final poll and the shard finishing.
     jr.section("FAILURE ARTIFACTS");
-    let mut pulled = 0usize;
+    let mut pulled = have_log.len();
     for n in &ready {
         let c = NodeConn::new(n, cfg);
         for t in c.failure_list() {
+            if have_log.contains_key(&t) {
+                continue;
+            }
             if let Some(log) = c.failure_log(&t) {
                 jr.artifact(&t, &log);
+                have_log.insert(t, true);
                 pulled += 1;
             }
         }
