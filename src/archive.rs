@@ -32,6 +32,31 @@ pub struct Archive {
 }
 
 impl Archive {
+    /// Where records live by default.
+    ///
+    /// Not /tmp. It happens to be a real filesystem on this host, but
+    /// on most it is tmpfs and on the rest it is swept at boot -- and
+    /// the whole point of writing verdicts as they land is surviving
+    /// the reboot that follows a power cut. An archive that a reboot
+    /// can erase protects nothing.
+    ///
+    /// XDG_DATA_HOME if set, otherwise ~/.local/share, both of which
+    /// exist to hold data that outlives a session.
+    pub fn default_root() -> PathBuf {
+        if let Ok(x) = std::env::var("XDG_DATA_HOME") {
+            if !x.is_empty() {
+                return PathBuf::from(x).join("beamfs-xfstests/archive");
+            }
+        }
+        if let Ok(h) = std::env::var("HOME") {
+            if !h.is_empty() {
+                return PathBuf::from(h)
+                    .join(".local/share/beamfs-xfstests/archive");
+            }
+        }
+        PathBuf::from("/var/tmp/beamfs-xfstests/archive")
+    }
+
     /// Where a run's per-test records live: one directory per commit, so
     /// two revisions never share a shelf.
     pub fn open(base: &Path, repo: &Path) -> std::io::Result<Self> {

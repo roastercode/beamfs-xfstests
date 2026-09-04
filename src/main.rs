@@ -228,8 +228,11 @@ fn run(cfg: &Config) -> std::process::ExitCode {
     let repo = std::env::var("BEAMFS_REPO").unwrap_or_else(|_| {
         format!("{}/git/beamfs", std::env::var("HOME").unwrap_or_default())
     });
+    let arch_root = std::env::var("BEAMFS_ARCHIVE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| archive::Archive::default_root());
     let mut arch = match archive::Archive::open(
-        &std::env::temp_dir().join("beamfs-xfstests-archive"),
+        &arch_root,
         std::path::Path::new(&repo),
     ) {
         Ok(a) => {
