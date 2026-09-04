@@ -16,6 +16,7 @@
 //! takes ten seconds on real hardware takes two to three minutes under
 //! TCG, and the suite is around 737 tests.
 
+mod archive;
 mod config;
 mod console;
 mod history;
@@ -213,6 +214,38 @@ fn run(cfg: &Config) -> std::process::ExitCode {
     // Failure logs already pulled, so each is fetched once.
     let mut have_log: BTreeMap<String, bool> = BTreeMap::new();
 
+    // One file per verdict, written as it lands.
+    //
+    // A campaign runs seven to ten hours and everything it established
+    // used to live only in memory until the end. A power cut at hour
+    // six threw away six hours of verdicts that were never in doubt --
+    // the tests had passed, the run had simply not finished.
+    //
+    // Records go under a directory named for the commit under test, so
+    // two revisions never share a shelf and no table can end up mixing
+    // them. A result without the revision that produced it is not
+    // something a reviewer can check.
+    let repo = std::env::var("BEAMFS_REPO").unwrap_or_else(|_| {
+        format!("{}/git/beamfs", std::env::var("HOME").unwrap_or_default())
+    });
+    let mut arch = match archive::Archive::open(
+        &std::env::temp_dir().join("beamfs-xfstests-archive"),
+        std::path::Path::new(&repo),
+    ) {
+        Ok(a) => {
+            println!("  archive : {} ({} already recorded)",
+                     a.root().display(), a.known());
+            Some(a)
+        }
+        Err(e) => {
+            // Not fatal. A campaign that cannot shelve its verdicts is
+            // still a campaign worth running; it just loses what it
+            // proved if the power goes.
+            println!("  archive unavailable: {e}");
+            None
+        }
+    };
+
     loop {
         let mut all = Vec::new();
         let mut per_node = Vec::new();
@@ -354,6 +387,20 @@ fn run(cfg: &Config) -> std::process::ExitCode {
                 }
             }
 
+            // Shelve every verdict now, failures with their log
+            // attached. A passing test needs nothing beyond the fact
+            // that it passed.
+            if let Some(a) = arch.as_mut() {
+                for r in rs.iter() {
+                    let log = if r.outcome.is_actionable() {
+                        c.failure_log(&r.name)
+                    } else {
+                        None
+                    };
+                    a.record(r, log.as_deref());
+                }
+            }
+
             per_node.push((n.name.clone(), cur, blocked));
             all.extend(rs);
         }
@@ -397,6 +444,20 @@ fn run(cfg: &Config) -> std::process::ExitCode {
     bar.clear();
     consoles.stop_all();
     println!("  === DONE in {} min ===", bar.elapsed().as_secs() / 60);
+
+    // The tally that matters is the one on disk. What the run holds in
+    // memory disappears with the run; what is shelved under the commit
+    // is what can still be shown tomorrow, and after a power cut it is
+    // the only thing left.
+    if let Some(a) = arch.as_ref() {
+        let t = a.tally();
+        let total: usize = t.iter().map(|(_, n)| n).sum();
+        println!("  archived under {} : {total} verdicts", a.commit());
+        for (outcome, n) in t {
+            println!("    {outcome:<10} {n}");
+        }
+        println!("  {}", a.root().display());
+    }
     for n in &ready {
         if let Some(p) = consoles.path_of(&n.name) {
             let sz = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
