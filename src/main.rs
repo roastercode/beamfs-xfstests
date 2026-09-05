@@ -148,6 +148,20 @@ fn run(cfg: &Config) -> std::process::ExitCode {
         let _ = c.push(watch.to_str().unwrap_or_default(), "/tmp/xfs-watch.sh");
         let _ = c.run("chmod +x /tmp/xfs-watch.sh", Duration::from_secs(20));
 
+        // Kill whatever is there before starting, always.
+        //
+        // Recovery restarts a shard after a kill it believes worked. It
+        // does not always: a campaign ended up with three runners on one
+        // node, all writing the same /tmp/xfs-results.txt and all
+        // running tests against the same scratch device. The counters
+        // disagreed with each other and with the node, and no result
+        // from that run means anything.
+        //
+        // stop() is cheap and idempotent. Nothing is gained by asking
+        // first whether it is needed, and a campaign was lost by
+        // assuming it was not.
+        c.stop();
+
         let cmd = format!(
             "chmod +x /tmp/xfs-runner.sh && \
              setsid /tmp/xfs-runner.sh {} {} {idx} {nshard} {} '{}' {} \
@@ -359,6 +373,12 @@ fn run(cfg: &Config) -> std::process::ExitCode {
                             ready.iter().position(|x| x.name == n.name).unwrap_or(0),
                             ready.len(),
                             cfg.per_test_timeout.as_secs(), cfg.mkfs_options);
+                        // Same rule as the initial launch: kill first,
+                        // unconditionally. This path runs after a kill
+                        // that was believed to have worked, which is
+                        // exactly how one node ended up with three
+                        // runners writing the same results file.
+                        c.stop();
                         match c.run(&cmd, Duration::from_secs(40)) {
                             Ok(_) => println!("      shard restarted"),
                             Err(e) => println!("      restart failed: {e}"),
