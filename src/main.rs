@@ -260,6 +260,7 @@ fn run(cfg: &Config) -> std::process::ExitCode {
             let count = rs.len();
             let hangs = rs.iter().filter(|r| r.outcome == Outcome::Hang).count();
             let blocked = c.blocked_tasks();
+            let written = c.sectors_written();
             let cur = c.current_test().unwrap_or_default();
             let state = c.shard_state();
 
@@ -277,7 +278,8 @@ fn run(cfg: &Config) -> std::process::ExitCode {
                 // test advances its count forever without achieving
                 // anything, which kept a wedged node alive in the
                 // detector's eyes all night.
-                let stalled = d.update_with_hangs(count, hangs, blocked);
+                let stalled = d.update_with_hangs_io(count, hangs, blocked,
+                                                     written);
                 if written_off.get(&n.name).copied().unwrap_or(false) {
                     // Already given up on. Counted as finished so the
                     // loop can end, and left alone.

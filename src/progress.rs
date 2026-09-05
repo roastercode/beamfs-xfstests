@@ -96,6 +96,7 @@ impl Progress {
 /// kills healthy runs.
 pub struct StallDetector {
     last_count: Option<usize>,
+    last_written: Option<u64>,
     stalls: u32,
     limit: u32,
 }
@@ -107,7 +108,7 @@ impl StallDetector {
         // None rather than a sentinel: usize::MAX differs from every
         // real count, so the first poll always looked like progress and
         // the stall counter could never start.
-        Self { last_count: None, stalls: 0, limit }
+        Self { last_count: None, last_written: None, stalls: 0, limit }
     }
 
     /// True when the node should be considered wedged.
@@ -116,17 +117,43 @@ impl StallDetector {
     /// resets the counter -- but see `update_with_hangs`, which is what
     /// the run loop should use: a node producing nothing but timeouts
     /// is progressing by this measure and wedged by any other.
+    #[allow(dead_code)]  /* the io-aware variants are what the run loop calls */
     pub fn update(&mut self, count: usize, blocked: usize) -> bool {
-        let moved = self.last_count != Some(count);
+        self.update_with_io(count, blocked, None)
+    }
+
+    /// Stalled means neither the verdict count nor the disk moved.
+    ///
+    /// Tasks in D were the only evidence before, and they are not
+    /// evidence: a writer in balance_dirty_pages stays in D for the
+    /// whole of a sustained write, which is what the longest tests
+    /// spend their time doing. Two nodes were killed and restarted
+    /// mid-campaign on that reading, and each restart wiped the
+    /// results file the detector was counting -- the recovery
+    /// destroyed what it was watching.
+    ///
+    /// A device whose write counter is moving is doing work.
+    pub fn update_with_io(&mut self, count: usize, blocked: usize,
+                          written: Option<u64>) -> bool {
+        let count_moved = self.last_count != Some(count);
         self.last_count = Some(count);
-        if moved {
+
+        let io_moved = match written {
+            Some(w) => {
+                let moved = self.last_written.is_some_and(|p| p != w);
+                self.last_written = Some(w);
+                moved
+            }
+            None => false,
+        };
+
+        if count_moved || io_moved {
             self.stalls = 0;
             return false;
         }
         if blocked > 0 {
             self.stalls += 1;
         } else {
-            // No progress but nothing blocked: a long test, not a hang.
             self.stalls = 0;
         }
         self.stalls >= self.limit
@@ -153,10 +180,16 @@ impl StallDetector {
     ///
     /// Counting only tests that reached a verdict fixes it: hangs are
     /// subtracted, so a run of pure timeouts looks as still as it is.
+    #[allow(dead_code)]  /* the io-aware variants are what the run loop calls */
     pub fn update_with_hangs(&mut self, count: usize, hangs: usize, blocked: usize)
         -> bool
     {
         self.update(count.saturating_sub(hangs), blocked)
+    }
+
+    pub fn update_with_hangs_io(&mut self, count: usize, hangs: usize,
+                                blocked: usize, written: u64) -> bool {
+        self.update_with_io(count.saturating_sub(hangs), blocked, Some(written))
     }
 }
 

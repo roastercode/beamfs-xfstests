@@ -192,6 +192,28 @@ impl<'a> NodeConn<'a> {
     /// A non-zero count with no progress is the signature of a wedged
     /// filesystem, and it is worth surfacing before the node stops
     /// answering altogether.
+    /// Sectors written to the scratch device since boot.
+    ///
+    /// The stall detector needs to tell a node that is working from one
+    /// that is wedged, and the count of tasks in D does not do it: a
+    /// single writer in balance_dirty_pages sits in D for as long as the
+    /// write lasts, which is exactly what a sustained test looks like.
+    /// Two nodes were killed and restarted mid-campaign on that
+    /// evidence, and each restart wiped the results file it was reading.
+    ///
+    /// A device whose write counter is moving is not stuck, whatever its
+    /// tasks are doing.
+    pub fn sectors_written(&self) -> u64 {
+        self.run(
+            &format!("grep ' {} ' /proc/diskstats | awk '{{print $10}}'",
+                     self.node.scratch_dev),
+            Duration::from_secs(15),
+        )
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+    }
+
     pub fn blocked_tasks(&self) -> usize {
         self.run("ps -eo state | grep -c '^D'", Duration::from_secs(15))
             .ok()
