@@ -11,6 +11,9 @@
 # $5 timeout seconds  $6 mkfs options  $7 resume (0/1)
 
 TEST_DEV=$1; SCRATCH_DEV=$2; SHARD=$3; NSHARD=$4
+# Kept bare, because SCRATCH_DEV is exported with /dev/ prepended below
+# and /proc/diskstats names devices without it.
+SCRATCH_BARE=$2
 LIMIT=${5:-300}; MKFS_OPTS=${6:--N 16384}; RESUME=${7:-1}
 R=/tmp/xfs-results.txt
 
@@ -174,13 +177,29 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
     rm -f "$W"
     sleep 3
 
-    # A task in uninterruptible sleep does not die on SIGKILL, so if any
-    # remain the node is not usable and no amount of killing will make
-    # it so. Stop here: the orchestrator sees the shard end, restarts
-    # the domain, and relaunches -- which resumes from this file.
+    # Tasks in D are expected here and are not evidence of anything.
+    #
+    # A test that was writing when it was killed leaves the writeback
+    # behind it, and the flusher plus every waiter in
+    # balance_dirty_pages sit in D until it drains. Three seconds is
+    # not long enough for that on a full volume. Counting them ended a
+    # campaign at test 267 of 737 -- 56 passes, one real failure --
+    # because generic/269 was killed at its timeout and the queue had
+    # not emptied yet. The orchestrator then restarted the domain six
+    # times over a node that was working.
+    #
+    # What settles it is whether the device is still moving. Give the
+    # writeback fifteen seconds, then look at the write counter twice:
+    # if it advances, the node is draining and will be fine. Only a
+    # device that has stopped with tasks still in D is wedged, and that
+    # is what the orchestrator should be told about.
+    sleep 12
+    W1=$(grep -E " $SCRATCH_BARE " /proc/diskstats 2>/dev/null | awk '{print $10}')
+    sleep 3
+    W2=$(grep -E " $SCRATCH_BARE " /proc/diskstats 2>/dev/null | awk '{print $10}')
     STUCK=$(ps -eo state | grep -c '^D')
-    if [ "$STUCK" -gt 4 ]; then
-      echo "STUCK $STUCK tasks in D after generic/$t" >> $R
+    if [ "$STUCK" -gt 4 ] && [ "${W1:-0}" = "${W2:-0}" ]; then
+      echo "STUCK $STUCK tasks in D, no disk progress, after generic/$t" >> $R
       sudo umount -l /mnt/test /mnt/scratch 2>/dev/null
       echo "DONE" >> $R
       exit 0
