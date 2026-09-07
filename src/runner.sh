@@ -15,6 +15,10 @@ TEST_DEV=$1; SCRATCH_DEV=$2; SHARD=$3; NSHARD=$4
 # and /proc/diskstats names devices without it.
 SCRATCH_BARE=$2
 LIMIT=${5:-300}; MKFS_OPTS=${6:--N 16384}; RESUME=${7:-1}
+# Tests long by design (fsx soak), with their own budget. 522 measured
+# at 1133s; 1800s leaves margin without masking a hang.
+LONG_TESTS="522"
+LONG_LIMIT=1800
 R=/tmp/xfs-results.txt
 
 # The node's own record, running beside the shard for the whole
@@ -135,7 +139,16 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
   ) &
   WATCHER=$!
 
-  OUT=$(sudo timeout -k 10 "$LIMIT" ./check "generic/$t" 2>&1)
+  # A handful of tests are long by design, not slow by defect. fsx
+  # soak runs (522) do millions of ops; measured at 1133s on this
+  # node, they need a wider budget than the rest. Extending only these
+  # keeps the campaign's per-test limit tight enough that a real hang
+  # is still caught quickly.
+  case " $LONG_TESTS " in
+    *" $t "*) THIS_LIMIT=$LONG_LIMIT ;;
+    *)        THIS_LIMIT=$LIMIT ;;
+  esac
+  OUT=$(sudo timeout -k 10 "$THIS_LIMIT" ./check "generic/$t" 2>&1)
   RC=$?
   kill -9 $WATCHER 2>/dev/null
   wait $WATCHER 2>/dev/null
