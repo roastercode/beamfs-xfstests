@@ -30,6 +30,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::config::Config;
 use crate::config::Node;
+use crate::load;
 use crate::node::NodeConn;
 
 /// Where captures are kept, next to the run history.
@@ -54,70 +55,6 @@ pub struct Capture {
     pub loop_no: u32,
     pub events: usize,
     pub dir: PathBuf,
-}
-
-/// One load cycle: mkfs, mount, sixteen writers for `secs`, unmount,
-/// fsck. Returns the blocks fsck calls used-but-unreferenced.
-///
-/// The trace ring runs the whole time and is only drained if something
-/// is lost, so a clean loop costs nothing on disk. Tracing stays on
-/// across the unmount: the first attempts stopped it beforehand and
-/// then concluded from the silence that unmount issued no synchronous
-/// writeback, which was an artefact of the window and cost a day.
-fn one_loop(c: &NodeConn, secs: u32, deadline: Duration) -> Result<Vec<u64>, String> {
-    let script = format!(
-        r#"
-T=/sys/kernel/debug/tracing
-pkill -9 xfs_io 2>/dev/null
-umount -l /mnt/scratch 2>/dev/null
-sleep 1
-mkfs.beamfs -N 16384 /dev/vdc >/dev/null 2>&1 || exit 1
-mount -t beamfs /dev/vdc /mnt/scratch || exit 1
-: > $T/trace
-echo 1 > $T/tracing_on
-S=$(mktemp -d)/stop
-for j in $(seq 1 16); do
-  ( while [ ! -e $S ]; do
-      xfs_io -ftc "pwrite -b 65536 0 $(( (RANDOM % 100) * 65536 ))" \
-        /mnt/scratch/$((RANDOM % 200)) >/dev/null 2>&1
-    done ) &
-  ( while [ ! -e $S ]; do
-      echo t >> /mnt/scratch/$((RANDOM % 200)) 2>/dev/null
-    done ) &
-  ( while [ ! -e $S ]; do
-      xfs_io -c "sync_range -w 0 0" /mnt/scratch/$((RANDOM % 200)) >/dev/null 2>&1
-    done ) &
-done
-sleep {secs}
-touch $S
-wait 2>/dev/null
-rm -rf "$(dirname $S)"
-umount /mnt/scratch
-sleep 1
-echo 0 > $T/tracing_on
-# grep exits 1 when it matches nothing, and matching nothing is the
-# expected case: it means the loop was clean. Swallow it, or every
-# clean loop is reported as a failed one.
-fsck.beamfs -v /dev/vdc 2>&1 | grep -oE 'block [0-9]+ marked' | grep -oE '[0-9]+' || true
-"#
-    );
-    // Ship the script as a file rather than as an argument.
-    //
-    // A load loop needs $RANDOM, $(...) and its own variables, and every
-    // layer between here and the remote shell is one more chance to lose
-    // a quote. Written to a temporary file and executed, there are no
-    // layers: what runs is what was written.
-    let tmp = std::env::temp_dir().join("beamfs-trace-loop.sh");
-    std::fs::write(&tmp, &script).map_err(|e| e.to_string())?;
-    c.push(tmp.to_str().unwrap_or_default(), "/tmp/beamfs-trace-loop.sh")
-        .map_err(|e| format!("push: {e}"))?;
-    let out = c
-        .run("sudo sh /tmp/beamfs-trace-loop.sh", deadline)
-        .map_err(|e| e.to_string())?;
-    Ok(out
-        .lines()
-        .filter_map(|l| l.trim().parse::<u64>().ok())
-        .collect())
 }
 
 /// Drain the ring and bring it back, with the lost-block list.
@@ -198,7 +135,10 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
     }
 
     let c = NodeConn::new(node, cfg);
-    c.run(
+    let l = load::Load::from_env();
+    println!("  load    : {}", l.describe());
+    load::prepare(&c, "/mnt/scratch", 60000).map_err(|e| format!("prepare: {e}"))?;
+    let _unused = c.run(
         "sudo sh -c 'pkill -9 xfs_io 2>/dev/null; mkdir -p /mnt/scratch /mnt/test; \
          echo 1 > /sys/kernel/debug/tracing/events/beamfs/enable; \
          for e in writeback_dirty_inode writeback_write_inode \
@@ -246,8 +186,17 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
                 std::thread::sleep(Duration::from_millis(200));
             }
         });
-        let lost = match one_loop(&c, 5, Duration::from_secs(300)) {
-            Ok(v) => v,
+        let lost = match load::run_loop(
+            &c, &l, "/dev/vdc", "/mnt/scratch", "-N 16384",
+            loops % 12 == 1, Duration::from_secs(300),
+        ) {
+            Ok(r) => {
+                if r.dangling > 0 {
+                    println!("\r  loop {loops:<4} {} referenced-but-free (opposite symptom)   ",
+                             r.dangling);
+                }
+                r.lost
+            }
             Err(e) => {
                 spin.store(false, std::sync::atomic::Ordering::Relaxed);
                 let _ = h.join();
