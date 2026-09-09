@@ -68,25 +68,19 @@ below.
 .BI matrix " [conditions] " [loops]
 Vary one condition at a time and see which ones the leak needs. All
 conditions and twelve loops by default; conditions are comma-separated.
-.RS
-.TP
-.B scratch-only
-Nothing but the scratch volume mounted.
-.TP
-.B second-beamfs
-A second beamfs filesystem alongside, as xfstests keeps its test volume.
-.TP
-.B second-ext2
-A second filesystem of another type, to tell "a second mount" from "a
-second beamfs mount".
-.TP
-.B second-beamfs-no-scrub
-As above with the sweep suspended, to take the background reader out.
-.TP
-.B memory-pressure
-Cache pressure without a second mount, to separate two superblocks from
-a full cache.
-.RE
+The conditions are
+.BR scratch-only ,
+nothing but the scratch volume;
+.BR second-beamfs ,
+a second beamfs filesystem alongside as xfstests keeps its test volume;
+.BR second-ext2 ,
+a second filesystem of another type, to tell a second mount from a
+second beamfs mount;
+.BR second-beamfs-no-scrub ,
+as above with the sweep suspended;
+and
+.BR memory-pressure ,
+cache pressure without a second mount.
 .IP
 Each cell returns the node to the state its condition names rather than
 inheriting what the last one left, and reports what the setup actually
@@ -141,7 +135,7 @@ scratch + a second beamfs     leaked at loop 5
 .PP
 Which rules out the sweep, and rules out anything two beamfs mounts
 contend over: a second filesystem of any type is enough. What remains is
-what a second active filesystem does to the machine \(em memory
+what a second active filesystem does to the machine -- memory
 pressure, inode eviction, a flusher with two superblocks to serve.
 
 .SH READING A CAPTURE

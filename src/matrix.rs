@@ -233,7 +233,10 @@ pub fn run(
     which: Option<&str>,
     max_loops: u32,
 ) -> Result<Vec<Cell>, String> {
-    let conds: Vec<Condition> = match which {
+    // An empty argument means every condition, not a condition named
+    // "": `matrix "" 8` is how a shell passes "all, eight loops" and it
+    // must not be read as a name nobody could have meant.
+    let conds: Vec<Condition> = match which.filter(|s| !s.trim().is_empty()) {
         Some(s) => s
             .split(',')
             .filter_map(Condition::parse)
@@ -303,6 +306,12 @@ fn quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_argument_is_not_a_condition_name() {
+        assert!(Condition::parse("").is_none());
+        assert!(Condition::parse("  ").is_none());
+    }
 
     #[test]
     fn every_condition_round_trips_through_its_name() {
