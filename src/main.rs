@@ -16,6 +16,7 @@
 //! takes ten seconds on real hardware takes two to three minutes under
 //! TCG, and the suite is around 737 tests.
 
+mod trace;
 mod archive;
 mod config;
 mod console;
@@ -57,6 +58,7 @@ fn main() -> std::process::ExitCode {
         Some("history") => show_history(),
         Some("compare") => compare_runs(args.get(2), args.get(3)),
         Some("stop") => stop(&cfg),
+        Some("trace") => do_trace(&cfg, args.get(2), args.get(3)),
         Some("--help" | "-h") => usage(),
         _ => run(&cfg),
     }
@@ -805,5 +807,53 @@ fn report(cfg: &Config) -> std::process::ExitCode {
         std::process::ExitCode::FAILURE
     } else {
         std::process::ExitCode::SUCCESS
+    }
+}
+
+/// Reproduce the block leak under load and keep what it produces.
+///
+/// `trace [hours] [max]` -- defaults to one hour, ten captures. Each
+/// capture is a directory under ~/.local/share/beamfs-xfstests/traces
+/// holding the ring at the moment fsck found a lost block, the block
+/// list, and the inode table location needed to read those inodes off
+/// the device afterwards.
+fn do_trace(cfg: &Config, hours: Option<&String>, max: Option<&String>) -> std::process::ExitCode {
+    let h: f64 = hours.and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    let m: u32 = max.and_then(|v| v.parse().ok()).unwrap_or(10);
+
+    let Some(node) = cfg.nodes.first() else {
+        eprintln!("no nodes configured");
+        return std::process::ExitCode::FAILURE;
+    };
+
+    println!("  node    : {}", node.name);
+    println!("  budget  : {h} h, up to {m} captures");
+    println!("  keeping : {}", trace::default_root().display());
+    println!();
+
+    match trace::campaign(cfg, node, h, m) {
+        Ok(caught) => {
+            if caught.is_empty() {
+                println!("  no leak reproduced");
+            } else {
+                println!();
+                println!("  === captures ===");
+                for c in &caught {
+                    println!(
+                        "    {:03}  {:>5} blocks  loop {:<3}  {:>8} events  {}",
+                        c.seq,
+                        c.lost,
+                        c.loop_no,
+                        c.events,
+                        c.dir.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                }
+            }
+            std::process::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("trace: {e}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }
