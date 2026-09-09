@@ -1,0 +1,290 @@
+.\" SPDX-License-Identifier: GPL-2.0-only
+.TH BEAMFS-XFSTESTS 1 "2026-09-09" "beamfs-xfstests" "beamfs development tools"
+
+.SH NAME
+beamfs-xfstests \- run the filesystem test suite against beamfs, and reproduce what it finds
+
+.SH SYNOPSIS
+.B beamfs-xfstests
+.RI [ command ]
+.RI [ args ]
+
+.SH DESCRIPTION
+Runs the kernel filesystem test suite against beamfs across a lab of
+nodes, and reproduces defects the suite reports so they can be traced.
+.PP
+.B check -g generic
+runs the suite in one process with no per-test timeout. A test that
+wedges the filesystem takes the whole run with it: on 2026-09-01
+generic/285 sat in
+.B folio_wait_writeback
+for nine hours and the other 127 tests in that batch never started. A
+night of machine time produced one result.
+.PP
+Here every test is its own invocation with its own deadline, results
+are appended as they happen, and an interrupted run resumes from what
+it had. Work is split across nodes, because a test that takes ten
+seconds on hardware takes two to three minutes under emulation.
+
+.SH COMMANDS
+.TP
+.B run
+Run the suite. The default when no command is given. Results are
+appended to the history as each test finishes, so an interrupted run
+loses nothing, and a second invocation resumes rather than starting
+over.
+.TP
+.B report
+Print the last run: pass rate, failures with their reasons, and how the
+nodes divided the work. Reads the history; runs nothing.
+.TP
+.BI probe " test " [ node ]
+Run one test under observation. Samples are collected over ssh while
+the node answers, and the serial console is captured from the host for
+the whole run, because it keeps working when the network does not and
+is the only place a panic appears. Use this on a test that hangs or
+takes the node down.
+.TP
+.B history
+List past runs, newest first, with their commit and pass rate.
+.TP
+.BI compare " tagA " tagB
+Show what changed between two runs: tests that started failing, tests
+that started passing, and tests whose reason changed. A fix that breaks
+something else shows here.
+.TP
+.BI trace " [hours] " [captures]
+Reproduce the block leak under load and keep the evidence. Defaults to
+one hour and ten captures. See
+.B THE TRACE COMMAND
+below.
+.TP
+.B stop
+Stop a run in progress on every node and leave the filesystems
+unmounted.
+
+.SH THE TRACE COMMAND
+generic/464 loses blocks on roughly half its runs and takes three
+minutes per run, so chasing it through the suite yields one answer per
+twenty minutes once a build is counted. The load it applies reproduces
+the leak on its own in two to nine loops: sixteen processes each
+truncating and rewriting a random file, appending to a second and
+forcing writeback on a third, over two hundred files.
+.PP
+.B trace
+drives that load directly and stops at the first loop
+.BR fsck.beamfs (8)
+reports a lost block. It then drains the kernel trace ring and writes
+it, with the block list, under
+.IR ~/.local/share/beamfs-xfstests/traces/ .
+.PP
+Two details of the loop are not adjustable, because getting them wrong
+measures the wrong thing:
+.IP \(bu 3
+The filesystem is made once per series of twelve loops, not once per
+loop. generic/464 makes one and runs ten loops on it; the volume fills
+and blocks get recycled, which is the regime the leak needs.
+Reformatting every loop produced 24494 contiguous blocks lost in a
+single loop, against the 28 to 1400 the test itself produces.
+.IP \(bu 3
+Tracing stays on across the unmount. Stopping it beforehand and
+concluding from the silence that unmount issued no synchronous
+writeback was an artefact of the window, and cost a day.
+
+.SS Reading a capture
+A capture is a directory named
+.IR <epoch>-<NNN> ,
+holding:
+.TP
+.I trace.txt
+The kernel ring at the moment of the leak. Contains the beamfs
+tracepoints and the writeback ones, one event per line.
+.TP
+.I lost.txt
+The blocks
+.B fsck.beamfs
+calls used-but-unreferenced, one per line.
+.TP
+.I inode_table_blk
+Where the inode table starts, so the owning inodes can be read off the
+device afterwards without the node still being in that state.
+.PP
+The question a capture answers is which inode owned a lost block and
+what happened to that inode. For a block
+.I B
+in
+.IR lost.txt :
+.PP
+.RS
+.nf
+grep "beamfs_block_alloc: .*blk=B " trace.txt | tail -1
+.fi
+.RE
+.PP
+names the inode. With that inode
+.IR I :
+.PP
+.RS
+.nf
+grep -c "beamfs_inode_dirty: ino=I "  trace.txt   # times dirtied
+grep -c "beamfs_write_inode: ino=I "  trace.txt   # times written
+grep    "beamfs_slot_store: ino=I "   trace.txt   # its tree changes
+grep    "writeback_.*ino=I "          trace.txt   # what the VFS did
+.fi
+.RE
+.PP
+An inode dirtied a thousand times and written once is the shape the
+leak takes.
+.B beamfs_slot_store
+carries the old value as well as the new, so an overwrite of a live
+pointer is visible in one line rather than by correlating two.
+.PP
+To read an owning inode off the device, with
+.I T
+from
+.IR inode_table_blk :
+.PP
+.RS
+.nf
+blk=$(( T + (I-1)/32 )); off=$(( ((I-1) % 32) * 128 ))
+dd if=/dev/vdc bs=4096 skip=$blk count=1 | od -An -tx8 -j$off -N128
+.fi
+.RE
+.PP
+0xcd repeated is a block mkfs wrote and nothing has touched since:
+never written, as opposed to written with stale contents. The
+distinction matters and is not otherwise visible.
+
+.SS Retention
+Captures older than thirty days are removed when
+.B trace
+starts. A trace is worth keeping only until the conclusion is drawn
+from it; the conclusion belongs in Documentation, not in two hundred
+megabytes of ring buffer. Set
+.B XFSTESTS_TRACE_KEEP_DAYS
+to change the age, or move a capture elsewhere to exempt it.
+
+.SS Progress
+A loop takes eleven to sixteen seconds. The indicator names the step
+the remote loop has reached \(em cleanup, mount, load, unmount, fsck \(em
+so what turns is the work rather than a timer: an ssh call that has
+hung leaves a timer spinning exactly as it spins during useful work.
+Past thirty seconds in one step the refresh slows and the step is
+named; past sixty it blinks a hash and says STALLED, which cannot be
+mistaken for motion.
+
+.SH ENVIRONMENT
+.TP
+.B XFSTESTS_NODES
+Comma-separated
+.IR name:host[:test_dev[:scratch_dev]] .
+Devices default to vdb and vdc. With one node the suite runs on it
+alone; with several the tests are divided between them.
+.br
+Example:
+.I x86-01:192.168.122.99:vdb:vdc
+.TP
+.B XFSTESTS_TIMEOUT
+Per-test deadline in seconds, default 300. A test past its deadline is
+killed and recorded as such rather than taking the run with it. Tests
+long by design carry their own budget: generic/522 is an fsx soak run,
+measured at 1133 seconds, and gets 1800.
+.TP
+.B XFSTESTS_MKFS_OPTIONS
+Passed to
+.BR mkfs.beamfs .
+Default
+.IR "-N 16384" .
+.TP
+.B XFSTESTS_NO_RESUME
+Start over instead of resuming an interrupted run.
+.TP
+.B XFSTESTS_TRACE_KEEP_DAYS
+Age past which captures are removed, default 30.
+.TP
+.BR XFSTESTS_LOAD_PROCS ", " XFSTESTS_LOAD_FILES ", " XFSTESTS_LOAD_SECS ", " XFSTESTS_LOAD_BLOCK ", " XFSTESTS_LOAD_MAXBLK
+The load
+.B trace
+applies. Defaults are generic/464's own numbers: 16 writers of each
+kind, 200 files, 5 seconds per loop, 64 KiB writes, files up to 100
+blocks. Changing them changes what is being reproduced, which is
+occasionally the point and usually not.
+
+.SH FILES
+.TP
+.I ~/.local/share/beamfs-xfstests/
+Run history and captures. On the workstation, not the node: every trace
+taken on the night of 2026-09-08 was written to a node's rootfs and
+lost when the next image was built \(em 107 reproduced leaks, gone in
+one bitbake.
+.TP
+.I ~/.local/share/beamfs-xfstests/traces/
+Captures, one directory per leak.
+.TP
+.I /var/tmp/beamfs-xfstests/archive/
+Per-commit results, for
+.BR compare .
+
+.SH EXAMPLES
+Run the suite on one node:
+.PP
+.RS
+.nf
+XFSTESTS_NODES=x86-01:192.168.122.99:vdb:vdc beamfs-xfstests run
+.fi
+.RE
+.PP
+See what the last run did, and what changed since the run before:
+.PP
+.RS
+.nf
+beamfs-xfstests report
+beamfs-xfstests history
+beamfs-xfstests compare <older> <newer>
+.fi
+.RE
+.PP
+Watch one test that hangs:
+.PP
+.RS
+.nf
+beamfs-xfstests probe generic/285 x86-01
+.fi
+.RE
+.PP
+Reproduce the leak for two hours, keeping up to ten captures, detached
+so the terminal stays free:
+.PP
+.RS
+.nf
+nohup env XFSTESTS_NODES=x86-01:192.168.122.99:vdb:vdc \\
+  beamfs-xfstests trace 2 10 > /tmp/campaign.log 2>&1 &
+tail -f /tmp/campaign.log
+.fi
+.RE
+.PP
+Push harder than the test does, to see whether the leak scales with
+contention:
+.PP
+.RS
+.nf
+XFSTESTS_LOAD_PROCS=32 XFSTESTS_LOAD_FILES=50 \\
+  beamfs-xfstests trace 1 5
+.fi
+.RE
+
+.SH EXIT STATUS
+0 if the command completed, whatever the tests found; non-zero if it
+could not run \(em no node reachable, no test suite on the node, no
+room for the captures.
+
+.SH SEE ALSO
+.BR fsck.beamfs (8),
+.BR mkfs.beamfs (8),
+.BR trace-cmd (1)
+.PP
+Documentation/TODO.md in the beamfs tree carries the state of each
+open defect and the rules learnt while chasing them.
+
+.SH AUTHOR
+Aurelien Desbrieres <aurelien@hackers.camp>
