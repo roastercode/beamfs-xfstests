@@ -16,6 +16,7 @@
 //! takes ten seconds on real hardware takes two to three minutes under
 //! TCG, and the suite is around 737 tests.
 
+mod bench;
 mod indicator;
 mod matrix;
 mod analyse;
@@ -65,6 +66,7 @@ fn main() -> std::process::ExitCode {
         Some("trace") => do_trace(&cfg, args.get(2), args.get(3)),
         Some("analyse" | "analyze") => do_analyse(args.get(2)),
         Some("matrix") => do_matrix(&cfg, args.get(2), args.get(3)),
+        Some("bench") => do_bench(&cfg, args.get(2), args.get(3)),
         Some("--help" | "-h") => usage(),
         // A typo must not start a campaign. "analyses" for "analyse"
         // fell through to run, which tried the aarch64 cluster -- powered
@@ -81,7 +83,7 @@ fn main() -> std::process::ExitCode {
 
 fn usage() -> std::process::ExitCode {
     eprintln!(
-        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|matrix|stop]\n\
+        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|matrix|bench|stop]\n\
          \n\
          run      shard the suite across the nodes and follow it (default)\n\
          probe    run one test with console capture and sampling\n\
@@ -91,6 +93,7 @@ fn usage() -> std::process::ExitCode {
          trace    reproduce the block leak under load and keep the trace\n\
          analyse  read a capture and say what happened to the lost blocks\n\
          matrix   vary one condition at a time and see which the leak needs\n\
+         bench    measure one test's pass rate and compare it to last time\n\
          stop     kill the shards and release the mounts\n\
          \n\
          environment:\n\
@@ -914,6 +917,27 @@ fn do_matrix(cfg: &Config, which: Option<&String>, loops: Option<&String>) -> st
         Ok(_) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("matrix: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Measure one test's pass rate and compare it against the previous run.
+///
+/// `bench [test] [trials]` -- generic/464 and ten trials by default.
+/// A single run of an intermittent test says nothing about a change;
+/// the comparison with the last stored run is the point.
+fn do_bench(cfg: &Config, test: Option<&String>, trials: Option<&String>) -> std::process::ExitCode {
+    let Some(node) = cfg.nodes.first() else {
+        eprintln!("no nodes configured");
+        return std::process::ExitCode::FAILURE;
+    };
+    let t = test.map(|s| s.as_str()).unwrap_or("generic/464");
+    let n: u32 = trials.and_then(|v| v.parse().ok()).unwrap_or(10);
+    match bench::run(cfg, node, t, n) {
+        Ok(_) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("bench: {e}");
             std::process::ExitCode::FAILURE
         }
     }
