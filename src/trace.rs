@@ -172,18 +172,57 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
         let spin = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let spin_stop = spin.clone();
         let n = loops;
+        // The thread outlives this scope's borrows, so it gets owned
+        // strings rather than a NodeConn holding a reference to the node.
+        let pkey = cfg.ssh_key.clone();
+        let phost = format!("{}@{}", cfg.user, node.host);
         let h = std::thread::spawn(move || {
+            // A spinner that turns on a timer says the program is alive,
+            // which is not the question: an ssh call that has hung leaves
+            // it turning just the same. The remote script writes the step
+            // it has reached, so what turns here is the work, and a step
+            // that stops advancing shows as a stall rather than as
+            // progress.
+            //
+            // Loops measured on this node: median 14s, max 16s. Past 30s
+            // something is slow; past 60s it is stuck, and the marker
+            // blinks rather than spins so it cannot be mistaken for work.
             let frames = ['|', '/', '-', '\\'];
             let mut i = 0usize;
+            let mut step = String::from("start");
+            let mut step_since = Instant::now();
             while spin_stop.load(std::sync::atomic::Ordering::Relaxed) {
-                print!(
-                    "\r  loop {n:<4} {} {:>3}s  mkfs, load, unmount, fsck   ",
-                    frames[i % 4],
-                    t0.elapsed().as_secs()
-                );
+                let now = read_step(&pkey, &phost);
+                if now != step {
+                    step = now;
+                    step_since = Instant::now();
+                }
+                let held = step_since.elapsed().as_secs();
+                let total = t0.elapsed().as_secs();
+                // Three states, three shapes. Turning is work; a slower
+                // turn is a step taking longer than it should; a blinking
+                // hash is a step that has stopped advancing, and must not
+                // look like motion.
+                let mark = if held >= 60 {
+                    if i % 4 < 2 { '#' } else { ' ' }
+                } else {
+                    frames[i % 4]
+                };
+                let note = if held >= 60 {
+                    format!(" STALLED {held}s in {step}")
+                } else if held >= 30 {
+                    format!(" slow, {held}s in {step}")
+                } else {
+                    String::new()
+                };
+                print!("\r  loop {n:<4} {mark} {total:>3}s  {step:<9}{note}          ");
                 let _ = std::io::Write::flush(&mut std::io::stdout());
                 i += 1;
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(Duration::from_millis(if held >= 30 {
+                    600
+                } else {
+                    250
+                }));
             }
         });
         let lost = match load::run_loop(
@@ -241,4 +280,36 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
 
     println!("  {loops} loops, {} leaks captured", caught.len());
     Ok(caught)
+}
+
+/// The step the remote loop has reached, or the last one known.
+///
+/// Read over ssh once a second at most: often enough to see a stall,
+/// rare enough not to add load to the node under test.
+fn read_step(key: &str, host: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if now == LAST.load(Ordering::Relaxed) {
+        return String::new();
+    }
+    LAST.store(now, Ordering::Relaxed);
+    std::process::Command::new("timeout")
+        .args(["5", "ssh", "-i", key])
+        .args(["-o", "BatchMode=yes"])
+        .args(["-o", "ConnectTimeout=3"])
+        .args(["-o", "StrictHostKeyChecking=no"])
+        .args(["-o", "UserKnownHostsFile=/dev/null"])
+        .args(["-o", "LogLevel=ERROR"])
+        .arg(host)
+        .arg("cat /tmp/beamfs-step 2>/dev/null")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
 }
