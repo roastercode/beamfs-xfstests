@@ -202,8 +202,11 @@ pub fn run_cell(
 
     for n in 1..=max_loops {
         cell.loops = n;
-        print!("\r    {:<24} loop {n:<3} ", cond.name());
-        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let p = crate::indicator::Progress::start(
+            &format!("{} loop {n}", cond.name()),
+            &cfg.ssh_key,
+            &format!("{}@{}", cfg.user, node.host),
+        );
 
         let r = load::run_loop(
             &c,
@@ -219,10 +222,12 @@ pub fn run_cell(
         if !r.lost.is_empty() {
             cell.leak_at = Some(n);
             cell.lost = r.lost.len();
+            p.finish(&format!("{} BLOCKS LOST", r.lost.len()));
             break;
         }
+        p.finish("clean");
     }
-    println!("\r    {:<24} {}                    ", cond.name(), cell.verdict());
+    println!("    -> {:<24} {}", cond.name(), cell.verdict());
     Ok(cell)
 }
 

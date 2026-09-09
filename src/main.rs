@@ -16,6 +16,7 @@
 //! takes ten seconds on real hardware takes two to three minutes under
 //! TCG, and the suite is around 737 tests.
 
+mod indicator;
 mod matrix;
 mod analyse;
 mod load;
