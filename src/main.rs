@@ -78,13 +78,15 @@ fn main() -> std::process::ExitCode {
 
 fn usage() -> std::process::ExitCode {
     eprintln!(
-        "usage: beamfs-xfstests [run|probe|report|history|compare|stop]\n\
+        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|stop]\n\
          \n\
          run      shard the suite across the nodes and follow it (default)\n\
          probe    run one test with console capture and sampling\n\
          report   summarise what the nodes have recorded so far\n\
          history  list saved runs\n\
          compare  diff two runs; last two if unnamed\n\
+         trace    reproduce the block leak under load and keep the trace\n\
+         analyse  read a capture and say what happened to the lost blocks\n\
          stop     kill the shards and release the mounts\n\
          \n\
          environment:\n\

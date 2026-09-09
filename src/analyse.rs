@@ -247,13 +247,29 @@ impl Report {
             }
             let mut ps: Vec<_> = by_parent.iter().collect();
             ps.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
+            let mut nums: Vec<String> =
+                blocks.iter().take(8).map(|b| b.block.to_string()).collect();
+            if blocks.len() > 8 {
+                nums.push(format!("... +{}", blocks.len() - 8));
+            }
+            println!("    blocks: {}", nums.join(" "));
+
             for (p, c) in ps.iter().take(4) {
                 let lvl = blocks
                     .iter()
                     .find(|b| b.parent == Some(**p))
                     .and_then(|b| b.level)
                     .unwrap_or(0);
-                println!("    {c} pointer(s) in block {p} (level {lvl})");
+                let slots: Vec<String> = blocks
+                    .iter()
+                    .filter(|b| b.parent == Some(**p))
+                    .take(6)
+                    .filter_map(|b| b.slot.map(|s| s.to_string()))
+                    .collect();
+                println!(
+                    "    {c} pointer(s) in block {p} (level {lvl}), slots {}",
+                    slots.join(" ")
+                );
                 if d.map(|i| i.indirect) == Some(**p) {
                     println!("      -- named by i_indirect: read it on the device;");
                     println!("         0xcd means it was never written, which is the defect");
