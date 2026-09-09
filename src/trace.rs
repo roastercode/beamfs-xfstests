@@ -68,7 +68,9 @@ fn one_loop(c: &NodeConn, secs: u32, deadline: Duration) -> Result<Vec<u64>, Str
     let script = format!(
         r#"
 T=/sys/kernel/debug/tracing
-umount /mnt/scratch 2>/dev/null
+pkill -9 xfs_io 2>/dev/null
+umount -l /mnt/scratch 2>/dev/null
+sleep 1
 mkfs.beamfs -N 16384 /dev/vdc >/dev/null 2>&1 || exit 1
 mount -t beamfs /dev/vdc /mnt/scratch || exit 1
 : > $T/trace
@@ -93,20 +95,29 @@ rm -rf "$(dirname $S)"
 umount /mnt/scratch
 sleep 1
 echo 0 > $T/tracing_on
-fsck.beamfs -v /dev/vdc 2>&1 | grep -oE 'block [0-9]+ marked' | grep -oE '[0-9]+'
+# grep exits 1 when it matches nothing, and matching nothing is the
+# expected case: it means the loop was clean. Swallow it, or every
+# clean loop is reported as a failed one.
+fsck.beamfs -v /dev/vdc 2>&1 | grep -oE 'block [0-9]+ marked' | grep -oE '[0-9]+' || true
 "#
     );
+    // Ship the script as a file rather than as an argument.
+    //
+    // A load loop needs $RANDOM, $(...) and its own variables, and every
+    // layer between here and the remote shell is one more chance to lose
+    // a quote. Written to a temporary file and executed, there are no
+    // layers: what runs is what was written.
+    let tmp = std::env::temp_dir().join("beamfs-trace-loop.sh");
+    std::fs::write(&tmp, &script).map_err(|e| e.to_string())?;
+    c.push(tmp.to_str().unwrap_or_default(), "/tmp/beamfs-trace-loop.sh")
+        .map_err(|e| format!("push: {e}"))?;
     let out = c
-        .run(&format!("sudo sh -c {}", shell_quote(&script)), deadline)
+        .run("sudo sh /tmp/beamfs-trace-loop.sh", deadline)
         .map_err(|e| e.to_string())?;
     Ok(out
         .lines()
         .filter_map(|l| l.trim().parse::<u64>().ok())
         .collect())
-}
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Drain the ring and bring it back, with the lost-block list.
@@ -209,17 +220,52 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
 
     while Instant::now() < end && (caught.len() as u32) < max {
         loops += 1;
+        // Progress as it happens. A loop is five seconds of load plus
+        // mkfs, mount, unmount and fsck; a program silent for minutes is
+        // indistinguishable from a hung one to whoever is watching.
+        let t0 = Instant::now();
+        // A spinner on its own line, redrawn every 200 ms while the loop
+        // runs. A line printed once and then nothing for ten seconds
+        // reads as a hung program, whatever the program is actually
+        // doing; something moving reads as work in progress. The thread
+        // ends when the loop returns.
+        let spin = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let spin_stop = spin.clone();
+        let n = loops;
+        let h = std::thread::spawn(move || {
+            let frames = ['|', '/', '-', '\\'];
+            let mut i = 0usize;
+            while spin_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                print!(
+                    "\r  loop {n:<4} {} {:>3}s  mkfs, load, unmount, fsck   ",
+                    frames[i % 4],
+                    t0.elapsed().as_secs()
+                );
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                i += 1;
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        });
         let lost = match one_loop(&c, 5, Duration::from_secs(300)) {
             Ok(v) => v,
             Err(e) => {
-                println!("  loop {loops}: {e}");
+                spin.store(false, std::sync::atomic::Ordering::Relaxed);
+                let _ = h.join();
+                println!("\r  loop {loops:<4} failed after {}s: {e}                 ",
+                         t0.elapsed().as_secs());
                 std::thread::sleep(Duration::from_secs(5));
                 continue;
             }
         };
+        spin.store(false, std::sync::atomic::Ordering::Relaxed);
+        let _ = h.join();
         if lost.is_empty() {
+            println!("\r  loop {loops:<4} clean   {}s                              ",
+                     t0.elapsed().as_secs());
             continue;
         }
+        println!("\r  loop {loops:<4} {} BLOCKS LOST   {}s                         ",
+                 lost.len(), t0.elapsed().as_secs());
         let seq = caught.len() as u32 + 1;
         let dir = root.join(format!("{stamp}-{seq:03}"));
         match pull(&c, &dir, &lost) {
