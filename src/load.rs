@@ -135,6 +135,17 @@ mkdir -p {mnt}
     let _ = write!(
         s,
         r#"echo mount > /tmp/beamfs-step
+# The test volume stays mounted throughout, as it does under xfstests.
+# This is not decoration: with only the scratch volume mounted the leak
+# does not reproduce at all -- 51 loops clean -- and with the test volume
+# mounted alongside it comes back at loop 5. Whatever is wrong involves
+# more than one beamfs superblock being live at once, so a reproducer
+# that mounts one measures nothing.
+mount | grep -q ' /mnt/test ' || {{
+  mkfs.beamfs {mkfs_opts} /dev/vdb >/dev/null 2>&1
+  mkdir -p /mnt/test
+  mount -t beamfs /dev/vdb /mnt/test 2>/dev/null
+}}
 mount -t beamfs {dev} {mnt} || {{ echo 'MOUNT FAILED' >&2; exit 1; }}
 
 : > $T/trace
