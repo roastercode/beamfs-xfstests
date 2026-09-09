@@ -274,12 +274,22 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_loop_formats_and_a_continuing_one_does_not() {
+    fn a_fresh_loop_formats_the_scratch_and_a_continuing_one_does_not() {
         let l = Load::default();
         let with = script(&l, "/dev/vdc", "/mnt/scratch", "-N 16384", true);
         let without = script(&l, "/dev/vdc", "/mnt/scratch", "-N 16384", false);
-        assert!(with.contains("mkfs.beamfs"));
-        assert!(!without.contains("mkfs.beamfs"));
+        // The scratch volume is what the fresh flag governs. The test
+        // volume is made once if absent, on every loop, because it has
+        // to be mounted for the leak to reproduce at all.
+        assert!(with.contains("mkfs.beamfs -N 16384 /dev/vdc"));
+        assert!(!without.contains("mkfs.beamfs -N 16384 /dev/vdc"));
+    }
+
+    #[test]
+    fn the_test_volume_is_mounted_alongside_the_scratch() {
+        let s = script(&Load::default(), "/dev/vdc", "/mnt/scratch", "-N 16384", false);
+        assert!(s.contains("/mnt/test"));
+        assert!(s.contains("/dev/vdb"));
     }
 
     #[test]
