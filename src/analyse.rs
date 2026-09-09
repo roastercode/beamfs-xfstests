@@ -130,24 +130,13 @@ pub fn analyse(dir: &Path) -> Result<Report, String> {
             }
             "slot_store" => {
                 i.stores += 1;
-                // The line reads "... slot=5 0->26823 lvl=1": the old
-                // value before the arrow, the new one after. Written that
-                // way so an overwrite of a live pointer is one line to
-                // read rather than two to correlate.
-                let (old, new) = match e.fields.split_once("->") {
-                    Some((before, after)) => {
-                        let o = before
-                            .rsplit(|c: char| c.is_whitespace())
-                            .next()
-                            .and_then(|t| t.parse::<u64>().ok());
-                        let n = after
-                            .split(|c: char| !c.is_ascii_digit())
-                            .next()
-                            .and_then(|t| t.parse::<u64>().ok());
-                        (o, n)
-                    }
-                    None => (field(e.fields, "old="), field(e.fields, "new=")),
-                };
+                let new = field(e.fields, "new=");
+                let old = field(e.fields, "old=").or_else(|| {
+                    // "0->1234" form: the value before the arrow.
+                    e.fields.split_once("->").and_then(|(a, _)| {
+                        a.rsplit(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+                    })
+                });
                 if old.unwrap_or(0) != 0 {
                     overwrites += 1;
                 }
@@ -258,31 +247,13 @@ impl Report {
             }
             let mut ps: Vec<_> = by_parent.iter().collect();
             ps.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
-            // The block numbers themselves, so they can be read off the
-            // device without going back to lost.txt and matching by hand.
-            let mut nums: Vec<String> =
-                blocks.iter().take(8).map(|b| b.block.to_string()).collect();
-            if blocks.len() > 8 {
-                nums.push(format!("... +{}", blocks.len() - 8));
-            }
-            println!("    blocks: {}", nums.join(" "));
-
             for (p, c) in ps.iter().take(4) {
                 let lvl = blocks
                     .iter()
                     .find(|b| b.parent == Some(**p))
                     .and_then(|b| b.level)
                     .unwrap_or(0);
-                let slots: Vec<String> = blocks
-                    .iter()
-                    .filter(|b| b.parent == Some(**p))
-                    .take(6)
-                    .filter_map(|b| b.slot.map(|s| s.to_string()))
-                    .collect();
-                println!(
-                    "    {c} pointer(s) in block {p} (level {lvl}), slots {}",
-                    slots.join(" ")
-                );
+                println!("    {c} pointer(s) in block {p} (level {lvl})");
                 if d.map(|i| i.indirect) == Some(**p) {
                     println!("      -- named by i_indirect: read it on the device;");
                     println!("         0xcd means it was never written, which is the defect");

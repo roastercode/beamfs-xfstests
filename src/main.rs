@@ -63,7 +63,16 @@ fn main() -> std::process::ExitCode {
         Some("trace") => do_trace(&cfg, args.get(2), args.get(3)),
         Some("analyse" | "analyze") => do_analyse(args.get(2)),
         Some("--help" | "-h") => usage(),
-        _ => run(&cfg),
+        // A typo must not start a campaign. "analyses" for "analyse"
+        // fell through to run, which tried the aarch64 cluster -- powered
+        // off -- and would have run the suite for hours had it answered.
+        // Only a bare invocation means run.
+        None => run(&cfg),
+        Some(other) => {
+            eprintln!("beamfs-xfstests: unknown command '{other}'");
+            eprintln!();
+            usage()
+        }
     }
 }
 
