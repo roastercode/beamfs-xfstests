@@ -130,13 +130,19 @@ pub fn analyse(dir: &Path) -> Result<Report, String> {
             }
             "slot_store" => {
                 i.stores += 1;
-                let new = field(e.fields, "new=");
-                let old = field(e.fields, "old=").or_else(|| {
-                    // "0->1234" form: the value before the arrow.
-                    e.fields.split_once("->").and_then(|(a, _)| {
-                        a.rsplit(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
-                    })
-                });
+                // "ino=150 parent=33190 slot=5 0->26823 lvl=1": the old value is
+                // the last token before the arrow, the new one the first after.
+                // There is no new= field to read -- writing it as an arrow is what
+                // makes an overwrite one line to read instead of two to correlate.
+                let (old, new) = match e.fields.split_once("->") {
+                    Some((before, after)) => (
+                        before.trim_end().rsplit(' ').next()
+                            .and_then(|t| t.parse::<u64>().ok()),
+                        after.trim_start().split(' ').next()
+                            .and_then(|t| t.parse::<u64>().ok()),
+                    ),
+                    None => (field(e.fields, "old="), field(e.fields, "new=")),
+                };
                 if old.unwrap_or(0) != 0 {
                     overwrites += 1;
                 }
