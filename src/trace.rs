@@ -152,6 +152,9 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
 
     let end = Instant::now() + Duration::from_secs_f64(hours * 3600.0);
     let mut caught: Vec<Capture> = Vec::new();
+    // Blocks already reported in this series, so a loop is credited only
+    // with what it lost itself.
+    let mut known_lost: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut loops = 0u32;
     let stamp = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -163,6 +166,9 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
         // Progress as it happens. A loop is five seconds of load plus
         // mkfs, mount, unmount and fsck; a program silent for minutes is
         // indistinguishable from a hung one to whoever is watching.
+        if loops % 12 == 1 {
+            known_lost.clear();
+        }
         let t0 = Instant::now();
         // A spinner on its own line, redrawn every 200 ms while the loop
         // runs. A line printed once and then nothing for ten seconds
@@ -250,6 +256,17 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
         };
         spin.store(false, std::sync::atomic::Ordering::Relaxed);
         let _ = h.join();
+        // fsck reports every block lost since the filesystem was made,
+        // so on the second and later loops of a series it repeats what
+        // earlier loops lost. Keep only what is new: a capture should
+        // hold blocks its own trace can explain.
+        let fresh_lost: Vec<u64> =
+            lost.iter().copied().filter(|b| !known_lost.contains(b)).collect();
+        for b in &lost {
+            known_lost.insert(*b);
+        }
+        let lost = fresh_lost;
+
         if lost.is_empty() {
             println!("\r  loop {loops:<4} clean   {}s                              ",
                      t0.elapsed().as_secs());

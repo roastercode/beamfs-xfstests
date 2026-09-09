@@ -88,6 +88,14 @@ impl Load {
 }
 
 /// What one loop did.
+///
+/// `lost` is what fsck reports, which on a volume kept across loops is
+/// cumulative: a block lost at loop 3 is still lost at loop 4, and
+/// still reported. The caller subtracts what it already knew, so a
+/// capture holds the blocks that loop lost rather than every block lost
+/// since the filesystem was made. Without that, the second capture of a
+/// series lists the first one's blocks and its trace contains no
+/// mention of them.
 pub struct LoopResult {
     /// Blocks fsck calls used-but-unreferenced.
     pub lost: Vec<u64>,
