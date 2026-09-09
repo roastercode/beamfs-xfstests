@@ -113,10 +113,6 @@ impl Progress {
             self.started.elapsed().as_secs()
         );
     }
-
-    pub fn elapsed(&self) -> Duration {
-        self.started.elapsed()
-    }
 }
 
 impl Drop for Progress {
