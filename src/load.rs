@@ -141,7 +141,7 @@ mkdir -p {mnt}
 # mounted alongside it comes back at loop 5. Whatever is wrong involves
 # more than one beamfs superblock being live at once, so a reproducer
 # that mounts one measures nothing.
-mount | grep -q ' /mnt/test ' || {{
+[ "{no_test_mount}" = "1" ] || mount | grep -q ' /mnt/test ' || {{
   mkfs.beamfs {mkfs_opts} /dev/vdb >/dev/null 2>&1
   mkdir -p /mnt/test
   mount -t beamfs /dev/vdb /mnt/test 2>/dev/null
@@ -202,6 +202,8 @@ grep -oE '[0-9]+ referenced-but-free' /tmp/beamfs-fsck.out | grep -oE '^[0-9]+' 
 grep -oE 'block [0-9]+ marked' /tmp/beamfs-fsck.out | grep -oE '[0-9]+' || true
 exit 0
 "#,
+        no_test_mount = std::env::var("XFSTESTS_LOAD_NO_TEST_MOUNT")
+            .unwrap_or_else(|_| "0".into()),
         procs = l.procs,
         files = l.files,
         secs = l.secs,

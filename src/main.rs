@@ -16,6 +16,7 @@
 //! takes ten seconds on real hardware takes two to three minutes under
 //! TCG, and the suite is around 737 tests.
 
+mod matrix;
 mod analyse;
 mod load;
 mod trace;
@@ -62,6 +63,7 @@ fn main() -> std::process::ExitCode {
         Some("stop") => stop(&cfg),
         Some("trace") => do_trace(&cfg, args.get(2), args.get(3)),
         Some("analyse" | "analyze") => do_analyse(args.get(2)),
+        Some("matrix") => do_matrix(&cfg, args.get(2), args.get(3)),
         Some("--help" | "-h") => usage(),
         // A typo must not start a campaign. "analyses" for "analyse"
         // fell through to run, which tried the aarch64 cluster -- powered
@@ -78,7 +80,7 @@ fn main() -> std::process::ExitCode {
 
 fn usage() -> std::process::ExitCode {
     eprintln!(
-        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|stop]\n\
+        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|matrix|stop]\n\
          \n\
          run      shard the suite across the nodes and follow it (default)\n\
          probe    run one test with console capture and sampling\n\
@@ -87,6 +89,7 @@ fn usage() -> std::process::ExitCode {
          compare  diff two runs; last two if unnamed\n\
          trace    reproduce the block leak under load and keep the trace\n\
          analyse  read a capture and say what happened to the lost blocks\n\
+         matrix   vary one condition at a time and see which the leak needs\n\
          stop     kill the shards and release the mounts\n\
          \n\
          environment:\n\
@@ -890,6 +893,26 @@ fn do_analyse(arg: Option<&String>) -> std::process::ExitCode {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("analyse: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Vary one condition at a time and see which ones the leak needs.
+///
+/// `matrix [conditions] [loops]` -- all conditions and twelve loops by
+/// default. Conditions are comma-separated names; the manual lists them.
+fn do_matrix(cfg: &Config, which: Option<&String>, loops: Option<&String>) -> std::process::ExitCode {
+    let Some(node) = cfg.nodes.first() else {
+        eprintln!("no nodes configured");
+        return std::process::ExitCode::FAILURE;
+    };
+    let n: u32 = loops.and_then(|v| v.parse().ok()).unwrap_or(12);
+    println!("  node    : {}", node.name);
+    match matrix::run(cfg, node, which.map(|s| s.as_str()), n) {
+        Ok(_) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("matrix: {e}");
             std::process::ExitCode::FAILURE
         }
     }
