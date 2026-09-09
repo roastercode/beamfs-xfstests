@@ -59,6 +59,12 @@ one hour and ten captures. See
 .B THE TRACE COMMAND
 below.
 .TP
+.BI analyse " [capture]"
+Read a capture and say what happened to the blocks that went missing.
+With no argument, the three newest. See
+.B READING A CAPTURE
+below.
+.TP
 .B stop
 Stop a run in progress on every node and leave the filesystems
 unmounted.
@@ -91,7 +97,46 @@ Tracing stays on across the unmount. Stopping it beforehand and
 concluding from the silence that unmount issued no synchronous
 writeback was an artefact of the window, and cost a day.
 
-.SS Reading a capture
+.SH READING A CAPTURE
+.B analyse
+walks the chain for every lost block, which is the same shape every
+time: a block is allocated to an inode, a pointer to it is stored into
+a parent, the inode is dirtied and eventually written, and fsck walks
+that chain from the medium. So the questions are always which inode
+owned it, which parent holds the pointer, and whether the pointer went
+in before or after the inode was last written.
+.PP
+That last distinction decides between two different defects. Pointers
+stored
+.I after
+the inode's last write are lost because the inode on disk is older than
+its tree. Pointers stored
+.I before
+it went to disk with the inode, so the parent block is what failed to
+be written \(em and reading that parent on the device tells them apart:
+0xcd is a block never written at all, as opposed to one written with
+stale contents.
+.PP
+Leaks are grouped by owning inode, because one inode losing thirty
+blocks is one defect rather than thirty, and by parent within that,
+because several blocks under one parent means the parent is at fault.
+.PP
+Example output:
+.PP
+.RS
+.nf
+inode 150: 4 lost block(s)
+  dirtied 90 times, written 1 (0 synchronous), 62 tree stores
+  i_indirect at its last write: 33190
+  blocks: 26823 27756 27834 33590
+  4 pointer(s) in block 33190 (level 1), slots 5 22 39 56
+    -- named by i_indirect: read it on the device
+  all stored BEFORE the inode's last write:
+    the inode went to disk holding them, so the parent is at fault
+.fi
+.RE
+
+.SS What a capture holds
 A capture is a directory named
 .IR <epoch>-<NNN> ,
 holding:
