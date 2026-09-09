@@ -16,6 +16,7 @@
 //! takes ten seconds on real hardware takes two to three minutes under
 //! TCG, and the suite is around 737 tests.
 
+mod analyse;
 mod load;
 mod trace;
 mod archive;
@@ -60,6 +61,7 @@ fn main() -> std::process::ExitCode {
         Some("compare") => compare_runs(args.get(2), args.get(3)),
         Some("stop") => stop(&cfg),
         Some("trace") => do_trace(&cfg, args.get(2), args.get(3)),
+        Some("analyse" | "analyze") => do_analyse(args.get(2)),
         Some("--help" | "-h") => usage(),
         _ => run(&cfg),
     }
@@ -854,6 +856,29 @@ fn do_trace(cfg: &Config, hours: Option<&String>, max: Option<&String>) -> std::
         }
         Err(e) => {
             eprintln!("trace: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Read a capture and say what happened to the blocks that went missing.
+///
+/// `analyse` with no argument takes the three newest captures; with a
+/// directory, that one. The questions it answers -- which inode owned a
+/// lost block, which parent holds its pointer, whether the pointer went
+/// in before or after the inode was last written -- are the same every
+/// time, and were being asked by hand.
+fn do_analyse(arg: Option<&String>) -> std::process::ExitCode {
+    let r = match arg {
+        Some(p) => analyse::analyse(std::path::Path::new(p)).map(|r| {
+            r.print(std::path::Path::new(p));
+        }),
+        None => analyse::analyse_all(&trace::default_root(), 3),
+    };
+    match r {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("analyse: {e}");
             std::process::ExitCode::FAILURE
         }
     }
