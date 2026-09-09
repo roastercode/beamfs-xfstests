@@ -118,9 +118,9 @@ mkdir -p {mnt}
 "#
     );
     if fresh {
-        let _ = write!(
+        let _ = writeln!(
             s,
-            "mkfs.beamfs {mkfs_opts} {dev} >/dev/null 2>&1 || {{ echo 'MKFS FAILED' >&2; exit 1; }}\n"
+            "mkfs.beamfs {mkfs_opts} {dev} >/dev/null 2>&1 || {{ echo 'MKFS FAILED' >&2; exit 1; }}"
         );
     }
     let _ = write!(

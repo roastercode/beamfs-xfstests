@@ -191,6 +191,9 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
             loops % 12 == 1, Duration::from_secs(300),
         ) {
             Ok(r) => {
+                if r.formatted {
+                    println!("\r  loop {loops:<4} (fresh filesystem)                    ");
+                }
                 if r.dangling > 0 {
                     println!("\r  loop {loops:<4} {} referenced-but-free (opposite symptom)   ",
                              r.dangling);
