@@ -163,7 +163,14 @@ rm -rf $D
 # concluding from the silence that unmount issued no synchronous
 # writeback was an artefact of the window, and cost a day.
 echo unmount > /tmp/beamfs-step
-umount {mnt} || {{ echo 'UMOUNT FAILED' >&2; exit 1; }}
+# A writer that outlived its kill keeps the mount busy, and one busy
+# unmount must not end the loop: retry, then detach. A lazy unmount
+# still detaches the filesystem, which is what fsck needs, and the
+# stragglers die with their file descriptors.
+umount {mnt} 2>/dev/null ||
+  {{ sleep 2; pkill -9 xfs_io 2>/dev/null; sleep 1; umount {mnt} 2>/dev/null; }} ||
+  umount -l {mnt} 2>/dev/null ||
+  {{ echo 'UMOUNT FAILED' >&2; exit 1; }}
 sleep 1
 echo 0 > $T/tracing_on
 
