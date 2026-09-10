@@ -292,28 +292,40 @@ impl Req {
 /// the version, so this is deliberately loose: find a timestamp, an
 /// action and a sector, ignore anything that does not have all three.
 pub fn parse_blkparse(text: &str) -> Vec<Req> {
+    // The observed format, column by column:
+    //
+    //   253,32  2  5  0.000010770  1040  D  WS  8800 + 8 [dd]
+    //   device  ^  ^  timestamp    pid   ^  ^   sector  blocks
+    //           cpu seq                  |  operation
+    //                                    action
+    //
+    // The operation is WS, WFS, RA and so on -- never a bare W, which
+    // is what a first pass looked for and why a capture of fifteen
+    // thousand events parsed as none of them.
     let mut out = Vec::new();
     for line in text.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
         if f.len() < 8 {
             continue;
         }
-        let Some(t) = f.get(3).and_then(|x| x.trim_end_matches(':').parse::<f64>().ok()) else {
-            continue;
-        };
-        let action = f.get(5).and_then(|x| x.chars().next()).unwrap_or('?');
-        if action != 'D' && action != 'C' && action != 'Q' {
+        let Some(t) = f[3].parse::<f64>().ok() else { continue };
+        let Some(action) = f[5].chars().next() else { continue };
+        // Q queued, G got a request, D dispatched to the device,
+        // C completed. P and U are plug and unplug and carry no sector.
+        if !matches!(action, 'Q' | 'G' | 'D' | 'C') {
             continue;
         }
-        let rw = f.get(6).unwrap_or(&"").to_string();
+        let rw = f[6].to_string();
         if !rw.starts_with('W') && !rw.starts_with('F') {
             continue;
         }
-        let Some(sector) = f.get(7).and_then(|x| x.parse::<u64>().ok()) else {
-            continue;
-        };
+        let Some(sector) = f[7].parse::<u64>().ok() else { continue };
+        // "8800 + 8": the count follows a plus sign, and a request
+        // without one is a single block.
         let blocks = f
-            .get(9)
+            .iter()
+            .position(|x| *x == "+")
+            .and_then(|i| f.get(i + 1))
             .and_then(|x| x.parse::<u32>().ok())
             .unwrap_or(1);
         out.push(Req { t, sector, blocks, rw, action });
@@ -433,9 +445,21 @@ mod tests {
 
     #[test]
     fn blkparse_lines_without_all_three_fields_are_skipped() {
-        let text = "8,0 1 1 0.000000000 1234 D W 512 + 8 [dd]\ngarbage\n8,0 1 2 x D W\n";
+        // Real output, WS not W, plus a plug line that carries no
+        // sector and a truncated one.
+        let text = "253,32 2 5 0.000010770 1040 D WS 8800 + 8 [dd]\n\
+                    253,32 2 3 0.000006815 1040 P N [dd]\n\
+                    garbage\n";
         let r = parse_blkparse(text);
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].sector, 512);
+        assert_eq!(r[0].sector, 8800);
+        assert_eq!(r[0].blocks, 8);
+        assert_eq!(r[0].action, 'D');
+    }
+
+    #[test]
+    fn a_read_ahead_is_not_a_write() {
+        let text = "253,32 2 7 0.001727885 1040 Q RA 8808 + 8 [dd]\n";
+        assert!(parse_blkparse(text).is_empty());
     }
 }
