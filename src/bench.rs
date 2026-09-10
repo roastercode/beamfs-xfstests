@@ -349,8 +349,14 @@ pub fn run(
     // the volumes mounted, xfstests deletes the first one's temporary
     // files, and both report failures that belong to neither. Refuse
     // rather than produce results nobody can trust.
-    if let Ok(m) = c.run("mount | grep -c ' /mnt/scratch '", Duration::from_secs(20)) {
-        if m.trim() != "0" {
+    // run_rc, not run: grep exits non-zero when it matches nothing,
+    // which run reports as an error -- so a clean node looked busy and
+    // the campaign refused to start on it.
+    if let Ok((m, _)) = c.run_rc(
+        "mount | grep -c ' /mnt/scratch ' || true",
+        Duration::from_secs(20),
+    ) {
+        if m.trim().parse::<u32>().unwrap_or(0) > 0 {
             return Err(
                 "the scratch volume is already mounted -- another campaign is running on this node"
                     .into(),
