@@ -188,17 +188,18 @@ pub fn start(t: &Tracing, cfg: &Config, node: &Node, secs: u64) -> Result<f64, S
         "sudo sh -c 'mkdir -p /var/trace && cd /var/trace && rm -f guest.* perf.*; \
          nohup blktrace -d /dev/{dev} -a write -a issue -a complete -o guest \
            -D /var/trace -w {window} </dev/null >/var/trace/bt.log 2>&1 & \
-         nohup perf record -a -g -F 199 -o /var/trace/perf.data -- sleep {window} \
+         nohup timeout {window} perf record -a -g -F 199 -o /var/trace/perf.data \
            </dev/null >/dev/null 2>&1 & \
-         sleep 2; pgrep -c blktrace'",
+         echo started'",
         dev = t.guest_dev
     );
-    let started = c
-        .run(&cmd, Duration::from_secs(60))
+    // Return at once: waiting for blktrace to settle inside the same
+    // ssh call took the command past its own deadline and the trace
+    // never started at all. Whether it took is checked separately, at
+    // the end, by whether it produced anything.
+    c.run(&cmd, Duration::from_secs(30))
         .map_err(|e| format!("guest trace: {e}"))?;
-    if started.trim() == "0" {
-        return Err("blktrace did not start in the guest".into());
-    }
+    std::thread::sleep(Duration::from_secs(3));
 
     // Host: blktrace on the real device under the images.
     let _ = std::process::Command::new("sh")

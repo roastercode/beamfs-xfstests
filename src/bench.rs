@@ -272,15 +272,28 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
     // What the harness objected to, when it was not a leak. Trial 1 of
     // the last campaign failed with fsck reporting nothing, and the
     // reason was thrown away with the output.
-    let complaint: String = out
-        .lines()
-        .skip_while(|l| !l.contains("- output mismatch") && !l.contains("[failed"))
-        .take(12)
-        .filter(|l| l.starts_with('+') || l.contains("_check") || l.contains("aborting"))
-        .take(4)
-        .map(|l| l.trim().to_string())
-        .collect::<Vec<_>>()
-        .join(" | ");
+    // Both failing trials of the last campaign lost no blocks at all:
+    // fsck found nothing, the tree checker saw nothing, and 464 failed
+    // anyway. Whatever it objects to in those runs is not a leak, and
+    // the reason was being filtered away by a pattern that assumed one.
+    // Keep the harness's own words instead.
+    let complaint: String = if passed {
+        String::new()
+    } else {
+        out.lines()
+            .filter(|l| {
+                l.contains("output mismatch")
+                    || l.contains("_check")
+                    || l.contains("aborting")
+                    || l.starts_with('+')
+                    || l.contains("Failures:")
+                    || l.contains("failed")
+            })
+            .take(6)
+            .map(|l| l.trim().to_string())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
 
     if !failed_names.is_empty() {
         println!();
@@ -288,8 +301,17 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
                  failed_names.join(" "));
     }
 
-    if !passed && !aborted && !complaint.is_empty() {
-        println!("    reason: {complaint}");
+    if !passed && !aborted {
+        if complaint.is_empty() {
+            // Nothing matched: keep the tail so the reason is not lost
+            // to a filter a second time.
+            println!("    reason unmatched, tail follows:");
+            for l in out.lines().rev().take(8).collect::<Vec<_>>().iter().rev() {
+                println!("      {}", l.trim());
+            }
+        } else {
+            println!("    reason: {complaint}");
+        }
     }
 
     Ok(Attempt {
