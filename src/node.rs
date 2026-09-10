@@ -64,6 +64,24 @@ impl<'a> NodeConn<'a> {
     /// type. Neither covers a connection that opens and then never
     /// answers, which is what a wedged filesystem produces, so the
     /// deadline is enforced here as well.
+    /// Run a command whose non-zero exit is an answer, not a failure.
+    ///
+    /// `run` treats rc != 0 as an error, which is right for a mount or
+    /// an mkfs and wrong for a test: generic/464 exits non-zero when it
+    /// fails, and counting that as an execution error dropped three
+    /// real failures out of ten and reported the run as 100% passing.
+    /// This returns the output and the code, and lets the caller decide
+    /// which is which.
+    pub fn run_rc(&self, cmd: &str, deadline: Duration)
+        -> Result<(String, i32), NodeError>
+    {
+        match self.run(cmd, deadline) {
+            Ok(out) => Ok((out, 0)),
+            Err(NodeError::Command { rc, stderr }) => Ok((stderr, rc)),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn run(&self, cmd: &str, deadline: Duration) -> Result<String, NodeError> {
         let out = Command::new("timeout")
             .arg(format!("{}", deadline.as_secs()))

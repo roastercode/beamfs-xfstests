@@ -29,6 +29,9 @@ use std::time::{Duration, Instant};
 
 use crate::config::{Config, Node};
 use crate::stats::{self, Baseline, Series, Trial};
+use crate::state::{self, Record};
+use crate::mem_trace;
+use crate::trace_stack::{self, Tracing};
 use crate::indicator::Progress;
 use crate::node::NodeConn;
 
@@ -202,8 +205,15 @@ fn prepare(c: &NodeConn, mkfs_opts: &str) -> Result<String, String> {
 
 fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, String> {
     let t0 = Instant::now();
-    let out = c
-        .run(
+    // run_rc, not run: a failing test exits non-zero and that is the
+    // result, not an error running it.
+    //
+    // `test` is passed through to ./check untouched, so everything the
+    // harness understands works: one test, several, a -g group, or
+    // nothing at all for the whole suite. A selection that takes hours
+    // is measured the same way as one that takes three minutes.
+    let (out, _rc) = c
+        .run_rc(
             &format!("cd /usr/xfstests && sudo timeout -k 5 {} ./check {test} 2>&1",
                      deadline.as_secs().saturating_sub(30)),
             deadline,
@@ -214,7 +224,23 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
     // verdict. Counting it as a failure is how a stale mount became an
     // afternoon of chasing a defect that was not there.
     let aborted = out.contains("aborting");
-    let passed = out.contains("Passed all 1");
+    // "Passed all N" for any N, not just one: a group of ninety tests
+    // that all passed says "Passed all 90", and matching only the
+    // single-test wording scored every group run as a failure.
+    let passed = out
+        .lines()
+        .any(|l| l.starts_with("Passed all ") && !l.contains(" 0 "));
+    // How many ran and how many failed, for a selection larger than one.
+    let ran = out
+        .lines()
+        .find_map(|l| l.strip_prefix("Ran: "))
+        .map(|r| r.split_whitespace().count())
+        .unwrap_or(if passed { 1 } else { 1 });
+    let failed_names: Vec<String> = out
+        .lines()
+        .find_map(|l| l.strip_prefix("Failures: "))
+        .map(|r| r.split_whitespace().map(String::from).collect())
+        .unwrap_or_default();
 
     let lost = c
         .run(
@@ -235,6 +261,12 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0);
+
+    if !failed_names.is_empty() {
+        println!();
+        println!("    {} of {ran} failed: {}", failed_names.len(),
+                 failed_names.join(" "));
+    }
 
     Ok(Attempt {
         trial: Trial { passed, lost, violations, secs: t0.elapsed().as_secs() },
@@ -264,6 +296,27 @@ pub fn run(
     println!();
 
     let mut series = Series { commit: r_commit.clone(), trials: Vec::new() };
+    // The state around every trial, kept for the ones that pass too: a
+    // variable only implicates itself when the failures differ from the
+    // successes, and a record of failures alone cannot show that.
+    let mut records: Vec<Record> = Vec::new();
+    let domain = std::env::var("XFSTESTS_DOMAIN")
+        .unwrap_or_else(|_| format!("beamfs-{}", node.name));
+
+    // Tracing is off unless asked for: blktrace and the function
+    // profiler cost enough to move the timing of a race, and a
+    // measurement that changes what it measures is worth nothing.
+    let tracing = std::env::var("XFSTESTS_TRACE").is_ok_and(|v| v == "1");
+    if tracing {
+        for (what, ok, val) in trace_stack::check(cfg, node) {
+            if !ok {
+                println!("  missing: {what} ({val})");
+            }
+        }
+        if let Err(e) = mem_trace::arm(cfg, node) {
+            println!("  function profile not armed: {e}");
+        }
+    }
     let mut r = Run {
         commit: rev,
         test: test.into(),
@@ -279,7 +332,39 @@ pub fn run(
             &cfg.ssh_key,
             &format!("{}@{}", cfg.user, node.host),
         );
-        let t = match one_trial(&c, test, Duration::from_secs(600)) {
+        let before = state::capture(cfg, node, &domain);
+        let mem_before = if tracing { mem_trace::capture(cfg, node) } else { Default::default() };
+        let tr = if tracing {
+            let t = Tracing {
+                dir: store().parent().unwrap_or(std::path::Path::new("/tmp"))
+                    .join(format!("trace-{}-{n}", r.test.replace('/', "-"))),
+                domain: domain.clone(),
+                host_dev: std::env::var("XFSTESTS_HOST_DEV")
+                    .unwrap_or_else(|_| "nvme1n1".into()),
+                guest_dev: node.scratch_dev.rsplit('/').next().unwrap_or("vdc").into(),
+            };
+            match trace_stack::start(&t, cfg, node) {
+                Ok(off) => Some((t, off)),
+                Err(e) => {
+                    println!("  trace not started: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        // A single test is minutes; the whole suite is hours. The
+        // deadline follows the selection rather than a constant that
+        // would kill the long ones halfway.
+        let budget = std::env::var("XFSTESTS_TRIAL_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(if test.trim().is_empty() || test.contains("-g ") {
+                14 * 3600
+            } else {
+                600
+            });
+        let t = match one_trial(&c, test, Duration::from_secs(budget)) {
             Ok(t) => t,
             Err(e) => {
                 p.finish(&format!("error: {e}"));
@@ -299,6 +384,38 @@ pub fn run(
         // has the losses and the checker's count and not just an
         // outcome column.
         series.trials.push(t.trial);
+        let after = state::capture(cfg, node, &domain);
+        if let Some((t, off)) = tr {
+            match trace_stack::stop(&t, cfg, node, off) {
+                Ok(clocks) => trace_stack::report(&t.dir, &clocks, &t.domain),
+                Err(e) => println!("  trace not stopped cleanly: {e}"),
+            }
+        }
+        if tracing {
+            // Sampled over five seconds: long enough for the counters
+            // to mean something, short enough not to stretch the trial.
+            let mem_after = mem_trace::capture_with_hw(cfg, node, &domain, 5);
+            let prof = mem_trace::profile(cfg, node);
+            mem_trace::report(&mem_before, &mem_after, &prof);
+            mem_trace::reset(cfg, node);
+        }
+        // Written as it happens, not at the end. Yesterday's campaign
+        // was interrupted at trial four and everything it had measured
+        // went with it.
+        append_record(&r.test, n, &t.trial, &after.delta(&before));
+        records.push(Record {
+            n,
+            passed: t.trial.passed,
+            lost: t.trial.lost,
+            violations: t.trial.violations,
+            secs: t.trial.secs,
+            during: after.delta(&before),
+            before,
+            after,
+            dmesg: c
+                .run("sudo dmesg | tail -200", Duration::from_secs(30))
+                .unwrap_or_default(),
+        });
         if t.trial.passed {
             r.passed += 1;
             p.finish(&format!("pass ({}s)", t.trial.secs));
@@ -318,6 +435,7 @@ pub fn run(
     // own hides all three.
     stats::report(&series);
     report(&r);
+    state::report(&records);
 
     // The comparison against the last stored run, judged against the
     // spread on unchanged code rather than against nothing. Without a
@@ -531,4 +649,32 @@ pub fn baseline(
     }
     stats::report_baseline(&b);
     Ok(b)
+}
+
+/// Append one trial's state to the log as soon as it is measured.
+///
+/// One line per variable, prefixed by the trial: greppable, appendable,
+/// and complete even when the run is killed halfway.
+fn append_record(test: &str, n: u32, t: &Trial, during: &crate::state::Snapshot) {
+    let Some(dir) = store().parent().map(|d| d.to_path_buf()) else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let p = dir.join(format!("state-{}.log", test.replace('/', "-")));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut body = format!(
+        "{now} {n} outcome={} lost={} violations={} secs={}\n",
+        if t.passed { "pass" } else { "fail" },
+        t.lost,
+        t.violations,
+        t.secs
+    );
+    for (k, v) in &during.v {
+        body.push_str(&format!("{now} {n} {k}={v}\n"));
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+        let _ = f.write_all(body.as_bytes());
+    }
 }

@@ -16,6 +16,9 @@
 //! takes ten seconds on real hardware takes two to three minutes under
 //! TCG, and the suite is around 737 tests.
 
+mod mem_trace;
+mod trace_stack;
+mod state;
 mod stats;
 mod bench;
 mod indicator;
@@ -95,7 +98,7 @@ fn usage() -> std::process::ExitCode {
          trace    reproduce the block leak under load and keep the trace\n\
          analyse  read a capture and say what happened to the lost blocks\n\
          matrix   vary one condition at a time and see which the leak needs\n\
-         bench    measure one test's pass rate and compare it to last time\n\
+         bench    measure a test, a group or the whole suite, and compare\n\
          baseline run the same code several times and report the spread\n\
          stop     kill the shards and release the mounts\n\
          \n\
@@ -935,7 +938,13 @@ fn do_bench(cfg: &Config, test: Option<&String>, trials: Option<&String>) -> std
         eprintln!("no nodes configured");
         return std::process::ExitCode::FAILURE;
     };
-    let t = test.map(|s| s.as_str()).unwrap_or("generic/464");
+    // Anything ./check accepts: "generic/464", "generic/464 generic/589",
+    // "-g auto", or "all" for the whole suite.
+    let t = match test.map(|s| s.as_str()) {
+        Some("all") | Some("") => "",
+        Some(x) => x,
+        None => "generic/464",
+    };
     let n: u32 = trials.and_then(|v| v.parse().ok()).unwrap_or(10);
     match bench::run(cfg, node, t, n) {
         Ok(_) => std::process::ExitCode::SUCCESS,
