@@ -233,6 +233,17 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
     // verdict. Counting it as a failure is how a stale mount became an
     // afternoon of chasing a defect that was not there.
     let aborted = out.contains("aborting");
+    // Whether the check ran at all. Without it, a count of zero means
+    // the question was never asked.
+    let (checked, _) = c
+        .run_rc(
+            &format!(
+                "sudo grep -c 'fsck' /usr/xfstests/results/{test}.full 2>/dev/null || echo 0"
+            ),
+            Duration::from_secs(30),
+        )
+        .unwrap_or_else(|_| ("0".into(), 0));
+    let checked = checked.trim().parse::<u32>().unwrap_or(0) > 0;
     // "Passed all N" for any N, not just one: a group of ninety tests
     // that all passed says "Passed all 90", and matching only the
     // single-test wording scored every group run as a failure.
@@ -251,15 +262,26 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
         .map(|r| r.split_whitespace().map(String::from).collect())
         .unwrap_or_default();
 
+    // grep over a glob prefixes each match with its filename, so
+    // '/usr/.../464.full:512 used-but-unreferenced' never matched an
+    // anchored '^[0-9]+' and the block count came from nowhere. Read
+    // the number that precedes the phrase instead, and only from the
+    // file this test wrote.
+    //
+    // 464 runs _check_scratch_fs in its cleanup, so a trial that dies
+    // early never reaches fsck: no count is not the same as no leak,
+    // and the two were being reported identically.
     let lost = c
-        .run(
-            "sudo grep -oE '[0-9]+ used-but-unreferenced' \
-             /usr/xfstests/results/generic/*.full 2>/dev/null | \
-             grep -oE '^[0-9]+' | head -1",
+        .run_rc(
+            &format!(
+                "sudo grep -oE '[0-9]+ used-but-unreferenced' \
+                 /usr/xfstests/results/{test}.full 2>/dev/null | \
+                 head -1 | grep -oE '[0-9]+' | head -1 || true"
+            ),
             Duration::from_secs(30),
         )
         .ok()
-        .and_then(|s| s.trim().parse().ok())
+        .and_then(|(s, _)| s.trim().parse().ok())
         .unwrap_or(0);
 
     // Pointers the tree checker saw vanish, when the kernel was built
@@ -312,6 +334,15 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
         // top of it. The caller prints this after finishing.
         reason: if passed || aborted {
             String::new()
+        } else if !checked {
+            // The single most useful thing to know about a short
+            // failure: the filesystem was never checked, so whatever
+            // went wrong went wrong before fsck could have an opinion.
+            format!(
+                "the test did not reach its own fsck ({}s) -- not a leak: {}",
+                t0.elapsed().as_secs(),
+                out.lines().rev().take(4).collect::<Vec<_>>().join(" | ")
+            )
         } else if complaint.is_empty() {
             out.lines()
                 .rev()
