@@ -16,6 +16,7 @@
 //! takes ten seconds on real hardware takes two to three minutes under
 //! TCG, and the suite is around 737 tests.
 
+mod evidence;
 mod mem_trace;
 mod trace_stack;
 mod state;

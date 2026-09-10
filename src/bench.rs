@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use crate::config::{Config, Node};
 use crate::stats::{self, Baseline, Series, Trial};
 use crate::state::{self, Record};
+use crate::evidence::{self, Case};
 use crate::mem_trace;
 use crate::trace_stack::{self, Tracing};
 use crate::indicator::Progress;
@@ -44,6 +45,9 @@ struct Attempt {
     aborted: bool,
     /// What the harness objected to, empty when it passed.
     reason: String,
+    /// Everything check printed, kept whole rather than filtered: the
+    /// question asked of it changes and the output does not come back.
+    output: String,
 }
 
 /// A run of trials against one revision.
@@ -329,6 +333,7 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
     Ok(Attempt {
         trial: Trial { passed, lost, violations, secs: t0.elapsed().as_secs() },
         aborted,
+        output: out.clone(),
         // Carried rather than printed: the indicator owns the current
         // line until finish() clears it, and a println here lands on
         // top of it. The caller prints this after finishing.
@@ -395,10 +400,30 @@ pub fn run(
         }
     }
 
+    // Seed the load and trace the script. Without a seed two trials
+    // write different files at different sizes, so a failure and a
+    // success cannot be compared -- which is why no comparison between
+    // them has ever been possible.
+    let seed: u32 = std::env::var("XFSTESTS_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20260910);
+    let instrumented = match evidence::instrument(cfg, node, test, seed) {
+        Ok(()) => {
+            println!("  seed    : {seed} (same load every trial, traced line by line)");
+            true
+        }
+        Err(e) => {
+            println!("  not instrumented: {e}");
+            false
+        }
+    };
+
     let state = prepare(&c, &cfg.mkfs_options).map_err(|e| format!("prepare: {e}"))?;
     println!("  node    : {}", state.trim());
     println!();
 
+    let r_commit_test = test.to_string();
     let mut series = Series { commit: r_commit.clone(), trials: Vec::new() };
     // The state around every trial, kept for the ones that pass too: a
     // variable only implicates itself when the failures differ from the
@@ -490,6 +515,24 @@ pub fn run(
         // has the losses and the checker's count and not just an
         // outcome column.
         series.trials.push(t.trial);
+        // Before anything else, and before the next trial's mkfs: the
+        // .full is overwritten by every trial, so a count read after
+        // the fact belongs to whichever trial ran last. Every number
+        // reported over the last two days came from a stale file that
+        // way.
+        let case = Case::new(&evidence_root(), &r.test, n);
+        evidence::collect(cfg, node, &case, &t.output);
+        if !t.trial.passed && !t.aborted {
+            match evidence::freeze_volume(cfg, node, &case) {
+                Ok(sz) => println!(
+                    "    trial {} volume kept: {} MiB compressed",
+                    case.trial(),
+                    sz / 1048576
+                ),
+                Err(e) => println!("    volume not kept: {e}"),
+            }
+        }
+
         let after = state::capture(cfg, node, &domain);
         // The indicator owns the current line until finish() clears it.
         // Printing a report over it interleaves the two.
@@ -541,6 +584,44 @@ pub fn run(
             r.failed += 1;
             r.lost.push(t.trial.lost);
         }
+    }
+
+    if instrumented {
+        evidence::restore(cfg, node, test);
+    }
+
+    // The first failing trial against the first passing one. With the
+    // same seed they ran the same script over the same files, so the
+    // first line that differs is the divergence itself rather than a
+    // hypothesis about it.
+    let root = evidence_root();
+    let first = |want_pass: bool| -> Option<std::path::PathBuf> {
+        records
+            .iter()
+            .find(|r| r.passed == want_pass)
+            .map(|r| Case::new(&root, &r_commit_test, r.n).dir)
+    };
+    if let (Some(p), Some(f)) = (first(true), first(false)) {
+        match evidence::diverge(&p, &f) {
+            Some(d) => evidence::report_divergence(&d),
+            None => println!("  the two traces never diverge: the failure is not in what ran\n"),
+        }
+    }
+
+    // What the campaign left on disk, and enough room for the next one.
+    let removed = evidence::prune(&root, 6);
+    let inv = evidence::inventory(&root);
+    if !inv.is_empty() {
+        let total: u64 = inv.iter().map(|(_, s, _)| s).sum();
+        println!(
+            "  evidence: {} trial(s), {} MiB, {} volume image(s) kept{}",
+            inv.len(),
+            total / 1048576,
+            inv.iter().filter(|(_, _, f)| *f).count(),
+            if removed > 0 { format!(", {removed} pruned") } else { String::new() }
+        );
+        println!("  under {}", root.display());
+        println!();
     }
 
     println!();
@@ -791,4 +872,12 @@ fn append_record(test: &str, n: u32, t: &Trial, during: &crate::state::Snapshot)
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
         let _ = f.write_all(body.as_bytes());
     }
+}
+
+/// Where the evidence for a campaign lives.
+fn evidence_root() -> std::path::PathBuf {
+    store()
+        .parent()
+        .map(|d| d.join("evidence"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp/beamfs-evidence"))
 }
