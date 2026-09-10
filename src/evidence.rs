@@ -95,8 +95,17 @@ cp $T.orig $T
 # every RANDOM in the test draws from it.
 sed -i "2i RANDOM={seed}" $T
 sed -i "3i {ps4}" $T
-sed -i "4i set -x" $T
-head -6 $T'"#
+# Redirected, not printed.
+#
+# set -x writes to stderr, which check captures and compares
+# against the expected output -- 464 expects "Silence is golden"
+# and got a megabyte and a half of trace, so every trial failed on
+# the instrumentation rather than on anything the filesystem did.
+# Sending fd 2 to a file leaves the comparison alone and keeps the
+# trace, which is the whole point of taking it.
+sed -i "4i exec 2>/tmp/beamfs-xtrace.\$\$" $T
+sed -i "5i set -x" $T
+head -8 $T'"#
             ),
             Duration::from_secs(60),
         )
@@ -152,18 +161,15 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
         }
     }
 
-    // The -x trace goes to the test's own output, which check keeps
-    // separately from what it prints.
+    // The -x trace, from where the test redirected it. Kept beside
+    // the rest rather than left on the node: it is the only record of
+    // which line the trial reached.
     if let Ok((t, _)) = c.run_rc(
-        &format!(
-            "sudo cat /usr/xfstests/results/{}.out.bad /usr/xfstests/results/{}.notrun \
-             2>/dev/null || true",
-            case.test, case.test
-        ),
-        Duration::from_secs(60),
+        "sudo sh -c 'cat /tmp/beamfs-xtrace.* 2>/dev/null; rm -f /tmp/beamfs-xtrace.*' || true",
+        Duration::from_secs(120),
     ) {
         if !t.trim().is_empty() {
-            case.put("harness", &t);
+            case.put("xtrace", &t);
         }
     }
 }
