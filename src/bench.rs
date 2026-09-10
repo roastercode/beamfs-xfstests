@@ -235,7 +235,7 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
         .lines()
         .find_map(|l| l.strip_prefix("Ran: "))
         .map(|r| r.split_whitespace().count())
-        .unwrap_or(if passed { 1 } else { 1 });
+        .unwrap_or(1);
     let failed_names: Vec<String> = out
         .lines()
         .find_map(|l| l.strip_prefix("Failures: "))
