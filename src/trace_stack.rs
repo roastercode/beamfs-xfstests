@@ -167,39 +167,49 @@ impl Clocks {
 ///
 /// Returned handles must be stopped even on an error path, or blktrace
 /// keeps writing until the disk fills -- it has no timeout of its own.
-pub fn start(t: &Tracing, cfg: &Config, node: &Node) -> Result<f64, String> {
+pub fn start(t: &Tracing, cfg: &Config, node: &Node, secs: u64) -> Result<f64, String> {
     let c = NodeConn::new(node, cfg);
     std::fs::create_dir_all(&t.dir).map_err(|e| e.to_string())?;
 
     // Guest: blktrace on the scratch device, plus perf on the whole
     // kernel. -a write and -a issue keep the volume down; a full trace
     // of twelve million requests is not readable and fills the guest.
-    c.run(
-        &format!(
-            "sudo sh -c 'mkdir -p /var/trace && cd /var/trace && rm -f *; \
-             setsid blktrace -d /dev/{} -a write -a issue -a complete -o guest \
-               -D /var/trace </dev/null >/dev/null 2>&1 & \
-             echo $! > /var/trace/blktrace.pid; \
-             setsid perf record -a -g -F 199 -o /var/trace/perf.data \
-               </dev/null >/dev/null 2>&1 & \
-             echo $! > /var/trace/perf.pid; \
-             sleep 2'",
-            t.guest_dev
-        ),
-        Duration::from_secs(60),
-    )
-    .map_err(|e| format!("guest trace: {e}"))?;
+    // -w gives blktrace its own deadline, so it needs no detaching and
+    // no killing: a background job started over ssh dies with the
+    // session, which is why an earlier attempt produced four files
+    // holding no requests at all. The ssh call returns immediately and
+    // blktrace runs to its own clock.
+    //
+    // The window is the trial's budget plus a margin, because a trace
+    // that stops before the trial does misses the end -- which is where
+    // unmount and fsck are, and where the loss is counted.
+    let window = secs + 120;
+    let cmd = format!(
+        "sudo sh -c 'mkdir -p /var/trace && cd /var/trace && rm -f guest.* perf.*; \
+         nohup blktrace -d /dev/{dev} -a write -a issue -a complete -o guest \
+           -D /var/trace -w {window} </dev/null >/var/trace/bt.log 2>&1 & \
+         nohup perf record -a -g -F 199 -o /var/trace/perf.data -- sleep {window} \
+           </dev/null >/dev/null 2>&1 & \
+         sleep 2; pgrep -c blktrace'",
+        dev = t.guest_dev
+    );
+    let started = c
+        .run(&cmd, Duration::from_secs(60))
+        .map_err(|e| format!("guest trace: {e}"))?;
+    if started.trim() == "0" {
+        return Err("blktrace did not start in the guest".into());
+    }
 
     // Host: blktrace on the real device under the images.
     let _ = std::process::Command::new("sh")
         .arg("-c")
         .arg(format!(
             "mkdir -p {d} && cd {d} && rm -f host.blktrace.*; \
-             sudo setsid blktrace -d /dev/{dev} -a write -a issue -a complete \
-               -o host -D {d} </dev/null >/dev/null 2>&1 & \
-             echo $! > {d}/host-blktrace.pid",
+             sudo nohup blktrace -d /dev/{dev} -a write -a issue -a complete \
+               -o host -D {d} -w {window} </dev/null >/dev/null 2>&1 &",
             d = t.dir.display(),
-            dev = t.host_dev
+            dev = t.host_dev,
+            window = window
         ))
         .spawn()
         .map_err(|e| e.to_string())?;
@@ -236,9 +246,11 @@ pub fn stop(t: &Tracing, cfg: &Config, node: &Node, offset_start: f64)
 
     // Stop by pid rather than pkill: another campaign's blktrace on a
     // different device is not ours to kill.
+    // blktrace stopped on its own deadline; only a run cut short needs
+    // the signal, and killing a process that has already exited is
+    // harmless.
     let _ = c.run(
-        "sudo sh -c 'for p in /var/trace/blktrace.pid /var/trace/perf.pid; do \
-           [ -f $p ] && kill -INT $(cat $p) 2>/dev/null; done; sleep 2; \
+        "sudo sh -c 'pkill -INT blktrace 2>/dev/null; pkill -INT perf 2>/dev/null; sleep 3; \
            cd /var/trace && blkparse -i guest -d guest.bin > guest.txt 2>/dev/null; \
            perf report -i /var/trace/perf.data --stdio --sort symbol 2>/dev/null \
              | head -40 > /var/trace/perf.txt; \
@@ -249,9 +261,10 @@ pub fn stop(t: &Tracing, cfg: &Config, node: &Node, offset_start: f64)
     let _ = std::process::Command::new("sh")
         .arg("-c")
         .arg(format!(
-            "[ -f {d}/host-blktrace.pid ] && sudo kill -INT $(cat {d}/host-blktrace.pid) 2>/dev/null; \
-             sleep 2; cd {d} && blkparse -i host -d host.bin > host.txt 2>/dev/null",
-            d = t.dir.display()
+            "sudo pkill -INT -f 'blktrace -d /dev/{dev}' 2>/dev/null; \
+             sleep 3; cd {d} && blkparse -i host -d host.bin > host.txt 2>/dev/null",
+            d = t.dir.display(),
+            dev = t.host_dev
         ))
         .output();
 

@@ -356,6 +356,19 @@ pub fn run(
             &cfg.ssh_key,
             &format!("{}@{}", cfg.user, node.host),
         );
+        // A single test is minutes; the whole suite is hours. The
+        // deadline follows the selection rather than a constant that
+        // would kill the long ones halfway -- and the trace window is
+        // built from it, so it has to be known before tracing starts.
+        let budget: u64 = std::env::var("XFSTESTS_TRIAL_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(if test.trim().is_empty() || test.contains("-g ") {
+                14 * 3600
+            } else {
+                600
+            });
+
         let before = state::capture(cfg, node, &domain);
         let mem_before = if tracing { mem_trace::capture(cfg, node) } else { Default::default() };
         let tr = if tracing {
@@ -367,7 +380,7 @@ pub fn run(
                     .unwrap_or_else(|_| "nvme1n1".into()),
                 guest_dev: node.scratch_dev.rsplit('/').next().unwrap_or("vdc").into(),
             };
-            match trace_stack::start(&t, cfg, node) {
+            match trace_stack::start(&t, cfg, node, budget) {
                 Ok(off) => Some((t, off)),
                 Err(e) => {
                     println!("  trace not started: {e}");
@@ -377,17 +390,6 @@ pub fn run(
         } else {
             None
         };
-        // A single test is minutes; the whole suite is hours. The
-        // deadline follows the selection rather than a constant that
-        // would kill the long ones halfway.
-        let budget = std::env::var("XFSTESTS_TRIAL_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(if test.trim().is_empty() || test.contains("-g ") {
-                14 * 3600
-            } else {
-                600
-            });
         let t = match one_trial(&c, test, Duration::from_secs(budget)) {
             Ok(t) => t,
             Err(e) => {
