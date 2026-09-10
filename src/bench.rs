@@ -212,6 +212,13 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
     // harness understands works: one test, several, a -g group, or
     // nothing at all for the whole suite. A selection that takes hours
     // is measured the same way as one that takes three minutes.
+    // The step file the indicator reads. Without it every trial shows
+    // "start" for its whole duration and the spinner calls a healthy
+    // three-minute run STALLED.
+    let _ = c.run(
+        "sudo sh -c 'echo check > /tmp/beamfs-step'",
+        Duration::from_secs(20),
+    );
     let (out, _rc) = c
         .run_rc(
             &format!("cd /usr/xfstests && sudo timeout -k 5 {} ./check {test} 2>&1",
@@ -262,10 +269,27 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0);
 
+    // What the harness objected to, when it was not a leak. Trial 1 of
+    // the last campaign failed with fsck reporting nothing, and the
+    // reason was thrown away with the output.
+    let complaint: String = out
+        .lines()
+        .skip_while(|l| !l.contains("- output mismatch") && !l.contains("[failed"))
+        .take(12)
+        .filter(|l| l.starts_with('+') || l.contains("_check") || l.contains("aborting"))
+        .take(4)
+        .map(|l| l.trim().to_string())
+        .collect::<Vec<_>>()
+        .join(" | ");
+
     if !failed_names.is_empty() {
         println!();
         println!("    {} of {ran} failed: {}", failed_names.len(),
                  failed_names.join(" "));
+    }
+
+    if !passed && !aborted && !complaint.is_empty() {
+        println!("    reason: {complaint}");
     }
 
     Ok(Attempt {
@@ -385,6 +409,16 @@ pub fn run(
         // outcome column.
         series.trials.push(t.trial);
         let after = state::capture(cfg, node, &domain);
+        // The indicator owns the current line until finish() clears it.
+        // Printing a report over it interleaves the two.
+        p.finish(&if t.trial.passed {
+            format!("pass ({}s)", t.trial.secs)
+        } else {
+            format!(
+                "FAIL ({}s, {} blocks lost, {} pointer(s) seen to vanish)",
+                t.trial.secs, t.trial.lost, t.trial.violations
+            )
+        });
         if let Some((t, off)) = tr {
             match trace_stack::stop(&t, cfg, node, off) {
                 Ok(clocks) => trace_stack::report(&t.dir, &clocks, &t.domain),
@@ -418,14 +452,9 @@ pub fn run(
         });
         if t.trial.passed {
             r.passed += 1;
-            p.finish(&format!("pass ({}s)", t.trial.secs));
         } else {
             r.failed += 1;
             r.lost.push(t.trial.lost);
-            p.finish(&format!(
-                "FAIL ({}s, {} blocks lost, {} pointer(s) seen to vanish)",
-                t.trial.secs, t.trial.lost, t.trial.violations
-            ));
         }
     }
 

@@ -177,11 +177,13 @@ pub fn start(t: &Tracing, cfg: &Config, node: &Node) -> Result<f64, String> {
     c.run(
         &format!(
             "sudo sh -c 'mkdir -p /var/trace && cd /var/trace && rm -f *; \
-             blktrace -d /dev/{} -a write -a issue -a complete -o guest -D /var/trace \
-               >/dev/null 2>&1 & echo $! > /var/trace/blktrace.pid; \
-             perf record -a -g -F 199 -o /var/trace/perf.data \
-               >/dev/null 2>&1 & echo $! > /var/trace/perf.pid; \
-             sleep 1'",
+             setsid blktrace -d /dev/{} -a write -a issue -a complete -o guest \
+               -D /var/trace </dev/null >/dev/null 2>&1 & \
+             echo $! > /var/trace/blktrace.pid; \
+             setsid perf record -a -g -F 199 -o /var/trace/perf.data \
+               </dev/null >/dev/null 2>&1 & \
+             echo $! > /var/trace/perf.pid; \
+             sleep 2'",
             t.guest_dev
         ),
         Duration::from_secs(60),
@@ -193,8 +195,9 @@ pub fn start(t: &Tracing, cfg: &Config, node: &Node) -> Result<f64, String> {
         .arg("-c")
         .arg(format!(
             "mkdir -p {d} && cd {d} && rm -f host.blktrace.*; \
-             sudo blktrace -d /dev/{dev} -a write -a issue -a complete -o host -D {d} \
-               >/dev/null 2>&1 & echo $! > {d}/host-blktrace.pid",
+             sudo setsid blktrace -d /dev/{dev} -a write -a issue -a complete \
+               -o host -D {d} </dev/null >/dev/null 2>&1 & \
+             echo $! > {d}/host-blktrace.pid",
             d = t.dir.display(),
             dev = t.host_dev
         ))
@@ -236,7 +239,7 @@ pub fn stop(t: &Tracing, cfg: &Config, node: &Node, offset_start: f64)
     let _ = c.run(
         "sudo sh -c 'for p in /var/trace/blktrace.pid /var/trace/perf.pid; do \
            [ -f $p ] && kill -INT $(cat $p) 2>/dev/null; done; sleep 2; \
-           cd /var/trace && blkparse -i guest -d guest.bin >/dev/null 2>&1; \
+           cd /var/trace && blkparse -i guest -d guest.bin > guest.txt 2>/dev/null; \
            perf report -i /var/trace/perf.data --stdio --sort symbol 2>/dev/null \
              | head -40 > /var/trace/perf.txt; \
            chmod -R a+r /var/trace'",
@@ -247,7 +250,7 @@ pub fn stop(t: &Tracing, cfg: &Config, node: &Node, offset_start: f64)
         .arg("-c")
         .arg(format!(
             "[ -f {d}/host-blktrace.pid ] && sudo kill -INT $(cat {d}/host-blktrace.pid) 2>/dev/null; \
-             sleep 2; cd {d} && blkparse -i host -d host.bin >/dev/null 2>&1",
+             sleep 2; cd {d} && blkparse -i host -d host.bin > host.txt 2>/dev/null",
             d = t.dir.display()
         ))
         .output();
