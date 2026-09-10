@@ -28,16 +28,16 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::config::{Config, Node};
+use crate::stats::{self, Baseline, Series, Trial};
 use crate::indicator::Progress;
 use crate::node::NodeConn;
 
-/// One trial.
-struct Trial {
-    passed: bool,
-    /// Blocks fsck called used-but-unreferenced, when it got that far.
-    lost: usize,
-    secs: u64,
-    /// xfstests refused to start; says nothing about the filesystem.
+/// One trial, plus whether xfstests refused to start.
+///
+/// An abort says nothing about the filesystem, so it is carried beside
+/// the trial rather than inside it and is excluded from every rate.
+struct Attempt {
+    trial: Trial,
     aborted: bool,
 }
 
@@ -113,6 +113,35 @@ fn store() -> PathBuf {
     PathBuf::from("/var/tmp/beamfs-xfstests/bench.log")
 }
 
+/// The stored baseline for `test`, if `baseline` has ever been run.
+///
+/// Kept beside the run log. Until it exists, no comparison between
+/// revisions means anything, and compare() says exactly that.
+fn load_baseline(test: &str) -> Option<Baseline> {
+    let p = store().parent()?.join(format!("baseline-{}.log", test.replace('/', "-")));
+    let body = std::fs::read_to_string(p).ok()?;
+    let series: Vec<Series> = body
+        .lines()
+        .filter_map(Run::parse)
+        .map(|r| Series {
+            commit: r.commit.clone(),
+            trials: (0..r.passed)
+                .map(|_| Trial { passed: true, lost: 0, violations: 0, secs: 0 })
+                .chain(r.lost.iter().map(|&l| Trial {
+                    passed: false,
+                    lost: l,
+                    violations: 0,
+                    secs: 0,
+                }))
+                .collect(),
+        })
+        .collect();
+    if series.len() < 2 {
+        return None;
+    }
+    Some(Baseline { commit: series[0].commit.clone(), series })
+}
+
 /// The last stored run of `test`, whatever revision it was.
 fn previous(test: &str) -> Option<Run> {
     let body = std::fs::read_to_string(store()).ok()?;
@@ -171,7 +200,7 @@ fn prepare(c: &NodeConn, mkfs_opts: &str) -> Result<String, String> {
     c.run(&cmd, Duration::from_secs(180)).map_err(|e| e.to_string())
 }
 
-fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Trial, String> {
+fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, String> {
     let t0 = Instant::now();
     let out = c
         .run(
@@ -198,7 +227,19 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Trial, Stri
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0);
 
-    Ok(Trial { passed, lost, secs: t0.elapsed().as_secs(), aborted })
+    // Pointers the tree checker saw vanish, when the kernel was built
+    // with it. Without that number a leak of 28 blocks and a leak of
+    // 1014 look like the same event.
+    let violations = c
+        .run("sudo dmesg | grep -c 'LOST POINTER'", Duration::from_secs(30))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+
+    Ok(Attempt {
+        trial: Trial { passed, lost, violations, secs: t0.elapsed().as_secs() },
+        aborted,
+    })
 }
 
 /// Run `trials` of `test` and report against the previous stored run.
@@ -210,6 +251,7 @@ pub fn run(
 ) -> Result<Run, String> {
     let c = NodeConn::new(node, cfg);
     let rev = commit();
+    let r_commit = rev.clone();
 
     println!("  node    : {}", node.name);
     println!("  test    : {test}");
@@ -221,6 +263,7 @@ pub fn run(
     println!("  node    : {}", state.trim());
     println!();
 
+    let mut series = Series { commit: r_commit.clone(), trials: Vec::new() };
     let mut r = Run {
         commit: rev,
         test: test.into(),
@@ -245,23 +288,71 @@ pub fn run(
         };
         if t.aborted {
             r.aborted += 1;
-            p.finish(&format!("ABORTED ({}s) -- not a verdict", t.secs));
-            // An abort usually means the node is in a state the next
-            // trial will hit too. Clear it rather than aborting nine
-            // more times.
+            p.finish(&format!("ABORTED ({}s) -- not a verdict", t.trial.secs));
+            // An abort usually leaves the node in a state the next
+            // trial hits too. Clear it rather than aborting nine more
+            // times.
             let _ = prepare(&c, &cfg.mkfs_options);
-        } else if t.passed {
+            continue;
+        }
+        // Every trial that ran, pass or fail, so the statistics module
+        // has the losses and the checker's count and not just an
+        // outcome column.
+        series.trials.push(t.trial);
+        if t.trial.passed {
             r.passed += 1;
-            p.finish(&format!("pass ({}s)", t.secs));
+            p.finish(&format!("pass ({}s)", t.trial.secs));
         } else {
             r.failed += 1;
-            r.lost.push(t.lost);
-            p.finish(&format!("FAIL ({}s, {} blocks lost)", t.secs, t.lost));
+            r.lost.push(t.trial.lost);
+            p.finish(&format!(
+                "FAIL ({}s, {} blocks lost, {} pointer(s) seen to vanish)",
+                t.trial.secs, t.trial.lost, t.trial.violations
+            ));
         }
     }
 
     println!();
+    // The rate with its interval, the losses by size, and how much of
+    // each leak the tree checker accounts for -- a pass count on its
+    // own hides all three.
+    stats::report(&series);
     report(&r);
+
+    // The comparison against the last stored run, judged against the
+    // spread on unchanged code rather than against nothing. Without a
+    // baseline it says so instead of inventing a verdict -- which is
+    // what happened on 2026-09-09, three times.
+    if let Some(prev) = previous(&r.test) {
+        let before = Series {
+            commit: prev.commit.clone(),
+            trials: (0..prev.passed)
+                .map(|_| Trial { passed: true, lost: 0, violations: 0, secs: 0 })
+                .chain(prev.lost.iter().map(|&l| Trial {
+                    passed: false,
+                    lost: l,
+                    violations: 0,
+                    secs: 0,
+                }))
+                .collect(),
+        };
+        let base = load_baseline(&r.test);
+        stats::report_verdict(&stats::compare(&before, &series, base.as_ref()));
+    }
+
+    // Losses by order of magnitude: 28 blocks and 1014 are not one
+    // phenomenon with a wide spread, and a list of numbers hides that.
+    let all: Vec<usize> = series.trials.iter().map(|t| t.lost).collect();
+    let m = stats::magnitudes(&all);
+    if m.len() > 1 {
+        println!("  losses by size:");
+        for (d, n) in &m {
+            let lo = 10usize.pow(*d);
+            println!("    {lo}..{}: {n} trial(s)", lo * 10 - 1);
+        }
+        println!("  -- more than one order of magnitude: likely more than one mechanism");
+        println!();
+    }
     if let Err(e) = append(&r) {
         println!("  (not stored: {e})");
     }
@@ -373,4 +464,71 @@ mod tests {
     fn a_line_that_is_short_is_not_a_run() {
         assert!(Run::parse("abc generic/464").is_none());
     }
+}
+
+/// Run the same code several times over, and report the spread.
+///
+/// This is the number that was missing while three patches were judged
+/// and reverted on differences smaller than the measurement itself. It
+/// changes nothing between series -- same kernel, same node, same load
+/// -- so whatever difference comes out is what the measurement does on
+/// its own, and no comparison between revisions means anything until it
+/// is known.
+pub fn baseline(
+    cfg: &Config,
+    node: &Node,
+    test: &str,
+    trials: u32,
+    rounds: u32,
+) -> Result<Baseline, String> {
+    println!("  node    : {}", node.name);
+    println!("  test    : {test}");
+    println!("  commit  : {}", commit());
+    println!("  {rounds} series of {trials} trials, nothing changed between them");
+    println!();
+
+    let mut b = Baseline { commit: commit(), series: Vec::new() };
+    for k in 1..=rounds {
+        println!("  --- series {k}/{rounds} ---");
+        let r = run(cfg, node, test, trials)?;
+        // run() already printed the series; keep the rate for the spread.
+        b.series.push(Series {
+            commit: r.commit.clone(),
+            trials: (0..r.passed)
+                .map(|_| Trial { passed: true, lost: 0, violations: 0, secs: 0 })
+                .chain(r.lost.iter().map(|&l| Trial {
+                    passed: false,
+                    lost: l,
+                    violations: 0,
+                    secs: 0,
+                }))
+                .collect(),
+        });
+    }
+    // Store it: every later comparison is judged against this spread,
+    // so it has to outlive the session that measured it.
+    let p = store().parent().map(|d| d.join(format!("baseline-{}.log", test.replace('/', "-"))));
+    if let Some(p) = p {
+        let body: String = b
+            .series
+            .iter()
+            .map(|s| {
+                format!(
+                    "{} {} {} {} 0 {}\n",
+                    b.commit,
+                    test,
+                    s.passes(),
+                    s.n() - s.passes(),
+                    s.losses().iter().map(|l| l.to_string()).collect::<Vec<_>>().join(",")
+                )
+            })
+            .collect();
+        if let Err(e) = std::fs::write(&p, body) {
+            println!("  (baseline not stored: {e})");
+        } else {
+            println!("  baseline stored at {}", p.display());
+        }
+    }
+    stats::report_baseline(&b);
+    Ok(b)
 }

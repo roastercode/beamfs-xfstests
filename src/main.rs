@@ -16,6 +16,7 @@
 //! takes ten seconds on real hardware takes two to three minutes under
 //! TCG, and the suite is around 737 tests.
 
+mod stats;
 mod bench;
 mod indicator;
 mod matrix;
@@ -67,6 +68,7 @@ fn main() -> std::process::ExitCode {
         Some("analyse" | "analyze") => do_analyse(args.get(2)),
         Some("matrix") => do_matrix(&cfg, args.get(2), args.get(3)),
         Some("bench") => do_bench(&cfg, args.get(2), args.get(3)),
+        Some("baseline") => do_baseline(&cfg, args.get(2), args.get(3), args.get(4)),
         Some("--help" | "-h") => usage(),
         // A typo must not start a campaign. "analyses" for "analyse"
         // fell through to run, which tried the aarch64 cluster -- powered
@@ -83,7 +85,7 @@ fn main() -> std::process::ExitCode {
 
 fn usage() -> std::process::ExitCode {
     eprintln!(
-        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|matrix|bench|stop]\n\
+        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|matrix|bench|baseline|stop]\n\
          \n\
          run      shard the suite across the nodes and follow it (default)\n\
          probe    run one test with console capture and sampling\n\
@@ -94,6 +96,7 @@ fn usage() -> std::process::ExitCode {
          analyse  read a capture and say what happened to the lost blocks\n\
          matrix   vary one condition at a time and see which the leak needs\n\
          bench    measure one test's pass rate and compare it to last time\n\
+         baseline run the same code several times and report the spread\n\
          stop     kill the shards and release the mounts\n\
          \n\
          environment:\n\
@@ -938,6 +941,29 @@ fn do_bench(cfg: &Config, test: Option<&String>, trials: Option<&String>) -> std
         Ok(_) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("bench: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Run the same code several times and report the spread.
+///
+/// `baseline [test] [trials] [rounds]` -- generic/464, ten trials,
+/// three rounds by default. Nothing changes between rounds, so the
+/// difference between them is what the measurement does on its own.
+fn do_baseline(cfg: &Config, test: Option<&String>, trials: Option<&String>,
+               rounds: Option<&String>) -> std::process::ExitCode {
+    let Some(node) = cfg.nodes.first() else {
+        eprintln!("no nodes configured");
+        return std::process::ExitCode::FAILURE;
+    };
+    let t = test.map(|s| s.as_str()).unwrap_or("generic/464");
+    let n: u32 = trials.and_then(|v| v.parse().ok()).unwrap_or(10);
+    let k: u32 = rounds.and_then(|v| v.parse().ok()).unwrap_or(3);
+    match bench::baseline(cfg, node, t, n, k) {
+        Ok(_) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("baseline: {e}");
             std::process::ExitCode::FAILURE
         }
     }
