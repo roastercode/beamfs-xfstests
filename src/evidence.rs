@@ -191,16 +191,20 @@ pub fn freeze_volume(cfg: &Config, node: &Node, case: &Case) -> Result<u64, Stri
         Duration::from_secs(60),
     );
 
+    // The node's device name, with or without the /dev prefix: the
+    // config carries "vdc" and a first version passed it to dd as a
+    // relative path, which failed silently and left thirteen bytes of
+    // compressed nothing in every case directory.
     let out = case.dir.join("scratch.img.zst");
     let status = std::process::Command::new("sh")
         .arg("-c")
         .arg(format!(
             "ssh -i {key} -o BatchMode=yes -o StrictHostKeyChecking=no {user}@{host} \
-             'sudo dd if={dev} bs=1M 2>/dev/null | zstd -3 -T0 -c' > {out}",
+             'sudo dd if=/dev/{dev} bs=1M 2>/dev/null | zstd -3 -T0 -c' > {out}",
             key = cfg.ssh_key,
             user = cfg.user,
             host = node.host,
-            dev = node.scratch_dev,
+            dev = node.scratch_dev.trim_start_matches("/dev/"),
             out = out.display()
         ))
         .status()
@@ -208,7 +212,14 @@ pub fn freeze_volume(cfg: &Config, node: &Node, case: &Case) -> Result<u64, Stri
     if !status.success() {
         return Err("volume not frozen".into());
     }
-    std::fs::metadata(&out).map(|m| m.len()).map_err(|e| e.to_string())
+    let sz = std::fs::metadata(&out).map(|m| m.len()).map_err(|e| e.to_string())?;
+    // A compressed empty stream is about a dozen bytes. Keeping one
+    // looks like evidence and is not: better to say the capture failed.
+    if sz < 1024 {
+        let _ = std::fs::remove_file(&out);
+        return Err(format!("capture produced {sz} bytes -- nothing was read"));
+    }
+    Ok(sz)
 }
 
 /// Strip what differs between any two runs but means nothing.
