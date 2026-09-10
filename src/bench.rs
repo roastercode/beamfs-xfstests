@@ -42,6 +42,8 @@ use crate::node::NodeConn;
 struct Attempt {
     trial: Trial,
     aborted: bool,
+    /// What the harness objected to, empty when it passed.
+    reason: String,
 }
 
 /// A run of trials against one revision.
@@ -301,22 +303,28 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
                  failed_names.join(" "));
     }
 
-    if !passed && !aborted {
-        if complaint.is_empty() {
-            // Nothing matched: keep the tail so the reason is not lost
-            // to a filter a second time.
-            println!("    reason unmatched, tail follows:");
-            for l in out.lines().rev().take(8).collect::<Vec<_>>().iter().rev() {
-                println!("      {}", l.trim());
-            }
-        } else {
-            println!("    reason: {complaint}");
-        }
-    }
 
     Ok(Attempt {
         trial: Trial { passed, lost, violations, secs: t0.elapsed().as_secs() },
         aborted,
+        // Carried rather than printed: the indicator owns the current
+        // line until finish() clears it, and a println here lands on
+        // top of it. The caller prints this after finishing.
+        reason: if passed || aborted {
+            String::new()
+        } else if complaint.is_empty() {
+            out.lines()
+                .rev()
+                .take(8)
+                .collect::<Vec<_>>()
+                .iter()
+                .rev()
+                .map(|l| l.trim().to_string())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        } else {
+            complaint
+        },
     })
 }
 
@@ -336,6 +344,19 @@ pub fn run(
     println!("  commit  : {rev}");
     println!("  trials  : {trials}");
     println!();
+
+    // Two campaigns on one node destroy each other: the second finds
+    // the volumes mounted, xfstests deletes the first one's temporary
+    // files, and both report failures that belong to neither. Refuse
+    // rather than produce results nobody can trust.
+    if let Ok(m) = c.run("mount | grep -c ' /mnt/scratch '", Duration::from_secs(20)) {
+        if m.trim() != "0" {
+            return Err(
+                "the scratch volume is already mounted -- another campaign is running on this node"
+                    .into(),
+            );
+        }
+    }
 
     let state = prepare(&c, &cfg.mkfs_options).map_err(|e| format!("prepare: {e}"))?;
     println!("  node    : {}", state.trim());
@@ -443,9 +464,12 @@ pub fn run(
                 t.trial.secs, t.trial.lost, t.trial.violations
             )
         });
-        if let Some((t, off)) = tr {
-            match trace_stack::stop(&t, cfg, node, off) {
-                Ok(clocks) => trace_stack::report(&t.dir, &clocks, &t.domain),
+        if !t.reason.is_empty() {
+            println!("    reason: {}", t.reason);
+        }
+        if let Some((t2, off)) = tr {
+            match trace_stack::stop(&t2, cfg, node, off) {
+                Ok(clocks) => trace_stack::report(&t2.dir, &clocks, &t2.domain),
                 Err(e) => println!("  trace not stopped cleanly: {e}"),
             }
         }
