@@ -556,7 +556,7 @@ pub fn run(
                     // all or sitting under one indirect block that was
                     // named and never written.
                     match volume::inspect_compressed(&case.dir.join("scratch.img.zst")) {
-                        Ok(v) => volume::report(&v),
+                        Ok(v) => volume::report_to(&v, Some(&case.dir)),
                         Err(e) => println!("    volume not inspected: {e}"),
                     }
                 }
@@ -1037,7 +1037,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                     if let Ok(v) =
                         volume::inspect_compressed(&case.dir.join("scratch.img.zst"))
                     {
-                        volume::report(&v);
+                        volume::report_to(&v, Some(&case.dir));
                     }
                 }
                 Err(e) => println!("    volume not kept: {e}"),

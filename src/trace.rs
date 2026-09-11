@@ -117,6 +117,101 @@ pub fn prune(root: &Path, days: u64) -> (usize, u64) {
     (n, bytes)
 }
 
+/// Days after which a trace directory is compressed rather than left
+/// loose. Recent ones stay readable without a step in the way, because
+/// that is when they get read.
+const COMPRESS_AFTER_DAYS: u64 = 2;
+
+/// Compress trace directories past their reading window.
+///
+/// blktrace output and shell traces are text with enormous repetition
+/// -- one directory measured 2.7 GB on 2026-09-11 -- and zstd takes
+/// that to roughly a tenth in seconds. Compressing before pruning means
+/// the age limit throws away far fewer runs.
+///
+/// Failures are not worth reporting: the trace still exists
+/// uncompressed, the disk is a little fuller, and nothing the caller
+/// does depends on it.
+pub fn compress_old(root: &Path) -> (usize, u64) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return (0, 0);
+    };
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(COMPRESS_AFTER_DAYS * 86_400);
+
+    let mut n = 0usize;
+    let mut saved = 0u64;
+
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if !name.starts_with("trace-") {
+            continue;
+        }
+        let Ok(md) = e.metadata() else { continue };
+        let Ok(modified) = md.modified() else { continue };
+        if modified > cutoff {
+            continue;
+        }
+
+        let before = dir_size(&p);
+        let archive = p.with_extension("tar.zst");
+        if archive.exists() {
+            continue;
+        }
+
+        let ok = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "tar -C {} -cf - {} | zstd -19 -T0 -q -o {}",
+                root.display(),
+                name,
+                archive.display()
+            ))
+            .status()
+            .map(|st| st.success())
+            .unwrap_or(false);
+
+        if !ok {
+            let _ = std::fs::remove_file(&archive);
+            continue;
+        }
+        // Only remove the original once the archive is there and not
+        // empty: a truncated archive plus a deleted directory is worse
+        // than an uncompressed one.
+        let after = std::fs::metadata(&archive).map(|m| m.len()).unwrap_or(0);
+        if after == 0 {
+            let _ = std::fs::remove_file(&archive);
+            continue;
+        }
+        if std::fs::remove_dir_all(&p).is_ok() {
+            n += 1;
+            saved += before.saturating_sub(after);
+        }
+    }
+    (n, saved)
+}
+
+fn dir_size(p: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(p) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| {
+            let q = e.path();
+            if q.is_dir() {
+                dir_size(&q)
+            } else {
+                e.metadata().map(|m| m.len()).unwrap_or(0)
+            }
+        })
+        .sum()
+}
+
 /// Run the campaign until `hours` elapse or `max` leaks are caught.
 pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<Capture>, String> {
     let root = default_root();
@@ -126,6 +221,18 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(30);
+    // Compressed before the age limit can throw it away: blktrace
+    // output is text with enormous repetition -- 28 MB to 3.8 MB
+    // measured on one host capture -- so a campaign keeps far more
+    // history in the same space.
+    let (zipped, saved) = compress_old(&root);
+    if zipped > 0 {
+        println!(
+            "  compressed {zipped} older capture(s), {} MiB freed",
+            saved / (1024 * 1024)
+        );
+    }
+
     let (pruned, freed) = prune(&root, days);
     if pruned > 0 {
         println!(

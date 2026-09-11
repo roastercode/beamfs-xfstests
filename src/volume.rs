@@ -582,18 +582,95 @@ fn report_parity(f: &mut std::fs::File, geo: &Geometry, blocks: &[u64]) {
     println!();
 }
 
-pub fn report(r: &VolumeReport) {
+/// Describe a set of inode numbers compactly.
+///
+/// Consecutive numbers become a range. Sixty inodes listed one per line
+/// hide the fact that they arrived in runs of three; "10-12, 19-21,
+/// 29-31" shows it at a glance.
+fn runs(nums: &[u64]) -> String {
+    if nums.is_empty() {
+        return String::new();
+    }
+    let mut v = nums.to_vec();
+    v.sort_unstable();
+    v.dedup();
+
+    let mut out: Vec<String> = Vec::new();
+    let mut start = v[0];
+    let mut prev = v[0];
+    for &n in &v[1..] {
+        if n == prev + 1 {
+            prev = n;
+            continue;
+        }
+        out.push(if start == prev {
+            format!("{start}")
+        } else {
+            format!("{start}-{prev}")
+        });
+        start = n;
+        prev = n;
+    }
+    out.push(if start == prev {
+        format!("{start}")
+    } else {
+        format!("{start}-{prev}")
+    });
+
+    // Long lists are summarised rather than printed whole.
+    if out.len() > 8 {
+        let shown: Vec<String> = out.iter().take(6).cloned().collect();
+        format!("{} ... and {} more", shown.join(", "), out.len() - 6)
+    } else {
+        out.join(", ")
+    }
+}
+
+/// Write the full detail somewhere it can be read, and say where.
+///
+/// The summary answers "is this worth looking at"; the file answers
+/// "which blocks exactly". Putting the second in the terminal makes the
+/// first unreadable.
+fn write_detail(dir: &Path, r: &VolumeReport) -> Option<std::path::PathBuf> {
+    let p = dir.join("tree-detail.txt");
+    let mut out = String::new();
+    out.push_str(&format!(
+        "indirect parity: {}\nfeatures: 0x{:x}\ninodes walked: {}\n\n",
+        r.parity_mode.name(),
+        r.feat_incompat,
+        r.inodes_walked
+    ));
+    for t in &r.trees {
+        if !t.unwritten.is_empty() {
+            out.push_str(&format!(
+                "inode {}: indirect block(s) holding no pointers: {:?}\n",
+                t.ino, t.unwritten
+            ));
+        }
+        if !t.out_of_range.is_empty() {
+            out.push_str(&format!(
+                "inode {}: pointer(s) outside the device: {:?}\n",
+                t.ino, t.out_of_range
+            ));
+        }
+    }
+    std::fs::write(&p, out).ok().map(|_| p)
+}
+
+/// Print the summary, and write the detail beside the case if there is
+/// a directory to write it in.
+pub fn report_to(r: &VolumeReport, dir: Option<&Path>) {
     println!("  === the tree as it sits on the medium ===");
     println!(
-        "  indirect parity: {} | features 0x{:x}",
+        "  indirect parity: {} | features 0x{:x} | {} inode(s) walked",
         r.parity_mode.name(),
-        r.feat_incompat
+        r.feat_incompat,
+        r.inodes_walked
     );
     if !r.offsets_measured {
-        println!("  -- field offsets assumed, not measured: no compiler or header found,");
-        println!("     so everything below could be reading the wrong fields");
+        println!("  -- field offsets assumed, not measured: no compiler or header");
+        println!("     found, so everything below could be reading the wrong fields");
     }
-    println!("  {} allocated inode(s) walked", r.inodes_walked);
 
     if r.trees.is_empty() {
         println!("  every indirect block holds pointers; nothing was left unwritten");
@@ -601,40 +678,86 @@ pub fn report(r: &VolumeReport) {
         return;
     }
 
-    for t in &r.trees {
-        if !t.unwritten.is_empty() {
-            println!(
-                "  inode {}: {} indirect block(s) hold no pointers at all -- {}",
-                t.ino,
-                t.unwritten.len(),
-                t.unwritten
-                    .iter()
-                    .take(4)
-                    .map(|b| b.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            println!("    the inode names them on disk and nothing ever wrote them");
-        }
-        if !t.out_of_range.is_empty() {
-            println!(
-                "  inode {}: {} pointer(s) outside the device",
-                t.ino,
-                t.out_of_range.len()
-            );
+    // Unwritten indirect blocks: allocated, named by an inode, never
+    // written. One of them orphans its whole subtree.
+    let unwritten_inodes: Vec<u64> = r
+        .trees
+        .iter()
+        .filter(|t| !t.unwritten.is_empty())
+        .map(|t| t.ino)
+        .collect();
+    let unwritten_blocks: usize = r.trees.iter().map(|t| t.unwritten.len()).sum();
+    if unwritten_blocks > 0 {
+        println!(
+            "  {unwritten_blocks} indirect block(s) hold no pointers at all, across {} inode(s): {}",
+            unwritten_inodes.len(),
+            runs(&unwritten_inodes)
+        );
+        println!("    the inodes name them on disk and nothing ever wrote them");
+        if !r.fill_bytes.is_empty() {
+            let parts: Vec<String> = r
+                .fill_bytes
+                .iter()
+                .map(|(b, n)| format!("0x{b:02x} in {n}"))
+                .collect();
+            println!("    what fills them: {}", parts.join(", "));
         }
     }
 
-    if !r.fill_bytes.is_empty() {
-        let parts: Vec<String> = r
-            .fill_bytes
+    // Pointers outside the device.
+    let oor_inodes: Vec<u64> = r
+        .trees
+        .iter()
+        .filter(|t| !t.out_of_range.is_empty())
+        .map(|t| t.ino)
+        .collect();
+    let oor_total: usize = r.trees.iter().map(|t| t.out_of_range.len()).sum();
+    if oor_total > 0 {
+        let per: Vec<usize> = r
+            .trees
             .iter()
-            .map(|(b, n)| format!("0x{b:02x} in {n}"))
+            .filter(|t| !t.out_of_range.is_empty())
+            .map(|t| t.out_of_range.len())
             .collect();
-        println!();
-        println!("  what fills them: {}", parts.join(", "));
-        println!("  -- a repeated byte is a block that was allocated, named,");
-        println!("     and never written; not a tree that got corrupted");
+        let min = per.iter().min().copied().unwrap_or(0);
+        let max = per.iter().max().copied().unwrap_or(0);
+
+        // The distinct values matter: a handful repeated across many
+        // inodes is one defect, and hundreds of different ones is
+        // another.
+        let mut vals: Vec<u64> = r
+            .trees
+            .iter()
+            .flat_map(|t| t.out_of_range.iter().copied())
+            .collect();
+        vals.sort_unstable();
+        let distinct = {
+            let mut v = vals.clone();
+            v.dedup();
+            v.len()
+        };
+
+        println!(
+            "  {oor_total} pointer(s) outside the device, across {} inode(s): {}",
+            oor_inodes.len(),
+            runs(&oor_inodes)
+        );
+        println!(
+            "    {}..{} per inode, {distinct} distinct value(s)",
+            min, max
+        );
+        if distinct <= 4 {
+            let mut v = vals.clone();
+            v.dedup();
+            println!("    the values: {v:?}");
+            println!("    -- so few distinct values means one wrong write, not scattered damage");
+        }
+    }
+
+    if let Some(d) = dir {
+        if let Some(p) = write_detail(d, r) {
+            println!("    full list: {}", p.display());
+        }
     }
     println!();
 }
