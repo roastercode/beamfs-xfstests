@@ -26,6 +26,145 @@ use std::path::Path;
 const BLOCK: u64 = 4096;
 const PTRS_PER_BLOCK: usize = 512;
 
+/// Where each superblock field sits, asked of the compiler.
+///
+/// Offsets written by hand were wrong three times in two days, each
+/// time in a way that read as a fact rather than as an error: a set
+/// flag looked unset, and an RS volume looked like a CRC one. The
+/// header is the only thing that knows, so the header is asked.
+///
+/// The probe is compiled once per process into a temporary file. If it
+/// cannot be built -- no compiler, no header -- the fallback offsets
+/// are the ones measured on format v5, and the caller is told they are
+/// assumed rather than known.
+struct Offsets {
+    block_count: usize,
+    inode_count: usize,
+    inode_table: usize,
+    data_start: usize,
+    feat_incompat: usize,
+    ind_parity_blk: usize,
+    ind_parity_len: usize,
+    ind_parity_mode: usize,
+    inode_size: u64,
+    /// False when the probe could not run and the values are assumed.
+    measured: bool,
+}
+
+impl Default for Offsets {
+    fn default() -> Self {
+        // Format v5, measured 2026-09-11. Kept only as a fallback: a
+        // format change moves these and nothing here would notice.
+        Offsets {
+            block_count: 8,
+            inode_count: 24,
+            inode_table: 40,
+            data_start: 48,
+            feat_incompat: 2693,
+            ind_parity_blk: 2713,
+            ind_parity_len: 2721,
+            ind_parity_mode: 2725,
+            inode_size: 256,
+            measured: false,
+        }
+    }
+}
+
+/// Ask the compiler where the fields are.
+fn probe_offsets(header_dir: &Path) -> Offsets {
+    let src = r#"
+#include <stdio.h>
+#include <stddef.h>
+#include "beamfs_format.h"
+int main(void){
+#define P(f) printf("%s %zu\n", #f, offsetof(struct beamfs_super_block, f))
+  P(s_block_count); P(s_inode_count); P(s_inode_table_blk);
+  P(s_data_start_blk); P(s_feat_incompat); P(s_ind_parity_blk);
+  P(s_ind_parity_len); P(s_ind_parity_mode);
+  printf("inode_size %zu
+", sizeof(struct beamfs_inode));
+  return 0;
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("beamfs-off-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let c = dir.join("off.c");
+    let bin = dir.join("off");
+    if std::fs::write(&c, src).is_err() {
+        return Offsets::default();
+    }
+    let built = std::process::Command::new("cc")
+        .args(["-I", &header_dir.to_string_lossy(), "-o"])
+        .arg(&bin)
+        .arg(&c)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !built {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Offsets::default();
+    }
+    let out = std::process::Command::new(&bin)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let mut o = Offsets { measured: true, ..Default::default() };
+    for line in out.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(k), Some(v)) = (it.next(), it.next()) else { continue };
+        let Ok(v) = v.parse::<usize>() else { continue };
+        match k {
+            "s_block_count" => o.block_count = v,
+            "s_inode_count" => o.inode_count = v,
+            "s_inode_table_blk" => o.inode_table = v,
+            "s_data_start_blk" => o.data_start = v,
+            "s_feat_incompat" => o.feat_incompat = v,
+            "s_ind_parity_blk" => o.ind_parity_blk = v,
+            "s_ind_parity_len" => o.ind_parity_len = v,
+            "s_ind_parity_mode" => o.ind_parity_mode = v,
+            "inode_size" => o.inode_size = v as u64,
+            _ => {}
+        }
+    }
+    o
+}
+
+/// How the indirect blocks are protected on this volume.
+///
+/// The difference decides what "beyond correction" means: under CRC it
+/// is the expected outcome of any single flipped bit, because a CRC
+/// detects and cannot repair; under RS it means the damage exceeded
+/// eight symbols in a subblock, which is a real defect worth chasing.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ParityMode {
+    None,
+    Crc,
+    Rs,
+    Unknown(u32),
+}
+
+impl ParityMode {
+    fn from(v: u32) -> Self {
+        match v {
+            0 => ParityMode::None,
+            1 => ParityMode::Crc,
+            2 => ParityMode::Rs,
+            other => ParityMode::Unknown(other),
+        }
+    }
+
+    pub fn name(&self) -> String {
+        match self {
+            ParityMode::None => "none".into(),
+            ParityMode::Crc => "crc (detects, cannot correct)".into(),
+            ParityMode::Rs => "rs (corrects up to 8 symbols a subblock)".into(),
+            ParityMode::Unknown(v) => format!("unrecognised value {v}"),
+        }
+    }
+}
+
 /// The fields this needs from the superblock, read once.
 struct Geometry {
     /// Where the allocation region begins. Not a bound on what is
@@ -37,6 +176,10 @@ struct Geometry {
     inode_table: u64,
     inode_count: u64,
     inode_size: u64,
+    parity_mode: ParityMode,
+    feat_incompat: u64,
+    /// False when the field offsets could not be measured.
+    offsets_measured: bool,
 }
 
 /// What one inode's tree looks like on the medium.
@@ -51,11 +194,23 @@ pub struct TreeReport {
 }
 
 pub struct VolumeReport {
+    /// How the indirect blocks on this volume are protected. Without
+    /// it, "beyond correction" cannot be read: it is routine under CRC
+    /// and a defect under RS.
+    pub parity_mode: ParityMode,
+    pub feat_incompat: u64,
+    pub offsets_measured: bool,
     pub inodes_walked: u64,
     pub trees: Vec<TreeReport>,
     /// The byte that fills an unwritten block, and how many blocks it
     /// fills: naming it turns "corruption" into "never written".
     pub fill_bytes: BTreeMap<u8, u64>,
+}
+
+fn le32(buf: &[u8], off: usize) -> u32 {
+    let mut b = [0u8; 4];
+    b.copy_from_slice(&buf[off..off + 4]);
+    u32::from_le_bytes(b)
 }
 
 fn le64(buf: &[u8], off: usize) -> u64 {
@@ -178,19 +333,32 @@ pub fn inspect(path: &Path) -> std::io::Result<VolumeReport> {
     let mut f = std::fs::File::open(path)?;
     let sb = read_at(&mut f, 0, BLOCK as usize)?;
 
-    // Offsets taken from the superblock as laid out, not guessed: a
-    // first attempt at this read s_feat_incompat from offset 24 and got
-    // a different field entirely, which cost an hour of chasing a flag
-    // that was set all along.
+    let off = probe_offsets(
+        &std::env::var("BEAMFS_HEADER_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from(
+                    std::env::var("HOME").unwrap_or_default(),
+                )
+                .join("git/beamfs/tools/fsck.beamfs")
+            }),
+    );
+
     let geo = Geometry {
-        block_count: le64(&sb, 8),
-        inode_count: le64(&sb, 32),
-        inode_table: le64(&sb, 40),
-        data_start: le64(&sb, 48),
-        inode_size: 256,
+        block_count: le64(&sb, off.block_count),
+        inode_count: le64(&sb, off.inode_count),
+        inode_table: le64(&sb, off.inode_table),
+        data_start: le64(&sb, off.data_start),
+        inode_size: off.inode_size,
+        feat_incompat: le64(&sb, off.feat_incompat),
+        parity_mode: ParityMode::from(le32(&sb, off.ind_parity_mode)),
+        offsets_measured: off.measured,
     };
 
     let mut out = VolumeReport {
+        parity_mode: geo.parity_mode,
+        feat_incompat: geo.feat_incompat,
+        offsets_measured: geo.offsets_measured,
         inodes_walked: 0,
         trees: Vec::new(),
         fill_bytes: BTreeMap::new(),
@@ -240,6 +408,15 @@ pub fn inspect(path: &Path) -> std::io::Result<VolumeReport> {
 
 pub fn report(r: &VolumeReport) {
     println!("  === the tree as it sits on the medium ===");
+    println!(
+        "  indirect parity: {} | features 0x{:x}",
+        r.parity_mode.name(),
+        r.feat_incompat
+    );
+    if !r.offsets_measured {
+        println!("  -- field offsets assumed, not measured: no compiler or header found,");
+        println!("     so everything below could be reading the wrong fields");
+    }
     println!("  {} allocated inode(s) walked", r.inodes_walked);
 
     if r.trees.is_empty() {

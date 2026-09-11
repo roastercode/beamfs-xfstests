@@ -33,14 +33,26 @@ pub enum ShardState {
 #[derive(Debug)]
 pub enum NodeError {
     Unreachable(String),
-    Command { rc: i32, stderr: String },
+    /// A command that ran and exited non-zero.
+    ///
+    /// Both streams are carried. A failing xfstests run writes its
+    /// verdict to stdout, and keeping only stderr meant every archived
+    /// check.out was empty -- three failures went unexplained for a day
+    /// because the output had been dropped one layer below where it was
+    /// looked for.
+    Command { rc: i32, stdout: String, stderr: String },
 }
 
 impl std::fmt::Display for NodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unreachable(h) => write!(f, "{h} unreachable"),
-            Self::Command { rc, stderr } => write!(f, "rc={rc}: {}", stderr.trim()),
+            Self::Command { rc, stderr, .. } => {
+                // stdout is carried for the caller, not for the message:
+                // a failing test writes megabytes there and an error
+                // line is not the place for them.
+                write!(f, "rc={rc}: {}", stderr.trim())
+            }
         }
     }
 }
@@ -75,9 +87,23 @@ impl<'a> NodeConn<'a> {
     pub fn run_rc(&self, cmd: &str, deadline: Duration)
         -> Result<(String, i32), NodeError>
     {
+        // A failing test writes its verdict to stdout and its exit code
+        // is non-zero, so returning stderr here threw away the very
+        // thing the caller asked for: every archived check.out was zero
+        // bytes, and three failures went unexplained for a day because
+        // of it. Both streams are kept, stdout first.
         match self.run(cmd, deadline) {
             Ok(out) => Ok((out, 0)),
-            Err(NodeError::Command { rc, stderr }) => Ok((stderr, rc)),
+            Err(NodeError::Command { rc, stdout, stderr }) => {
+                let mut both = stdout;
+                if !stderr.trim().is_empty() {
+                    if !both.is_empty() {
+                        both.push('\n');
+                    }
+                    both.push_str(&stderr);
+                }
+                Ok((both, rc))
+            }
             Err(e) => Err(e),
         }
     }
@@ -105,6 +131,7 @@ impl<'a> NodeConn<'a> {
         if !out.status.success() {
             return Err(NodeError::Command {
                 rc: out.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
             });
         }
@@ -132,6 +159,7 @@ impl<'a> NodeConn<'a> {
         } else {
             Err(NodeError::Command {
                 rc: out.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
             })
         }
