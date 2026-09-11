@@ -961,6 +961,14 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     println!("  node    : {}", node.name);
     println!("  commit  : {}", commit());
 
+    // ./check mounts TEST_DEV before it will list anything, even under
+    // -n, so the node has to be prepared first. A freshly deployed image
+    // has no /mnt/test and the enumeration comes back empty with a mount
+    // error buried in output nobody reads.
+    if let Err(e) = prepare(&c, &cfg.mkfs_options) {
+        return Err(format!("cannot prepare the node: {e}"));
+    }
+
     let tests = enumerate_tests(&c, selection)?;
     println!("  tests   : {} to run", tests.len());
     println!();
