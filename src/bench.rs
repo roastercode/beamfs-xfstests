@@ -172,14 +172,17 @@ fn append(r: &Run) -> std::io::Result<()> {
 
 /// The revision under test, so a rate is attached to something.
 fn commit() -> String {
+    // -C and current_dir both set the directory and git obeys -C, so
+    // passing $HOME there sent it to a directory that is not a
+    // repository: every run since has been recorded against "unknown",
+    // which is a measurement attached to no code at all.
+    let tree = std::env::var("BEAMFS_TREE").unwrap_or_else(|_| {
+        format!("{}/git/beamfs", std::env::var("HOME").unwrap_or_default())
+    });
+
     std::process::Command::new("git")
-        .args(["-C", &std::env::var("HOME").unwrap_or_default()])
+        .args(["-C", &tree])
         .args(["--no-pager", "log", "-1", "--format=%h"])
-        .current_dir(
-            std::env::var("BEAMFS_TREE").unwrap_or_else(|_| {
-                format!("{}/git/beamfs", std::env::var("HOME").unwrap_or_default())
-            }),
-        )
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
