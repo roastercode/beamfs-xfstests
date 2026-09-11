@@ -16,6 +16,7 @@
 //! takes ten seconds on real hardware takes two to three minutes under
 //! TCG, and the suite is around 737 tests.
 
+mod bell;
 mod volume;
 mod evidence;
 mod mem_trace;
@@ -63,7 +64,18 @@ fn main() -> std::process::ExitCode {
     let cfg = Config::from_env();
     let args: Vec<String> = std::env::args().collect();
 
-    match args.get(1).map(String::as_str) {
+    // Which commands are worth waiting for.
+    //
+    // report, history and compare read what is already on disk and
+    // return in a moment; ringing after them would be noise. The rest
+    // drive a node for minutes or hours and are the reason the bell
+    // exists.
+    let long = !matches!(
+        args.get(1).map(String::as_str),
+        Some("report" | "history" | "compare" | "--help" | "-h" | "stop")
+    );
+
+    let code = match args.get(1).map(String::as_str) {
         Some("report") => report(&cfg),
         Some("probe") => do_probe(&cfg, args.get(2), args.get(3)),
         Some("history") => show_history(),
@@ -86,7 +98,12 @@ fn main() -> std::process::ExitCode {
             eprintln!();
             usage()
         }
+    };
+
+    if long {
+        bell::ring_until_acknowledged();
     }
+    code
 }
 
 fn usage() -> std::process::ExitCode {
