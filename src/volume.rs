@@ -28,6 +28,10 @@ const PTRS_PER_BLOCK: usize = 512;
 
 /// The fields this needs from the superblock, read once.
 struct Geometry {
+    /// Where the allocation region begins. Not a bound on what is
+    /// readable -- the root and the canary sit just below it -- but it
+    /// is what distinguishes a reserved block from an allocated one.
+    #[allow(dead_code)]
     data_start: u64,
     block_count: u64,
     inode_table: u64,
