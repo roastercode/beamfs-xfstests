@@ -378,6 +378,23 @@ pub fn inspect(path: &Path) -> std::io::Result<VolumeReport> {
         if mode == 0 {
             continue;
         }
+
+        // Only regular files and directories own a block tree.
+        //
+        // A short symlink keeps its target inside the inode, in the
+        // bytes the pointer fields occupy: generic/109 makes symlinks
+        // to "foo", and i_direct[0] on each of them reads back as
+        // 7303014 -- 0x6f6f66, the three bytes of the name. Walking
+        // them as files produced sixty reports of a pointer outside
+        // the device where the checker, which looks at the mode,
+        // reported one. Devices and fifos have no blocks either.
+        const S_FMT: u16 = 0o170000;
+        const S_REG: u16 = 0o100000;
+        const S_DIR: u16 = 0o040000;
+        let fmt = mode & S_FMT;
+        if fmt != S_REG && fmt != S_DIR {
+            continue;
+        }
         out.inodes_walked += 1;
 
         let mut rep = TreeReport {
