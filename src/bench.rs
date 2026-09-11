@@ -31,6 +31,7 @@ use crate::config::{Config, Node};
 use crate::stats::{self, Baseline, Series, Trial};
 use crate::state::{self, Record};
 use crate::evidence::{self, Case};
+use crate::volume;
 use crate::mem_trace;
 use crate::trace_stack::{self, Tracing};
 use crate::indicator::Progress;
@@ -408,7 +409,23 @@ pub fn run(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(20260910);
-    let instrumented = match evidence::instrument(cfg, node, test, seed) {
+    // Only a single named test can be instrumented.
+    //
+    // The seed and the -x trace are edits to one test file. With an
+    // empty selection -- the whole suite -- there is no file to edit,
+    // and a first version built the path anyway and tried to sed a
+    // directory: seven error lines per trial and no instrumentation.
+    // A group is the same case.
+    //
+    // The suite still runs, still archives, still freezes volumes on
+    // failure. It just runs each test as the harness wrote it, which
+    // for a 737-test sweep is what is wanted anyway: the seed exists to
+    // make two trials of ONE test comparable.
+    let single = !test.trim().is_empty()
+        && !test.contains(' ')
+        && !test.starts_with('-');
+    let instrumented = single
+        && match evidence::instrument(cfg, node, test, seed) {
         Ok(()) => {
             println!("  seed    : {seed} (same load every trial, traced line by line)");
             true
@@ -417,7 +434,10 @@ pub fn run(
             println!("  not instrumented: {e}");
             false
         }
-    };
+        };
+    if !single {
+        println!("  seed    : not applied -- a whole-suite run edits no test file");
+    }
 
     let state = prepare(&c, &cfg.mkfs_options).map_err(|e| format!("prepare: {e}"))?;
     println!("  node    : {}", state.trim());
@@ -524,11 +544,22 @@ pub fn run(
         evidence::collect(cfg, node, &case, &t.output);
         if !t.trial.passed && !t.aborted {
             match evidence::freeze_volume(cfg, node, &case) {
-                Ok(sz) => println!(
-                    "    trial {} volume kept: {} MiB compressed",
-                    case.trial(),
-                    sz / 1048576
-                ),
+                Ok(sz) => {
+                    println!(
+                        "    trial {} volume kept: {} MiB compressed",
+                        case.trial(),
+                        sz / 1048576
+                    );
+                    // Read the tree off the frozen image while the
+                    // failure is in front of us. A count of lost blocks
+                    // says how many; this says whether they are lost at
+                    // all or sitting under one indirect block that was
+                    // named and never written.
+                    match volume::inspect_compressed(&case.dir.join("scratch.img.zst")) {
+                        Ok(v) => volume::report(&v),
+                        Err(e) => println!("    volume not inspected: {e}"),
+                    }
+                }
                 Err(e) => println!("    volume not kept: {e}"),
             }
         }
@@ -874,10 +905,169 @@ fn append_record(test: &str, n: u32, t: &Trial, during: &crate::state::Snapshot)
     }
 }
 
+
+/// The tests a selection covers, as the harness itself resolves it.
+///
+/// ./check -n prints what it would run and runs nothing. Parsing that
+/// is better than globbing the tests directory: the harness applies its
+/// own exclusions, its group files and its _requires, and a list built
+/// here would disagree with it in ways that only show up as spurious
+/// failures.
+fn enumerate_tests(c: &NodeConn, selection: &str) -> Result<Vec<String>, String> {
+    let (out, _) = c
+        .run_rc(
+            &format!("cd /usr/xfstests && sudo ./check -n {selection} 2>&1 || true"),
+            Duration::from_secs(300),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut v: Vec<String> = out
+        .split_whitespace()
+        .filter(|w| {
+            // "generic/464", "shared/002" -- a family, a slash, digits.
+            w.contains('/')
+                && w.rsplit('/').next().is_some_and(|n| {
+                    !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())
+                })
+        })
+        .map(String::from)
+        .collect();
+    v.sort();
+    v.dedup();
+
+    if v.is_empty() {
+        return Err("the harness listed no tests for this selection".into());
+    }
+    Ok(v)
+}
+
 /// Where the evidence for a campaign lives.
 fn evidence_root() -> std::path::PathBuf {
     store()
         .parent()
         .map(|d| d.join("evidence"))
         .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp/beamfs-evidence"))
+}
+
+/// Run every test of a selection once, and report what failed.
+///
+/// This is what a whole-suite run should always have been. Each test is
+/// its own trial: its own archive, its own frozen volume on failure,
+/// its own block count. A campaign that dies halfway still has
+/// everything it measured up to that point, written as it went.
+pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
+    let c = NodeConn::new(node, cfg);
+
+    println!("  node    : {}", node.name);
+    println!("  commit  : {}", commit());
+
+    let tests = enumerate_tests(&c, selection)?;
+    println!("  tests   : {} to run", tests.len());
+    println!();
+
+    let root = evidence_root();
+    let mut passed = 0usize;
+    let mut failed: Vec<(String, usize)> = Vec::new();
+    let mut aborted: Vec<String> = Vec::new();
+    let t_start = std::time::Instant::now();
+
+    for (i, test) in tests.iter().enumerate() {
+        let p = Progress::start(
+            &format!("{}/{} {test}", i + 1, tests.len()),
+            &cfg.ssh_key,
+            &format!("{}@{}", cfg.user, node.host),
+        );
+
+        if let Err(e) = prepare(&c, &cfg.mkfs_options) {
+            p.finish(&format!("cannot prepare the node: {e}"));
+            aborted.push(test.clone());
+            continue;
+        }
+
+        let budget = std::env::var("XFSTESTS_TRIAL_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1800);
+
+        let t = match one_trial(&c, test, Duration::from_secs(budget)) {
+            Ok(t) => t,
+            Err(e) => {
+                p.finish(&format!("error: {e}"));
+                aborted.push(test.clone());
+                continue;
+            }
+        };
+
+        if t.aborted {
+            p.finish(&format!("skipped ({}s)", t.trial.secs));
+            aborted.push(test.clone());
+            continue;
+        }
+
+        if t.trial.passed {
+            passed += 1;
+            p.finish(&format!("pass ({}s)", t.trial.secs));
+        } else {
+            failed.push((test.clone(), t.trial.lost));
+            p.finish(&format!(
+                "FAIL ({}s, {} blocks lost)",
+                t.trial.secs, t.trial.lost
+            ));
+        }
+
+        // Archived whichever way it went: a passing test's state is
+        // what a failing one has to be compared against.
+        let case = Case::new(&root, test, 1);
+        evidence::collect(cfg, node, &case, &t.output);
+        if !t.trial.passed {
+            if !t.reason.is_empty() {
+                println!("    reason: {}", t.reason);
+            }
+            match evidence::freeze_volume(cfg, node, &case) {
+                Ok(sz) => {
+                    println!("    volume kept: {} MiB compressed", sz / 1048576);
+                    if let Ok(v) =
+                        volume::inspect_compressed(&case.dir.join("scratch.img.zst"))
+                    {
+                        volume::report(&v);
+                    }
+                }
+                Err(e) => println!("    volume not kept: {e}"),
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "  === {} of {} passed in {} minutes ===",
+        passed,
+        tests.len(),
+        t_start.elapsed().as_secs() / 60
+    );
+    if !failed.is_empty() {
+        println!();
+        println!("  failed:");
+        for (t, lost) in &failed {
+            if *lost > 0 {
+                println!("    {t}  ({lost} blocks lost)");
+            } else {
+                println!("    {t}");
+            }
+        }
+    }
+    if !aborted.is_empty() {
+        println!();
+        println!("  not run ({}): {}", aborted.len(), aborted.join(" "));
+    }
+
+    // Prune here rather than per test: a sweep that fails often would
+    // otherwise keep one image per failure and fill the disk it is
+    // running on.
+    let removed = evidence::prune(&root, 12);
+    if removed > 0 {
+        println!();
+        println!("  {removed} older volume image(s) pruned");
+    }
+    println!("  evidence under {}", root.display());
+    Ok(())
 }

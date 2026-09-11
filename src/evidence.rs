@@ -324,7 +324,9 @@ pub fn diverge(pass: &Path, fail: &Path) -> Option<Divergence> {
 /// Print where the two trials parted company.
 pub fn report_divergence(d: &Divergence) {
     println!("  === where the failing trial diverged ===");
-    println!("  the two traces agree for {} lines, then:", d.line - 1);
+    // saturating: a divergence at the first line means they agree for
+    // none, and d.line - 1 underflows on an unsigned zero.
+    println!("  the two traces agree for {} lines, then:", d.line.saturating_sub(1));
     println!("    passing: {}", d.in_pass.trim());
     println!("    failing: {}", d.in_fail.trim());
     println!(

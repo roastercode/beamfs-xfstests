@@ -28,8 +28,23 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-const SLOW_AFTER: u64 = 30;
-const STALLED_AFTER: u64 = 60;
+/*
+ * What counts as slow, and what counts as stuck.
+ *
+ * These were set when a generic/464 trial took ninety seconds. With
+ * indirect parity on, a healthy trial now runs four hundred, and the
+ * longest tests in the suite run far past that -- generic/522 takes
+ * nineteen minutes on its own. A run overnight printed "STALLED 8068s"
+ * about a campaign that was working perfectly, which is the same as
+ * printing nothing: a threshold that fires on normal behaviour stops
+ * being a signal.
+ *
+ * Slow is now five minutes and stuck is thirty. A test that has made no
+ * progress for half an hour is worth looking at; one that has been
+ * working for ten minutes is just working.
+ */
+const SLOW_AFTER: u64 = 300;
+const STALLED_AFTER: u64 = 1800;
 
 /// A running indicator. Dropping it, or calling `finish`, stops it.
 pub struct Progress {

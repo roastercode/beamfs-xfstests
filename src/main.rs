@@ -16,6 +16,7 @@
 //! takes ten seconds on real hardware takes two to three minutes under
 //! TCG, and the suite is around 737 tests.
 
+mod volume;
 mod evidence;
 mod mem_trace;
 mod trace_stack;
@@ -72,6 +73,7 @@ fn main() -> std::process::ExitCode {
         Some("analyse" | "analyze") => do_analyse(args.get(2)),
         Some("matrix") => do_matrix(&cfg, args.get(2), args.get(3)),
         Some("bench") => do_bench(&cfg, args.get(2), args.get(3)),
+        Some("sweep") => do_sweep(&cfg, args.get(2)),
         Some("baseline") => do_baseline(&cfg, args.get(2), args.get(3), args.get(4)),
         Some("--help" | "-h") => usage(),
         // A typo must not start a campaign. "analyses" for "analyse"
@@ -89,7 +91,7 @@ fn main() -> std::process::ExitCode {
 
 fn usage() -> std::process::ExitCode {
     eprintln!(
-        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|matrix|bench|baseline|stop]\n\
+        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|matrix|bench|baseline|sweep|stop]\n\
          \n\
          run      shard the suite across the nodes and follow it (default)\n\
          probe    run one test with console capture and sampling\n\
@@ -101,6 +103,8 @@ fn usage() -> std::process::ExitCode {
          matrix   vary one condition at a time and see which the leak needs\n\
          bench    measure a test, a group or the whole suite, and compare\n\
          baseline run the same code several times and report the spread\n\
+         sweep    run every test of a selection once, one verdict each\n\
+                  sweep [selection]   (default: the whole suite)\n\
          stop     kill the shards and release the mounts\n\
          \n\
          environment:\n\
@@ -974,6 +978,31 @@ fn do_baseline(cfg: &Config, test: Option<&String>, trials: Option<&String>,
         Ok(_) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("baseline: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Run a whole selection, one verdict per test.
+///
+/// `sweep` with no argument is the entire suite. The difference from
+/// `bench` is that bench measures one test repeatedly to get a rate,
+/// and sweep runs many tests once to find out which of them fail --
+/// two different questions that were being asked with one command, and
+/// answered badly for both.
+fn do_sweep(cfg: &Config, selection: Option<&String>) -> std::process::ExitCode {
+    let Some(node) = cfg.nodes.first() else {
+        eprintln!("no nodes configured");
+        return std::process::ExitCode::FAILURE;
+    };
+    let sel = match selection.map(|s| s.as_str()) {
+        Some("all") | Some("") | None => "",
+        Some(x) => x,
+    };
+    match bench::sweep(cfg, node, sel) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("sweep: {e}");
             std::process::ExitCode::FAILURE
         }
     }
