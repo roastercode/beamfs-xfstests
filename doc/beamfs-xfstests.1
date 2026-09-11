@@ -65,6 +65,23 @@ attributed to the condition that changed.
 .B stop
 Stop a running campaign and leave the nodes in a state the next one can
 start from.
+.IP
+A sweep also stops when
+.I /tmp/beamfs-xfstests.stop
+appears: it finishes the test it is on, prints the same summary it would
+have printed at the end, and says how many tests were never started.
+.IP
+A run killed outright loses that summary. On 2026-09-11 a sweep was
+killed after 214 passes and 8 failures and the only record was the
+scrollback: the evidence directories were on disk, but which tests had
+run and which had never started was nowhere. The file can be touched
+from another terminal, which is what was wanted at the time and what a
+signal would not have given without finding the pid.
+.IP
+A sweep also stops itself when the node refuses preparation three times
+running. Seventeen tests once reported the same connection timeout nine
+seconds apart, measuring nothing while the list walked itself to the
+end.
 
 .SH NAME
 beamfs-xfstests \- run the filesystem test suite against beamfs, and reproduce what it finds

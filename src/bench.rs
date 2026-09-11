@@ -949,6 +949,48 @@ fn evidence_root() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp/beamfs-evidence"))
 }
 
+
+/// Set when the stop file appears: the loop finishes its test and stops.
+///
+/// A run killed outright loses its summary -- what passed, what failed,
+/// what was never reached -- and that summary is most of what a sweep
+/// produces. The evidence is written per test as it goes, so the
+/// directories survive either way, but the tally does not.
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Watch for a stop file instead of catching a signal.
+///
+/// This crate has no dependencies and catching SIGINT without libc
+/// means writing the extern "C" handler and the sigaction call by hand,
+/// which is a lot of unsafe for a flag. A watcher thread reading a path
+/// every second does the same job in safe code, and has an advantage
+/// the signal does not: the stop can come from another terminal, or
+/// from a script, without finding the pid.
+///
+///   touch /tmp/beamfs-xfstests.stop
+///
+/// The file is removed when the run starts, so a leftover from a
+/// previous campaign cannot stop the next one before it begins.
+fn arm_stop() {
+    let path = stop_path();
+    let _ = std::fs::remove_file(&path);
+    std::thread::spawn(move || loop {
+        if path.exists() {
+            STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    });
+}
+
+fn stop_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("beamfs-xfstests.stop")
+}
+
+fn stopping() -> bool {
+    STOP.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Run every test of a selection once, and report what failed.
 ///
 /// This is what a whole-suite run should always have been. Each test is
@@ -971,6 +1013,9 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
 
     let tests = enumerate_tests(&c, selection)?;
     println!("  tests   : {} to run", tests.len());
+    arm_stop();
+    println!("  stop    : touch {} to finish the current test and stop",
+             stop_path().display());
     println!();
 
     let root = evidence_root();
@@ -979,7 +1024,15 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     let mut aborted: Vec<String> = Vec::new();
     let t_start = std::time::Instant::now();
 
+    let mut unreachable_run = 0usize;
+
     for (i, test) in tests.iter().enumerate() {
+        if stopping() {
+            println!();
+            println!("  stopping after {} test(s): the stop file appeared", i);
+            let _ = std::fs::remove_file(stop_path());
+            break;
+        }
         let p = Progress::start(
             &format!("{}/{} {test}", i + 1, tests.len()),
             &cfg.ssh_key,
@@ -989,8 +1042,19 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         if let Err(e) = prepare(&c, &cfg.mkfs_options) {
             p.finish(&format!("cannot prepare the node: {e}"));
             aborted.push(test.clone());
+            unreachable_run += 1;
+            // Three refusals in a row is a node that has gone, not a
+            // transient. Seventeen tests once reported the same
+            // connection timeout nine seconds apart, measuring nothing
+            // while the list walked itself to the end.
+            if unreachable_run >= 3 {
+                println!();
+                println!("  the node has refused {unreachable_run} times running; stopping");
+                break;
+            }
             continue;
         }
+        unreachable_run = 0;
 
         let budget = std::env::var("XFSTESTS_TRIAL_TIMEOUT")
             .ok()
@@ -1045,13 +1109,26 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         }
     }
 
+    let done = passed + failed.len() + aborted.len();
     println!();
-    println!(
-        "  === {} of {} passed in {} minutes ===",
-        passed,
-        tests.len(),
-        t_start.elapsed().as_secs() / 60
-    );
+    if done < tests.len() {
+        println!(
+            "  === {} of {} passed, {} of {} run, in {} minutes ===",
+            passed,
+            done,
+            done,
+            tests.len(),
+            t_start.elapsed().as_secs() / 60
+        );
+        println!("  {} test(s) never started", tests.len() - done);
+    } else {
+        println!(
+            "  === {} of {} passed in {} minutes ===",
+            passed,
+            tests.len(),
+            t_start.elapsed().as_secs() / 60
+        );
+    }
     if !failed.is_empty() {
         println!();
         println!("  failed:");
