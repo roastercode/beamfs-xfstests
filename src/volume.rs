@@ -83,7 +83,11 @@ fn looks_unwritten(raw: &[u8], geo: &Geometry) -> Option<u8> {
     for i in 0..PTRS_PER_BLOCK {
         let v = le64(raw, i * 8);
         *counts.entry(v).or_insert(0) += 1;
-        if v == 0 || (v >= geo.data_start && v < geo.block_count) {
+        // Plausible means "could be a block on this device": zero for
+        // an empty slot, anything inside the device otherwise. The
+        // reserved blocks below data_start count -- the root lives
+        // there.
+        if v == 0 || v < geo.block_count {
             plausible += 1;
         }
     }
@@ -122,7 +126,18 @@ fn walk(
     if blk == 0 {
         return;
     }
-    if blk < geo.data_start || blk >= geo.block_count {
+    /*
+     * Below data_start is still inside the device.
+     *
+     * mkfs puts the root directory and the canary at data_start - 2 and
+     * - 1, outside the allocation bitmap: never allocated, never freed,
+     * and perfectly valid. Taking data_start as the lower bound flagged
+     * both of them on every healthy volume -- the same mistake made in
+     * the checker's reader the day before, and worth not making twice.
+     *
+     * What is outside the device is what is past its end, or zero.
+     */
+    if blk == 0 || blk >= geo.block_count {
         rep.out_of_range.push(blk);
         return;
     }
@@ -146,7 +161,7 @@ fn walk(
         }
         if level > 1 {
             walk(f, geo, child, level - 1, rep, fill);
-        } else if child >= geo.data_start && child < geo.block_count {
+        } else if child < geo.block_count {
             rep.reachable += 1;
         } else {
             rep.out_of_range.push(child);
@@ -201,7 +216,7 @@ pub fn inspect(path: &Path) -> std::io::Result<VolumeReport> {
         for k in 0..12 {
             let v = le64(&raw, 52 + k * 8);
             if v != 0 {
-                if v >= geo.data_start && v < geo.block_count {
+                if v < geo.block_count {
                     rep.reachable += 1;
                 } else {
                     rep.out_of_range.push(v);
