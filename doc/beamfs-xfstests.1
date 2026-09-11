@@ -1,6 +1,71 @@
 .\" SPDX-License-Identifier: GPL-2.0-only
 .TH BEAMFS-XFSTESTS 1 "2026-09-09" "beamfs-xfstests" "beamfs development tools"
 
+.TP
+.B sweep \fR[\fIselection\fR]
+Run every test of a selection once and report one verdict per test. With
+no argument, the whole suite.
+.IP
+This is what a whole-suite run should be. Passing an empty selection to
+.B ./check
+runs all 734 tests in one invocation and returns one exit code: on
+2026-09-11 that produced, after two and a quarter hours, the single line
+"0 pass, 1 fail out of 1 trials" \(em every per-test mechanism this tool
+has attached itself to that aggregate and said nothing about any
+individual test.
+.IP
+Enumeration goes through
+.B ./check \-n
+so the harness's own exclusions, groups and _requires decide what runs.
+Each test gets its own trial, its own archive and its own frozen volume
+on failure, written as it goes, so a run killed halfway keeps everything
+it measured.
+.TP
+.B baseline \fR[\fItest\fR] [\fItrials\fR] [\fIrounds\fR]
+Run the same code several times over and report the spread.
+.IP
+Until this is known, no difference between two revisions means anything.
+The same commit measured 8 of 10 one morning and 2 of 10 that evening
+with nothing changed between them, and three patches were reverted that
+day on differences smaller than that. Defaults to generic/464, ten
+trials, three rounds; stores the spread so later comparisons are judged
+against it.
+.TP
+.B bench \fItest\fR [\fItrials\fR]
+Measure one test's pass rate over repeated trials and compare it to the
+last stored run.
+.IP
+Different question from
+.BR sweep :
+bench repeats one test to get a rate, sweep runs many tests once to find
+out which fail. The verdict is judged against the baseline spread and
+declines to call a difference real when the sample cannot carry it.
+.TP
+.B report
+Print the last run: pass rate, failures with their reasons, and how the
+nodes divided the work. Reads the history; runs nothing.
+.TP
+.B history
+Print the stored runs in order, oldest first.
+.TP
+.B compare \fR[\fIn\fR]
+Compare the last two stored runs, or the last \fIn\fR.
+.TP
+.B trace \fItest\fR
+Run one test with full-stack tracing: blktrace in the guest and on the
+host device, aligned on one clock, plus the kernel function profile.
+See
+.B XFSTESTS_TRACE
+below.
+.TP
+.B matrix
+Vary one condition at a time across a named set, so a difference can be
+attributed to the condition that changed.
+.TP
+.B stop
+Stop a running campaign and leave the nodes in a state the next one can
+start from.
+
 .SH NAME
 beamfs-xfstests \- run the filesystem test suite against beamfs, and reproduce what it finds
 
@@ -262,39 +327,74 @@ mistaken for motion.
 .SH ENVIRONMENT
 .TP
 .B XFSTESTS_NODES
-Comma-separated
-.IR name:host[:test_dev[:scratch_dev]] .
-Devices default to vdb and vdc. With one node the suite runs on it
-alone; with several the tests are divided between them.
-.br
-Example:
-.I x86-01:192.168.122.99:vdb:vdc
-.TP
-.B XFSTESTS_TIMEOUT
-Per-test deadline in seconds, default 300. A test past its deadline is
-killed and recorded as such rather than taking the run with it. Tests
-long by design carry their own budget: generic/522 is an fsx soak run,
-measured at 1133 seconds, and gets 1800.
+The lab, as
+.IR name:host:test_dev:scratch_dev ,
+comma separated. Required.
 .TP
 .B XFSTESTS_MKFS_OPTIONS
-Passed to
-.BR mkfs.beamfs .
-Default
-.IR "-N 16384" .
+Passed to mkfs.beamfs when a node is prepared.
 .TP
-.B XFSTESTS_NO_RESUME
-Start over instead of resuming an interrupted run.
+.B XFSTESTS_TIMEOUT
+Seconds a single test may take before it is killed.
+.TP
+.B XFSTESTS_TRIAL_TIMEOUT
+Seconds a trial may take, overriding the default \(em ten minutes for one
+test, fourteen hours for a whole suite. A sweep of 734 tests where one
+wedges must not take the rest with it.
+.TP
+.B XFSTESTS_SEED
+Seed for the load, so two trials of one test do the same work and can be
+compared line by line. generic/464 picks its files and write sizes at
+random; without a seed a failing trial and a passing one did different
+work and comparing them compared the wrong thing.
+.TP
+.B XFSTESTS_TRACE
+Set to 1 to collect blktrace and the kernel function profile around each
+trial. Off by default: both move the timing of a race, and a measurement
+that changes what it measures is worth nothing.
+.TP
+.B XFSTESTS_TRACE_NS
+Set to 1 for nanosecond timestamps in the shell trace, through
+.BR "date +%s.%N" .
+Costs a fork per traced line \(em 1.7 ms measured on the lab node \(em
+against the microsecond EPOCHREALTIME gives for free. Only worth it for a
+run that needs it and can afford the distortion.
 .TP
 .B XFSTESTS_TRACE_KEEP_DAYS
-Age past which captures are removed, default 30.
+How long trace directories are kept before being pruned.
 .TP
-.BR XFSTESTS_LOAD_PROCS ", " XFSTESTS_LOAD_FILES ", " XFSTESTS_LOAD_SECS ", " XFSTESTS_LOAD_BLOCK ", " XFSTESTS_LOAD_MAXBLK
-The load
-.B trace
-applies. Defaults are generic/464's own numbers: 16 writers of each
-kind, 200 files, 5 seconds per loop, 64 KiB writes, files up to 100
-blocks. Changing them changes what is being reproduced, which is
-occasionally the point and usually not.
+.B XFSTESTS_HOST_DEV
+Host block device under the VM images, for the host side of the trace.
+Defaults to nvme1n1.
+.TP
+.B XFSTESTS_DOMAIN
+libvirt domain of the node, for the counters taken host-side through
+virsh. Defaults to beamfs-InameR.
+.TP
+.B XFSTESTS_NO_RESUME
+Start a run from scratch instead of resuming what the history holds.
+.TP
+.B XFSTESTS_HISTORY
+Path to the history file. Defaults under XDG_DATA_HOME.
+.TP
+.B XFSTESTS_LOAD_NO_TEST_MOUNT
+Skip mounting TEST_DEV for load generation.
+.TP
+.B BEAMFS_HEADER_DIR
+Directory holding beamfs_format.h, used to measure the superblock field
+offsets rather than assume them. Offsets written by hand were wrong three
+times in two days, each time in a way that read as a fact: a set feature
+flag looked unset, and an RS volume was diagnosed as CRC. Defaults to
+~/git/beamfs/tools/fsck.beamfs.
+.TP
+.B BEAMFS_REPO
+.TQ
+.B BEAMFS_TREE
+Where the kernel module sources live, for the commit a run is attributed
+to.
+.TP
+.B BEAMFS_ARCHIVE
+Where campaign archives are written.
 
 .SH FILES
 .TP
