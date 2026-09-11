@@ -81,8 +81,7 @@ int main(void){
   P(s_block_count); P(s_inode_count); P(s_inode_table_blk);
   P(s_data_start_blk); P(s_feat_incompat); P(s_ind_parity_blk);
   P(s_ind_parity_len); P(s_ind_parity_mode);
-  printf("inode_size %zu
-", sizeof(struct beamfs_inode));
+  printf("inode_size %zu\\n", sizeof(struct beamfs_inode));
   return 0;
 }
 "#;
