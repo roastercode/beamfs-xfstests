@@ -546,7 +546,7 @@ pub fn run(
         let case = Case::new(&evidence_root(), &r.test, n);
         evidence::collect(cfg, node, &case, &t.output);
         if !t.trial.passed && !t.aborted {
-            match evidence::freeze_volume(cfg, node, &case) {
+            match evidence::freeze_volume(cfg, node, &case, &t.output) {
                 Ok(sz) => {
                     println!(
                         "    trial {} volume kept: {} MiB compressed",
@@ -1098,7 +1098,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             if !t.reason.is_empty() {
                 println!("    reason: {}", t.reason);
             }
-            match evidence::freeze_volume(cfg, node, &case) {
+            match evidence::freeze_volume(cfg, node, &case, &t.output) {
                 Ok(sz) => {
                     println!("    volume kept: {} MiB compressed", sz / 1048576);
                     if let Ok(v) =

@@ -174,52 +174,120 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
     }
 }
 
+
+/// Which devices a failure implicates, from what the harness said.
+///
+/// _check_generic_filesystem names the device it found inconsistent:
+///
+///   _check_generic_filesystem: filesystem on /dev/vdb is inconsistent
+///
+/// A test that works in TEST_DIR breaks TEST_DEV and leaves SCRATCH_DEV
+/// untouched, so freezing the scratch produces a clean image and an
+/// afternoon spent reading it. generic/310 is that test.
+///
+/// Falls back to the scratch when the output names nothing, which is
+/// what every test that fails without a check line does.
+fn implicated_devices(output: &str, node: &Node) -> Vec<String> {
+    let mut devs: Vec<String> = Vec::new();
+
+    for line in output.lines() {
+        let Some(rest) = line.split("filesystem on ").nth(1) else { continue };
+        let Some(dev) = rest.split_whitespace().next() else { continue };
+        let name = dev.trim_start_matches("/dev/").to_string();
+        if !name.is_empty() && !devs.contains(&name) {
+            devs.push(name);
+        }
+    }
+
+    if devs.is_empty() {
+        devs.push(node.scratch_dev.trim_start_matches("/dev/").to_string());
+    }
+    devs
+}
+
 /// The volume as the failure left it, before anything reformats it.
 ///
 /// Compressed on the node and streamed back: a 1 GiB scratch volume of
 /// mostly zeroes is a few tens of megabytes, and the copy has to happen
 /// before the next trial's mkfs, which is the reason none of the
 /// earlier failures could be looked at twice.
-pub fn freeze_volume(cfg: &Config, node: &Node, case: &Case) -> Result<u64, String> {
+pub fn freeze_volume(
+    cfg: &Config,
+    node: &Node,
+    case: &Case,
+    output: &str,
+) -> Result<u64, String> {
     let c = NodeConn::new(node, cfg);
     let _ = std::fs::create_dir_all(&case.dir);
 
     // Unmounted first: an image taken from under a live mount is a
     // picture of neither state.
     let _ = c.run(
-        "sudo sh -c 'umount /mnt/scratch 2>/dev/null || umount -l /mnt/scratch 2>/dev/null; true'",
+        "sudo sh -c 'umount /mnt/test /mnt/scratch 2>/dev/null; \
+         umount -l /mnt/test /mnt/scratch 2>/dev/null; true'",
         Duration::from_secs(60),
     );
 
-    // The node's device name, with or without the /dev prefix: the
-    // config carries "vdc" and a first version passed it to dd as a
-    // relative path, which failed silently and left thirteen bytes of
-    // compressed nothing in every case directory.
-    let out = case.dir.join("scratch.img.zst");
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "ssh -i {key} -o BatchMode=yes -o StrictHostKeyChecking=no {user}@{host} \
-             'sudo dd if=/dev/{dev} bs=1M 2>/dev/null | zstd -3 -T0 -c' > {out}",
-            key = cfg.ssh_key,
-            user = cfg.user,
-            host = node.host,
-            dev = node.scratch_dev.trim_start_matches("/dev/"),
-            out = out.display()
-        ))
-        .status()
-        .map_err(|e| e.to_string())?;
-    if !status.success() {
-        return Err("volume not frozen".into());
+    let devs = implicated_devices(output, node);
+    let scratch = node.scratch_dev.trim_start_matches("/dev/").to_string();
+    let mut total = 0u64;
+    let mut kept = 0usize;
+    let mut last_err = String::new();
+
+    for dev in &devs {
+        // scratch.img.zst for the scratch device, whatever its name, so
+        // every tool that already reads that path keeps working. Other
+        // devices get their own name.
+        let out = if *dev == scratch {
+            case.dir.join("scratch.img.zst")
+        } else {
+            case.dir.join(format!("{dev}.img.zst"))
+        };
+
+        // The node's device name, with or without the /dev prefix: the
+        // config carries "vdc" and a first version passed it to dd as a
+        // relative path, which failed silently and left thirteen bytes
+        // of compressed nothing in every case directory.
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "ssh -i {key} -o BatchMode=yes -o StrictHostKeyChecking=no {user}@{host} \
+                 'sudo dd if=/dev/{dev} bs=1M 2>/dev/null | zstd -3 -T0 -c' > {out}",
+                key = cfg.ssh_key,
+                user = cfg.user,
+                host = node.host,
+                out = out.display()
+            ))
+            .status()
+            .map_err(|e| e.to_string())?;
+
+        if !status.success() {
+            last_err = format!("{dev} not frozen");
+            continue;
+        }
+        let sz = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+        // A compressed empty stream is about a dozen bytes. Keeping one
+        // looks like evidence and is not.
+        if sz < 1024 {
+            let _ = std::fs::remove_file(&out);
+            last_err = format!("{dev}: capture produced {sz} bytes -- nothing was read");
+            continue;
+        }
+        if *dev != scratch {
+            println!("    {dev} frozen too: the harness named it, not the scratch");
+        }
+        total += sz;
+        kept += 1;
     }
-    let sz = std::fs::metadata(&out).map(|m| m.len()).map_err(|e| e.to_string())?;
-    // A compressed empty stream is about a dozen bytes. Keeping one
-    // looks like evidence and is not: better to say the capture failed.
-    if sz < 1024 {
-        let _ = std::fs::remove_file(&out);
-        return Err(format!("capture produced {sz} bytes -- nothing was read"));
+
+    if kept == 0 {
+        return Err(if last_err.is_empty() {
+            "volume not frozen".into()
+        } else {
+            last_err
+        });
     }
-    Ok(sz)
+    Ok(total)
 }
 
 /// Strip what differs between any two runs but means nothing.
