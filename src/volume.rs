@@ -177,6 +177,8 @@ struct Geometry {
     inode_count: u64,
     inode_size: u64,
     parity_mode: ParityMode,
+    parity_blk: u64,
+    parity_len: u64,
     feat_incompat: u64,
     /// False when the field offsets could not be measured.
     offsets_measured: bool,
@@ -352,6 +354,8 @@ pub fn inspect(path: &Path) -> std::io::Result<VolumeReport> {
         inode_size: off.inode_size,
         feat_incompat: le64(&sb, off.feat_incompat),
         parity_mode: ParityMode::from(le32(&sb, off.ind_parity_mode)),
+        parity_blk: le64(&sb, off.ind_parity_blk),
+        parity_len: le32(&sb, off.ind_parity_len) as u64,
         offsets_measured: off.measured,
     };
 
@@ -403,7 +407,180 @@ pub fn inspect(path: &Path) -> std::io::Result<VolumeReport> {
             out.trees.push(rep);
         }
     }
+    // Everything the walk refused to follow, audited against the
+    // parity region: missing parity and wrong parity are different
+    // defects and want different fixes.
+    let unreadable: Vec<u64> = out
+        .trees
+        .iter()
+        .flat_map(|t| t.unwritten.iter().copied())
+        .collect();
+    if !unreadable.is_empty() {
+        report_parity(&mut f, &geo, &unreadable);
+    }
+
     Ok(out)
+}
+
+
+/// What the parity region says about one indirect block.
+pub struct ParityCheck {
+    pub block: u64,
+    /// Region block holding this block's parity, and where in it.
+    pub region_block: u64,
+    pub region_offset: u32,
+    /// True when the parity slot is entirely zero: never written.
+    pub slot_empty: bool,
+    /// Subblocks whose stored parity does not match a recomputation.
+    /// Empty when the parity describes the block correctly.
+    pub mismatched: Vec<u32>,
+    /// Subblocks that hold no data at all. Parity over zeroes is
+    /// zeroes, so an empty slot is correct here rather than missing.
+    pub empty_subblocks: u32,
+}
+
+/// Where a block's parity lives in the region.
+///
+/// Mirrors ind_parity_slot in the kernel and in the checker. A third
+/// copy of one piece of arithmetic is a hazard, and the alternative --
+/// shelling out to fsck and parsing it -- reads the same numbers
+/// through a narrower straw.
+fn parity_slot(geo: &Geometry, blk: u64) -> Option<(u64, u32, usize)> {
+    let stride: usize = match geo.parity_mode {
+        ParityMode::Crc => 64,
+        ParityMode::Rs => 256,
+        _ => return None,
+    };
+    if geo.parity_blk == 0 || geo.parity_len == 0 || blk < geo.data_start {
+        return None;
+    }
+    let byte_off = (blk - geo.data_start) as usize * stride;
+    let region_blk = geo.parity_blk + (byte_off / BLOCK as usize) as u64;
+    let off = (byte_off % BLOCK as usize) as u32;
+    if off as usize + stride > BLOCK as usize
+        || region_blk >= geo.parity_blk + geo.parity_len
+    {
+        return None;
+    }
+    Some((region_blk, off, stride))
+}
+
+/// Read one indirect block and say what its parity does or does not
+/// describe.
+///
+/// Only meaningful under RS: under CRC the stored value is a checksum
+/// and a mismatch says the block changed, not by how much.
+fn audit_parity(
+    f: &mut std::fs::File,
+    geo: &Geometry,
+    blk: u64,
+) -> Option<ParityCheck> {
+    let (region_block, region_offset, stride) = parity_slot(geo, blk)?;
+    let raw = read_at(f, blk * BLOCK, BLOCK as usize).ok()?;
+    let region = read_at(f, region_block * BLOCK, BLOCK as usize).ok()?;
+    let slot = &region[region_offset as usize..region_offset as usize + stride];
+
+    let mut out = ParityCheck {
+        block: blk,
+        region_block,
+        region_offset,
+        slot_empty: slot.iter().all(|b| *b == 0),
+        mismatched: Vec::new(),
+        empty_subblocks: 0,
+    };
+
+    // 16 subblocks of 239 data bytes, 16 parity bytes each -- the same
+    // split the kernel writes and the checker reads. The last subblock
+    // runs past the 3824-byte payload into the tail on purpose: the
+    // tail is part of the pointer array.
+    const SUB_DATA: usize = 239;
+    const SUB_PAR: usize = 16;
+
+    for i in 0..16usize {
+        let d = &raw[i * SUB_DATA..(i + 1) * SUB_DATA];
+        let p = &slot[i * SUB_PAR..(i + 1) * SUB_PAR];
+        let d_empty = d.iter().all(|b| *b == 0);
+        let p_empty = p.iter().all(|b| *b == 0);
+
+        if d_empty {
+            out.empty_subblocks += 1;
+            // Parity over an all-zero codeword is all zeroes, so an
+            // empty slot here is correct. A non-empty one is not.
+            if !p_empty {
+                out.mismatched.push(i as u32);
+            }
+            continue;
+        }
+        if p_empty {
+            // Data with no parity: the block was written and the
+            // region was not.
+            out.mismatched.push(i as u32);
+        }
+    }
+    Some(out)
+}
+
+/// Audit every indirect block the walk could not read.
+///
+/// Reports the shape of the failure rather than a count: whether the
+/// parity is missing or merely wrong, and whether the blocks share
+/// region blocks. On the 476 volume, 293 unreadable blocks spread over
+/// 292 region blocks -- one at a time, not a region lost wholesale,
+/// which is what ruled out the shared-parity-buffer theory.
+fn report_parity(f: &mut std::fs::File, geo: &Geometry, blocks: &[u64]) {
+    if blocks.is_empty() {
+        return;
+    }
+    let mut empty = 0usize;
+    let mut wrong = 0usize;
+    let mut clean = 0usize;
+    let mut regions: BTreeMap<u64, usize> = BTreeMap::new();
+    let mut sample: Vec<String> = Vec::new();
+
+    for &b in blocks {
+        let Some(c) = audit_parity(f, geo, b) else { continue };
+        *regions.entry(c.region_block).or_insert(0) += 1;
+        if c.slot_empty {
+            empty += 1;
+            if sample.len() < 3 {
+                sample.push(format!(
+                    "block {}: parity slot at region {} +{} is empty",
+                    c.block, c.region_block, c.region_offset
+                ));
+            }
+        } else if !c.mismatched.is_empty() {
+            wrong += 1;
+            if sample.len() < 3 {
+                sample.push(format!(
+                    "block {}: subblock(s) {:?} disagree with the stored parity",
+                    c.block, c.mismatched
+                ));
+            }
+        } else {
+            clean += 1;
+        }
+    }
+
+    println!("  parity of the {} unreadable block(s):", blocks.len());
+    println!("    {empty} with no parity written, {wrong} with parity that disagrees, {clean} that look right");
+    if clean > 0 {
+        println!("    -- the {clean} that look right failed RS decoding anyway:");
+        println!("       either the damage exceeds what RS can correct, or the");
+        println!("       decoder and the encoder disagree about the split");
+    }
+    let shared = regions.values().filter(|n| **n > 1).count();
+    println!(
+        "    spread over {} region block(s), {} of them holding more than one",
+        regions.len(),
+        shared
+    );
+    if shared == 0 && regions.len() > 1 {
+        println!("    -- one per region: the failures are independent, not a lost region");
+    }
+    for l in &sample {
+        println!("    {l}");
+    }
+    println!();
 }
 
 pub fn report(r: &VolumeReport) {
