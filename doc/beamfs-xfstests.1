@@ -412,6 +412,48 @@ to.
 .TP
 .B BEAMFS_ARCHIVE
 Where campaign archives are written.
+.TP
+.B BEAMFS_NO_BELL
+Set to anything to stop the bell that rings when a long run finishes.
+See
+.B THE BELL
+below.
+
+.SH THE BELL
+A sweep of the whole suite takes three hours and a single generic/269
+takes twenty-two minutes, so a finished run sits in a terminal nobody
+is watching. Every command that drives a node rings when it is done,
+every four seconds, until Return is pressed.
+.PP
+The sound is compiled into the binary; there is nothing to install or
+configure for it. What is needed is a player, and one of these has to
+be on PATH:
+.PP
+.RS
+.nf
+paplay      pulseaudio-utils, and what pipewire-pulse answers
+pw-play     pipewire
+aplay       alsa-utils
+play        sox
+ffplay      ffmpeg
+.fi
+.RE
+.PP
+They are tried in that order and the first that starts gets the sound
+on its standard input. With none of them installed the run is silent
+and nothing else changes: the bell is a convenience and never a reason
+a measurement fails or waits.
+.PP
+It also stays quiet when standard input is not a terminal -- under a
+scheduler, or through a pipe -- because there would be nobody to press
+Return and the loop would not end. And when
+.B BEAMFS_NO_BELL
+is set, which is what to use over a connection where the sound would
+come out of the wrong machine.
+.PP
+When this is packaged, one of those players belongs in the
+dependencies. A suggests or recommends rather than a requires: the
+tool works without one.
 
 .SH FILES
 .TP
