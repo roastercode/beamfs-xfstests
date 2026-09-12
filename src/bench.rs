@@ -1086,7 +1086,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         let budget = std::env::var("XFSTESTS_TRIAL_TIMEOUT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(1800);
+            .unwrap_or(900);
 
         let t = match one_trial(&c, test, Duration::from_secs(budget)) {
             Ok(t) => t,
