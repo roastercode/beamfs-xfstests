@@ -26,6 +26,14 @@ use std::path::Path;
 const BLOCK: u64 = 4096;
 const PTRS_PER_BLOCK: usize = 512;
 
+/// The payload of a block that carries its own RS FEC.
+///
+/// Sixteen subblocks of 239 data bytes each: 3824 of the 4096 are
+/// payload, the rest is the parity interleaved with it. A region block
+/// is one of these, which is why slots are counted against this and not
+/// against the block size.
+const PAYLOAD: usize = 16 * 239;
+
 /// Where each superblock field sits, asked of the compiler.
 ///
 /// Offsets written by hand were wrong three times in two days, each
@@ -470,10 +478,27 @@ fn parity_slot(geo: &Geometry, blk: u64) -> Option<(u64, u32, usize)> {
     if geo.parity_blk == 0 || geo.parity_len == 0 || blk < geo.data_start {
         return None;
     }
-    let byte_off = (blk - geo.data_start) as usize * stride;
-    let region_blk = geo.parity_blk + (byte_off / BLOCK as usize) as u64;
-    let off = (byte_off % BLOCK as usize) as u32;
-    if off as usize + stride > BLOCK as usize
+    // Slots per region block, not bytes per region block.
+    //
+    // A region block carries its own RS FEC since the 2026-09-11 work,
+    // so only BEAMFS_DATA_INLINE_BYTES of its 4096 are payload and
+    // fourteen RS slots fit where sixteen did. Dividing the byte offset
+    // by 4096 was right before that and points at the wrong block now:
+    // for block 41641 on a generic/464 volume it named region 2482
+    // offset 3584, where the kernel, the checker and mkfs all name
+    // region 2690 offset 0 -- and the slot it read was somebody else's,
+    // which is how a written parity got reported as empty.
+    //
+    // The other three implementations agree on this arithmetic. This
+    // one was left behind.
+    let slots = PAYLOAD / stride;
+    if slots == 0 {
+        return None;
+    }
+    let index = (blk - geo.data_start) as usize;
+    let region_blk = geo.parity_blk + (index / slots) as u64;
+    let off = ((index % slots) * stride) as u32;
+    if off as usize + stride > PAYLOAD
         || region_blk >= geo.parity_blk + geo.parity_len
     {
         return None;
