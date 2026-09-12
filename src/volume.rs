@@ -790,6 +790,11 @@ mod tests {
             inode_table: 1,
             inode_count: 16,
             inode_size: 256,
+            parity_mode: ParityMode::Rs,
+            parity_blk: 100,
+            parity_len: 900,
+            feat_incompat: 0,
+            offsets_measured: true,
         }
     }
 
