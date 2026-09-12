@@ -34,6 +34,8 @@ use crate::evidence::{self, Case};
 use crate::volume;
 use crate::mem_trace;
 use crate::wedge;
+use crate::recovery::Recovery;
+use crate::journal::Journal;
 use crate::trace_stack::{self, Tracing};
 use crate::indicator::Progress;
 use crate::node::NodeConn;
@@ -1035,6 +1037,10 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     let t_start = std::time::Instant::now();
 
     let mut unreachable_run = 0usize;
+    // How many times this sweep has revived the node. Recovery
+    // escalates on it: a node killed twice and still blocked is
+    // restarted rather than killed a third time.
+    let mut wedge_attempts = 0u32;
 
     for (i, test) in tests.iter().enumerate() {
         if stopping() {
@@ -1070,10 +1076,32 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                     Err(e) => println!("    nothing captured: {e}"),
                 }
             }
-            // Three refusals in a row is a node that has gone, not a
-            // transient. Seventeen tests once reported the same
-            // connection timeout nine seconds apart, measuring nothing
-            // while the list walked itself to the end.
+            // And then bring it back.
+            //
+            // Stopping here cost 272 tests three times over:
+            // generic/464 wedges the node, the sweep gives up, and
+            // everything after it is never measured. The recovery that
+            // run and probe already use does the work -- kill, sysrq,
+            // restart the domain -- and two minutes of boot is nothing
+            // against three hours of campaign.
+            if unreachable_run == 1 {
+                println!("    bringing the node back");
+                let rec = Recovery::new(cfg);
+                let dom = rec.domain_for(&node.name);
+                let mut jr = Journal::create(&root);
+                let outcome = rec.recover(&c, &dom, wedge_attempts, &mut jr);
+                wedge_attempts += 1;
+                println!("    recovery: {}", outcome.as_str());
+                if outcome.usable() {
+                    unreachable_run = 0;
+                    continue;
+                }
+            }
+
+            // Three refusals in a row after a recovery that did not
+            // take. Seventeen tests once reported the same connection
+            // timeout nine seconds apart, measuring nothing while the
+            // list walked itself to the end.
             if unreachable_run >= 3 {
                 println!();
                 println!("  the node has refused {unreachable_run} times running; stopping");
