@@ -33,6 +33,7 @@ use crate::state::{self, Record};
 use crate::evidence::{self, Case};
 use crate::volume;
 use crate::mem_trace;
+use crate::wedge;
 use crate::trace_stack::{self, Tracing};
 use crate::indicator::Progress;
 use crate::node::NodeConn;
@@ -953,6 +954,12 @@ fn evidence_root() -> std::path::PathBuf {
 }
 
 
+/// The domain to ask when a node stops answering.
+///
+/// One name because the x86 lab is one VM. A cluster would need this
+/// per node, and the day it does the node struct is where it belongs.
+const WEDGE_VM: &str = "beamfs-x86-01";
+
 /// Set when the stop file appears: the loop finishes its test and stops.
 ///
 /// A run killed outright loses its summary -- what passed, what failed,
@@ -1046,6 +1053,23 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             p.finish(&format!("cannot prepare the node: {e}"));
             aborted.push(test.clone());
             unreachable_run += 1;
+
+            // First refusal only: the guest is asked once, while it is
+            // still running and still has a console. By the third the
+            // answer would be the same and the pty has moved on.
+            if unreachable_run == 1 {
+                println!("    the node stopped answering -- asking it why");
+                // Its own directory: no Case exists here, because a
+                // case is made when a test produces a verdict and this
+                // one never will.
+                let dir = root.join(format!(
+                    "wedged-{}", test.replace('/', "-")));
+                match wedge::capture_wedged(WEDGE_VM, &dir) {
+                    Ok(n) => println!("    console kept: {} KiB in {}",
+                                      n / 1024, dir.display()),
+                    Err(e) => println!("    nothing captured: {e}"),
+                }
+            }
             // Three refusals in a row is a node that has gone, not a
             // transient. Seventeen tests once reported the same
             // connection timeout nine seconds apart, measuring nothing
