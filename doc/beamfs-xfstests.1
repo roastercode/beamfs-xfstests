@@ -341,6 +341,13 @@ Past thirty seconds in one step the refresh slows and the step is
 named; past sixty it blinks a hash and says STALLED, which cannot be
 mistaken for motion.
 
+.SH OPTIONS
+.TP
+.B \-\-no\-bell
+Finish without ringing. Accepted after any command. See
+.B THE BELL
+below.
+
 .SH ENVIRONMENT
 .TP
 .B XFSTESTS_NODES
@@ -446,10 +453,12 @@ a measurement fails or waits.
 .PP
 It also stays quiet when standard input is not a terminal -- under a
 scheduler, or through a pipe -- because there would be nobody to press
-Return and the loop would not end. And when
+Return and the loop would not end. Pass
+.B \-\-no\-bell
+for a single run, or set
 .B BEAMFS_NO_BELL
-is set, which is what to use over a connection where the sound would
-come out of the wrong machine.
+for a whole shell, which is what to use when one run is chained into
+another or when the sound would come out of the wrong machine.
 .PP
 When this is packaged, one of those players belongs in the
 dependencies. A suggests or recommends rather than a requires: the

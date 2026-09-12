@@ -62,7 +62,12 @@ const STALL_LIMIT: u32 = 20;
 
 fn main() -> std::process::ExitCode {
     let cfg = Config::from_env();
-    let args: Vec<String> = std::env::args().collect();
+    // --no-bell is taken out of the arguments before anything reads
+    // them, so it works after any command without every command having
+    // to know about it.
+    let mut args: Vec<String> = std::env::args().collect();
+    let quiet = args.iter().any(|a| a == "--no-bell");
+    args.retain(|a| a != "--no-bell");
 
     // Which commands are worth waiting for.
     //
@@ -100,7 +105,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    if long {
+    if long && !quiet {
         bell::ring_until_acknowledged();
     }
     code
@@ -124,11 +129,15 @@ fn usage() -> std::process::ExitCode {
                   sweep [selection]   (default: the whole suite)\n\
          stop     kill the shards and release the mounts\n\
          \n\
+         options:\n\
+           --no-bell               finish without ringing\n\
+         \n\
          environment:\n\
          \x20 XFSTESTS_TIMEOUT        seconds per test, default 300\n\
          \x20 XFSTESTS_MKFS_OPTIONS   passed to mkfs.beamfs, default -N 16384\n\
          \x20 XFSTESTS_NODES          name:host:test_dev:scratch_dev, comma separated\n\
-         \x20 XFSTESTS_NO_RESUME      start over instead of resuming\n"
+         \x20 XFSTESTS_NO_RESUME      start over instead of resuming\n\
+         \x20 BEAMFS_NO_BELL          same as --no-bell, for a whole shell\n"
     );
     std::process::ExitCode::from(2)
 }
