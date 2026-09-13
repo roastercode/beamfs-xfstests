@@ -134,7 +134,7 @@ fn main() -> std::process::ExitCode {
 
 fn usage() -> std::process::ExitCode {
     eprintln!(
-        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|matrix|bench|baseline|sweep|stop]\n\
+        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|matrix|bench|baseline|sweep|deploy|stop]\n\
          \n\
          run      shard the suite across the nodes and follow it (default)\n\
          probe    run one test with console capture and sampling\n\
@@ -148,6 +148,9 @@ fn usage() -> std::process::ExitCode {
          baseline run the same code several times and report the spread\n\
          sweep    run every test of a selection once, one verdict each\n\
                   sweep [selection]   (default: the whole suite)\n\
+         deploy   put the newest image and this repo's tools on a node,\n\
+                  and prove they arrived\n\
+                  deploy [node]       (default: the first configured)\n\
          stop     kill the shards and release the mounts\n\
          \n\
          options:\n\
