@@ -34,6 +34,7 @@ use crate::evidence::{self, Case};
 use crate::volume;
 use crate::mem_trace;
 use crate::wedge;
+use crate::runpack;
 use crate::recovery::Recovery;
 use crate::journal::Journal;
 use crate::trace_stack::{self, Tracing};
@@ -548,6 +549,7 @@ pub fn run(
         // way.
         let case = Case::new(&evidence_root(), &r.test, n);
         evidence::collect(cfg, node, &case, &t.output);
+        evidence::speak(&case);
         if !t.trial.passed && !t.aborted {
             match evidence::freeze_volume(cfg, node, &case, &t.output) {
                 Ok(sz) => {
@@ -1037,6 +1039,9 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     let t_start = std::time::Instant::now();
 
     let mut unreachable_run = 0usize;
+    // The case directories this run wrote, for the archive at the end.
+    // Not the whole evidence tree: that holds every run before this one.
+    let mut produced: Vec<std::path::PathBuf> = Vec::new();
     // How many times this sweep has revived the node. Recovery
     // escalates on it: a node killed twice and still blocked is
     // restarted rather than killed a third time.
@@ -1150,6 +1155,8 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         // what a failing one has to be compared against.
         let case = Case::new(&root, test, 1);
         evidence::collect(cfg, node, &case, &t.output);
+        evidence::speak(&case);
+        produced.push(case.dir.clone());
         if !t.trial.passed {
             if !t.reason.is_empty() {
                 println!("    reason: {}", t.reason);
@@ -1213,5 +1220,25 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         println!("  {removed} older volume image(s) pruned");
     }
     println!("  evidence under {}", root.display());
+
+    // And one archive of it, in /tmp, without being asked.
+    //
+    // Building a tarball by hand was the step between a run finishing
+    // and anybody looking at what it found, and a step in that place is
+    // where findings are lost.
+    //
+    // The pruning above runs first on purpose: what it removed is what
+    // nobody wanted carried, and the archive should not carry it either.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let kept: Vec<std::path::PathBuf> =
+        produced.iter().filter(|p| p.exists()).cloned().collect();
+    match runpack::pack_run(&kept, &format!("{stamp}")) {
+        Some((path, size)) => runpack::announce(&path, size),
+        None if kept.is_empty() => {}
+        None => println!("  the archive could not be written"),
+    }
     Ok(())
 }

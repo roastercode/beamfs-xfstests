@@ -136,6 +136,96 @@ pub fn restore(cfg: &Config, node: &Node, test: &str) {
 /// A few hundred kilobytes each. The passing trials matter as much as
 /// the failing ones: a variable only implicates itself when the two
 /// differ, and half the evidence cannot show that.
+/// What the files just written actually say.
+///
+/// Printed under the verdict, so the interesting line is on the screen
+/// rather than in a directory. Deliberately narrow: the kernel's own
+/// complaints, and the checker's named blocks. Everything else is in
+/// the files.
+pub fn speak(case: &Case) {
+    let read = |name: &str| -> String {
+        std::fs::read_to_string(case.dir.join(name)).unwrap_or_default()
+    };
+
+    // What the kernel said, deduplicated.
+    //
+    // A ratelimited message repeats; the same sentence forty times is
+    // one finding, and printing it forty times buries the other one.
+    let dmesg = read("dmesg");
+    let mut kernel: Vec<String> = Vec::new();
+    for line in dmesg.lines() {
+        let Some(i) = line.find("beamfs") else { continue };
+        let msg = &line[i..];
+        // Mount and unmount lines are the run working, not a finding.
+        if msg.contains("mounted v") || msg.contains("bitmaps initialized")
+            || msg.contains("module loaded") || msg.contains("unmounting") {
+            continue;
+        }
+        // Collapse by shape: numbers differ, the sentence does not.
+        let shape: String = msg.chars()
+            .map(|c| if c.is_ascii_digit() { '#' } else { c })
+            .collect();
+        if !kernel.iter().any(|k| {
+            let ks: String = k.chars()
+                .map(|c| if c.is_ascii_digit() { '#' } else { c })
+                .collect();
+            ks == shape
+        }) {
+            kernel.push(msg.to_string());
+        }
+    }
+
+    if !kernel.is_empty() {
+        println!("    the kernel said, during this test:");
+        for (n, k) in kernel.iter().take(6).enumerate() {
+            let _ = n;
+            println!("      {}", k.trim());
+        }
+        if kernel.len() > 6 {
+            println!("      and {} more kind(s), in dmesg", kernel.len() - 6);
+        }
+    }
+
+    // What the checker named.
+    let fsck = read("fsck.verbose");
+    let mut named: Vec<&str> = Vec::new();
+    for line in fsck.lines() {
+        if line.contains("never described")
+            || line.contains("beyond correction")
+            || line.contains("out-of-range")
+            || line.contains("marked used but unreferenced")
+        {
+            named.push(line.trim());
+        }
+    }
+    if !named.is_empty() {
+        // Grouped by what was said, because four hundred identical
+        // findings are one finding with four hundred addresses.
+        let mut kinds: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for l in &named {
+            let k = if l.contains("never described") {
+                "indirect blocks with no parity ever written"
+            } else if l.contains("beyond correction") {
+                "indirect blocks whose parity disagrees"
+            } else if l.contains("out-of-range") {
+                "pointers outside the device"
+            } else {
+                "blocks marked used that nothing references"
+            };
+            *kinds.entry(k.to_string()).or_insert(0) += 1;
+        }
+        println!("    the checker named:");
+        for (k, n) in &kinds {
+            println!("      {n} {k}");
+        }
+        if let Some(first) = named.first() {
+            println!("      first: {first}");
+        }
+        println!("      all of them in fsck.verbose");
+    }
+}
+
 pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
     let c = NodeConn::new(node, cfg);
     case.put("check.out", check_output);
@@ -149,11 +239,35 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
         ("vmstat", "/proc/vmstat".into()),
         ("diskstats", "/proc/diskstats".into()),
         ("slabinfo", "/proc/slabinfo".into()),
+        // The checker again, verbose, naming every block it faults.
+        //
+        // The run the harness reads is the one xfstests makes, and that
+        // one is quiet: "17 indirect blocks beyond correction" without
+        // saying which. Naming them is the difference between a count
+        // and a place to look.
+        ("fsck.verbose", "@fsck".into()),
+        // Which tracepoints were on, so a trace that is empty can be
+        // told from a trace that was never enabled.
+        ("tracing.state", "@tracing".into()),
+        ("interrupts", "/proc/interrupts".into()),
+        ("locks", "/proc/locks".into()),
+        ("buddyinfo", "/proc/buddyinfo".into()),
+        ("zoneinfo", "/proc/zoneinfo".into()),
     ];
     for (name, src) in files {
         let cmd = match src.as_str() {
             "@dmesg" => "sudo dmesg".to_string(),
             "@mount" => "mount".to_string(),
+            // Both devices: a test that fails on the test device and a
+            // test that fails on the scratch one look the same from
+            // here, and the checker is cheap.
+            "@fsck" => format!(
+                "for d in {} {}; do echo \"--- $d ---\"; \
+                 sudo fsck.beamfs -v $d 2>&1 | head -400; done",
+                node.test_dev, node.scratch_dev),
+            "@tracing" => "sudo sh -c 'for e in /sys/kernel/debug/tracing/events/beamfs/*/enable; \
+                do echo \"$(basename $(dirname $e)) $(cat $e)\"; done; \
+                echo \"tracing_on $(cat /sys/kernel/debug/tracing/tracing_on)\"' 2>/dev/null || true".to_string(),
             p => format!("sudo cat {p} 2>/dev/null || true"),
         };
         if let Ok((body, _)) = c.run_rc(&cmd, Duration::from_secs(60)) {
@@ -172,6 +286,33 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
             case.put("xtrace", &t);
         }
     }
+
+    // The ftrace buffer, if anything was enabled.
+    //
+    // Staged to /tmp on the node and pulled with scp: read through ssh
+    // it would come back as a String the size of the buffer, and the
+    // buffer is sized in hundreds of megabytes.
+    {
+        let staged = "/tmp/ev-case-trace.txt";
+        let prep = format!(
+            "sudo sh -c 'cat /sys/kernel/debug/tracing/trace > {staged} 2>/dev/null; \
+             chmod 644 {staged}' || true");
+        if c.run(&prep, std::time::Duration::from_secs(120)).is_ok() {
+            let local = case.dir.join("trace.txt");
+            if c.pull(staged, &local.to_string_lossy()).is_ok() {
+                if let Ok(m) = std::fs::metadata(&local) {
+                    // A trace with nothing in it but its header is not
+                    // evidence, and keeping it suggests otherwise.
+                    if m.len() < 2048 {
+                        let _ = std::fs::remove_file(&local);
+                    }
+                }
+            }
+            let _ = c.run(&format!("rm -f {staged}"),
+                             std::time::Duration::from_secs(20));
+        }
+    }
+
 }
 
 

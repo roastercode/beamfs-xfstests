@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// Author: Aurelien Desbrieres <aurelien@hackers.camp>
+
+//! One archive per run, written without being asked.
+//!
+//! The evidence directory holds everything a failure produced, and
+//! moving it anywhere meant a tarball assembled by hand. A step between
+//! a run and its analysis is where findings go missing, so the run
+//! leaves one behind.
+//!
+//! /tmp, because that is where the operator's own logs go and because it
+//! survives the session without surviving the machine.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// Pack the cases this run produced.
+///
+/// @cases are the directories this run wrote -- not the whole evidence
+/// tree, which holds every run before it. Returns the archive and its
+/// size.
+pub fn pack_run(cases: &[PathBuf], stamp: &str) -> Option<(PathBuf, u64)> {
+    if cases.is_empty() {
+        return None;
+    }
+    let out = PathBuf::from(format!("/tmp/beamfs-xfstests-{stamp}.tar.zst"));
+    let root = cases[0].parent()?.to_path_buf();
+
+    let mut args: Vec<String> = vec![
+        "-C".into(), root.to_string_lossy().into_owned(),
+        "--zstd".into(), "-cf".into(),
+        out.to_string_lossy().into_owned(),
+    ];
+    for c in cases {
+        if let Some(name) = c.file_name() {
+            args.push(name.to_string_lossy().into_owned());
+        }
+    }
+    if !Command::new("tar").args(&args).status().ok()?.success() {
+        return None;
+    }
+    let size = std::fs::metadata(&out).ok()?.len();
+    Some((out, size))
+}
+
+/// Say where it went.
+pub fn announce(path: &Path, size: u64) {
+    println!();
+    println!("  everything this run kept: {}", path.display());
+    println!("    {} KiB, unpack with: tar -xf {}", size / 1024, path.display());
+}

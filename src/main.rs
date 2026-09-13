@@ -31,6 +31,7 @@ mod analyse;
 mod load;
 mod trace;
 mod archive;
+mod runpack;
 mod config;
 mod console;
 mod history;
