@@ -1086,6 +1086,15 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     let t_start = std::time::Instant::now();
 
     let mut unreachable_run = 0usize;
+    // The test the node last refused on, and how many times running.
+    //
+    // Refusals are counted per test rather than in a row: a node
+    // wedged by generic/269 refuses generic/464 too, and treating that
+    // as one long streak stopped the campaign with tests still unrun.
+    let mut refused_test = String::new();
+    let mut refused_times = 0u32;
+    // Tests set aside because they wedge the node every time.
+    let mut wedging: Vec<String> = Vec::new();
     // The case directories this run wrote, for the archive at the end.
     // Not the whole evidence tree: that holds every run before this one.
     let mut produced: Vec<std::path::PathBuf> = Vec::new();
@@ -1111,6 +1120,13 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             p.finish(&format!("cannot prepare the node: {e}"));
             aborted.push(test.clone());
             unreachable_run += 1;
+
+            if *test == refused_test {
+                refused_times += 1;
+            } else {
+                refused_test = test.clone();
+                refused_times = 1;
+            }
 
             // First refusal only: the guest is asked once, while it is
             // still running and still has a console. By the third the
@@ -1150,6 +1166,18 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                 println!("    recovery: {}", outcome.as_str());
                 if outcome.usable() {
                     unreachable_run = 0;
+
+                    // Twice on the same test means the test is what
+                    // wedges it, not the one before. Retrying a third
+                    // time costs another recovery and measures
+                    // nothing; the rest of the list is worth more.
+                    if refused_times >= 2 {
+                        println!("    {test} wedges this node -- set aside, moving on");
+                        wedging.push(test.clone());
+                        refused_test.clear();
+                        refused_times = 0;
+                        continue;
+                    }
                     continue;
                 }
             }
@@ -1311,6 +1339,13 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     if removed > 0 {
         println!();
         println!("  {removed} older volume image(s) pruned");
+    }
+    if !wedging.is_empty() {
+        println!();
+        println!("  set aside, each wedged the node twice:");
+        for t in &wedging {
+            println!("    {t}");
+        }
     }
     println!("  evidence under {}", root.display());
 

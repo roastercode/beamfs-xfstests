@@ -1,0 +1,197 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// Author: Aurelien DESBRIERES <aurelien@hackers.camp>
+
+//! Put the image and the tools on a node, and prove they arrived.
+//!
+//! This was a shell block written fresh on every cycle, and it checked
+//! none of its own transfers. An rsync failed silently on 2026-09-13,
+//! the image's own fsck.beamfs answered in place of this repo's, and a
+//! campaign reported 306 destroyed inodes on a volume that was sound.
+//!
+//! Every step here reports what it did, and the run stops at the first
+//! one that did not.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+
+use crate::config::{Config, Node};
+use crate::node::NodeConn;
+
+/// Where the freshly built image is.
+fn newest_image() -> Option<PathBuf> {
+    let dir = PathBuf::from(std::env::var("HOME").ok()?)
+        .join("yocto/poky/build-qemux86/tmp/deploy/images/qemux86-64");
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if p.to_string_lossy().ends_with(".rootfs.beamfs") {
+            if let Ok(t) = e.metadata().and_then(|m| m.modified()) {
+                if best.as_ref().is_none_or(|(bt, _)| t > *bt) {
+                    best = Some((t, p));
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// Build the static tools this repo ships to the node.
+///
+/// Static because the node's libc is not this machine's, and a tool
+/// that will not start is indistinguishable from one that found
+/// nothing.
+fn build_tools() -> Result<Vec<(String, PathBuf)>, String> {
+    let home = PathBuf::from(std::env::var("HOME").map_err(|e| e.to_string())?);
+    let fsck_dir = home.join("git/beamfs/tools/fsck.beamfs");
+
+    let st = Command::new("make")
+        .current_dir(&fsck_dir)
+        .arg("clean")
+        .status();
+    let _ = st;
+    let out = Command::new("make")
+        .current_dir(&fsck_dir)
+        .arg("LDFLAGS=-static")
+        .output()
+        .map_err(|e| format!("make fsck: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("fsck did not build: {}",
+                           String::from_utf8_lossy(&out.stderr)
+                               .lines().rev().take(3)
+                               .collect::<Vec<_>>().join(" | ")));
+    }
+
+    let mkfs_src = home.join("git/yocto-beamfs/recipes-kernel/beamfs/files/beamfs-0.1.3");
+    let mkfs_out = PathBuf::from("/tmp/mkfs.beamfs.static");
+    let out = Command::new("cc")
+        .args(["-O2", "-std=gnu11", "-static"])
+        .arg(format!("-I{}", mkfs_src.display()))
+        .arg("-o").arg(&mkfs_out)
+        .arg(mkfs_src.join("mkfs.beamfs.c"))
+        .arg(mkfs_src.join("rs_decode.c"))
+        .output()
+        .map_err(|e| format!("cc mkfs: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("mkfs did not build: {}",
+                           String::from_utf8_lossy(&out.stderr)
+                               .lines().rev().take(3)
+                               .collect::<Vec<_>>().join(" | ")));
+    }
+
+    Ok(vec![
+        ("fsck.beamfs".into(), fsck_dir.join("fsck.beamfs")),
+        ("mkfs.beamfs".into(), mkfs_out),
+    ])
+}
+
+fn md5(p: &Path) -> Option<String> {
+    let o = Command::new("md5sum").arg(p).output().ok()?;
+    if !o.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&o.stdout)
+        .split_whitespace().next().map(str::to_string)
+}
+
+/// Replace the node's image, restart it, and push the tools.
+///
+/// Returns when the node answers and its tools match, or an error
+/// naming the step that did not.
+pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
+    let image = newest_image().ok_or("no image under deploy/images/qemux86-64")?;
+    let age = std::fs::metadata(&image)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs() / 60)
+        .unwrap_or(0);
+    println!("  image   : {} ({} min old)",
+             image.file_name().unwrap_or_default().to_string_lossy(), age);
+
+    // The tools first: a build that fails should not cost a reboot.
+    let tools = build_tools()?;
+    for (n, p) in &tools {
+        println!("  built   : {n} ({} bytes)",
+                 std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
+    }
+
+    let st = Command::new("sudo").args(["virsh", "destroy", domain]).output();
+    let _ = st;
+    std::thread::sleep(Duration::from_secs(3));
+
+    let target = format!("/var/lib/libvirt/images/x86/{domain}.beamfs");
+    let out = Command::new("sudo")
+        .arg("cp").arg(&image).arg(&target)
+        .output()
+        .map_err(|e| format!("cp image: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("the image did not copy: {}",
+                           String::from_utf8_lossy(&out.stderr).trim()));
+    }
+
+    let out = Command::new("sudo")
+        .args(["virsh", "start", domain])
+        .output()
+        .map_err(|e| format!("virsh start: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("the node did not start: {}",
+                           String::from_utf8_lossy(&out.stderr).trim()));
+    }
+
+    // Waited for, not slept through: a fixed sleep is either too short
+    // on a kernel with KASAN or wasted on one without.
+    let c = NodeConn::new(node, cfg);
+    print!("  waiting :");
+    let mut up = false;
+    for i in 1..=40 {
+        std::thread::sleep(Duration::from_secs(5));
+        if c.run("true", Duration::from_secs(8)).is_ok() {
+            println!(" up after {}s", i * 5);
+            up = true;
+            break;
+        }
+        if i % 6 == 0 {
+            print!(" {}s", i * 5);
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        }
+    }
+    if !up {
+        println!();
+        return Err("the node never answered".into());
+    }
+
+    // rsync, and then the checksum: a transfer that reports success
+    // and lands nowhere is what put a 2011 checker on the node.
+    for (name, path) in &tools {
+        let want = md5(path).ok_or_else(|| format!("cannot hash {name}"))?;
+        c.push(&path.to_string_lossy(), &format!("/tmp/{name}"))
+            .map_err(|e| format!("{name} did not transfer: {e:?}"))?;
+        c.run(&format!("sudo cp /tmp/{name} /usr/sbin/{name} && \
+                        sudo chmod 755 /usr/sbin/{name} && rm -f /tmp/{name}"),
+              Duration::from_secs(30))
+            .map_err(|e| format!("{name} did not install: {e:?}"))?;
+
+        let got = c.run(&format!("md5sum /usr/sbin/{name} | cut -d' ' -f1"),
+                        Duration::from_secs(20))
+            .unwrap_or_default();
+        if got.trim() != want {
+            return Err(format!(
+                "{name} on the node is {}, not the {} built here",
+                &got.trim()[..got.trim().len().min(12)],
+                &want[..want.len().min(12)]));
+        }
+        println!("  pushed  : {name} {}", &want[..12]);
+    }
+
+    let _ = c.run("sudo rm -rf /usr/xfstests/results; sudo dmesg -C; \
+                   sudo mkdir -p /mnt/test /mnt/scratch; \
+                   sudo mount -t debugfs none /sys/kernel/debug 2>/dev/null || true",
+                  Duration::from_secs(30));
+
+    let k = c.run("uname -r", Duration::from_secs(20)).unwrap_or_default();
+    println!("  kernel  : {}", k.trim());
+    Ok(())
+}

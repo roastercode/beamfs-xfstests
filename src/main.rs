@@ -17,6 +17,7 @@
 //! TCG, and the suite is around 737 tests.
 
 mod wedge;
+mod deploy;
 mod bpf;
 mod bell;
 mod volume;
@@ -110,6 +111,7 @@ fn main() -> std::process::ExitCode {
         Some("matrix") => do_matrix(&cfg, args.get(2), args.get(3)),
         Some("bench") => do_bench(&cfg, args.get(2), args.get(3)),
         Some("sweep") => do_sweep(&cfg, args.get(2)),
+        Some("deploy") => do_deploy(&cfg, args.get(2)),
         Some("baseline") => do_baseline(&cfg, args.get(2), args.get(3), args.get(4)),
         Some("--help" | "-h") => usage(),
         // A typo must not start a campaign. "analyses" for "analyse"
@@ -1038,6 +1040,37 @@ fn do_baseline(cfg: &Config, test: Option<&String>, trials: Option<&String>,
 /// and sweep runs many tests once to find out which of them fail --
 /// two different questions that were being asked with one command, and
 /// answered badly for both.
+/// Put the newest image and this repo's tools on a node.
+///
+/// A shell block written fresh on every cycle checked none of its own
+/// transfers. An rsync failed silently on 2026-09-13, the image's own
+/// fsck.beamfs -- 30840 bytes, dated 2011 -- answered in place of the
+/// 857568 built here, and a campaign reported 306 destroyed inodes on
+/// a volume that was sound.
+fn do_deploy(cfg: &Config, which: Option<&String>) -> std::process::ExitCode {
+    let Some(node) = (match which.map(|s| s.as_str()) {
+        Some(n) => cfg.nodes.iter().find(|x| x.name == n),
+        None => cfg.nodes.first(),
+    }) else {
+        eprintln!("beamfs-xfstests: no such node");
+        return std::process::ExitCode::FAILURE;
+    };
+    // The domain is named for the node, as recovery names it.
+    let domain = format!("beamfs-{}", node.name);
+    match deploy::deploy(cfg, node, &domain) {
+        Ok(()) => {
+            println!();
+            println!("  the node is ready");
+            std::process::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!();
+            eprintln!("  {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 fn do_sweep(cfg: &Config, selection: Option<&String>) -> std::process::ExitCode {
     let Some(node) = cfg.nodes.first() else {
         eprintln!("no nodes configured");
