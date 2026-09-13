@@ -270,10 +270,16 @@ pub fn stop(t: &Tracing, cfg: &Config, node: &Node, offset_start: f64)
         .output();
 
     // Bring the guest trace back so both are in one place.
-    let _ = std::process::Command::new("scp")
-        .args(["-q", "-i", &cfg.ssh_key, "-o", "BatchMode=yes",
-               "-o", "StrictHostKeyChecking=no"])
-        .arg(format!("{}@{}:/var/trace/*", cfg.user, node.host))
+    //
+    // rsync, like everywhere else here: scp's original protocol is
+    // deprecated since OpenSSH 9, and rsync reports what it moved.
+    let _ = std::process::Command::new("rsync")
+        .arg("-q")
+        .arg("-e")
+        .arg(format!(
+            "ssh -i {} -o BatchMode=yes -o StrictHostKeyChecking=no",
+            cfg.ssh_key))
+        .arg(format!("{}@{}:/var/trace/", cfg.user, node.host))
         .arg(t.dir.as_os_str())
         .output();
 

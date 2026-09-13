@@ -142,13 +142,19 @@ impl<'a> NodeConn<'a> {
     pub fn push(&self, local: &str, remote: &str) -> Result<(), NodeError> {
         let out = Command::new("timeout")
             .arg("30")
-            .arg("scp")
-            .args(["-i", &self.key])
-            .args(["-o", "BatchMode=yes"])
-            .args(["-o", "StrictHostKeyChecking=no"])
-            .args(["-o", "UserKnownHostsFile=/dev/null"])
-            .args(["-o", "LogLevel=ERROR"])
-            .arg("-O")
+            .arg("rsync")
+            // rsync over ssh rather than scp.
+            //
+            // scp's -O forces the original protocol, which OpenSSH
+            // deprecated in 9.0 for the reasons its own release notes
+            // give. rsync says what it transferred and what it did not,
+            // which scp does not, and resumes rather than restarting.
+            .arg("-e")
+            .arg(format!(
+                "ssh -i {} -o BatchMode=yes -o StrictHostKeyChecking=no \
+                 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR",
+                self.key))
+            .arg("-q")
             .arg(local)
             .arg(format!("{}@{}:{remote}", self.user, self.node.host))
             .stdin(Stdio::null())
@@ -167,20 +173,26 @@ impl<'a> NodeConn<'a> {
 
     /// Copy a file from the node.
     ///
-    /// scp rather than `cat` through run(): the ftrace buffer is
+    /// rsync rather than `cat` through run(): the ftrace buffer is
     /// hundreds of megabytes and run() returns a String, which means
     /// the whole thing in the harness's memory on a host that is
     /// already short of it.
     pub fn pull(&self, remote: &str, local: &str) -> Result<(), NodeError> {
         let out = Command::new("timeout")
             .arg("300")
-            .arg("scp")
-            .args(["-i", &self.key])
-            .args(["-o", "BatchMode=yes"])
-            .args(["-o", "StrictHostKeyChecking=no"])
-            .args(["-o", "UserKnownHostsFile=/dev/null"])
-            .args(["-o", "LogLevel=ERROR"])
-            .arg("-O")
+            .arg("rsync")
+            // rsync over ssh rather than scp.
+            //
+            // scp's -O forces the original protocol, which OpenSSH
+            // deprecated in 9.0 for the reasons its own release notes
+            // give. rsync says what it transferred and what it did not,
+            // which scp does not, and resumes rather than restarting.
+            .arg("-e")
+            .arg(format!(
+                "ssh -i {} -o BatchMode=yes -o StrictHostKeyChecking=no \
+                 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR",
+                self.key))
+            .arg("-q")
             .arg(format!("{}@{}:{remote}", self.user, self.node.host))
             .arg(local)
             .stdin(Stdio::null())

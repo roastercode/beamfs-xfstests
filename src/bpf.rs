@@ -84,8 +84,15 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
         .map_err(|e| format!("push {script}: {e:?}"))?;
 
     let cmd = format!(
-        "sudo rm -f {remote_out}; \
-         sudo setsid bpftrace {remote} > {remote_out} 2>&1 < /dev/null & \
+        // The redirection inside sudo, not outside it.
+        //
+        // "sudo rm -f X; sudo cmd > X" has the unprivileged shell
+        // create X after root removed it, and root's output goes
+        // somewhere the shell cannot read back. The probe attached
+        // fine and the harness reported "bpftrace said nothing at all"
+        // twice.
+        "sudo sh -c 'rm -f {remote_out}; \
+         setsid bpftrace {remote} > {remote_out} 2>&1 < /dev/null &' ; \
          sleep 3; \
          if grep -q 'Attaching' {remote_out}; then echo BX_ATTACHED; \
          else echo BX_FAILED; cat {remote_out}; fi");

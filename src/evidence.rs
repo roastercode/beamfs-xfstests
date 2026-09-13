@@ -292,7 +292,7 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
 
     // The ftrace buffer, if anything was enabled.
     //
-    // Staged to /tmp on the node and pulled with scp: read through ssh
+    // Staged to /tmp on the node and pulled with rsync: read through ssh
     // it would come back as a String the size of the buffer, and the
     // buffer is sized in hundreds of megabytes.
     {
