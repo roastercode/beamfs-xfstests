@@ -292,6 +292,59 @@ impl<'a> NodeConn<'a> {
         )
     }
 
+    /// Are the node's tools the ones this repo builds?
+    ///
+    /// Every redeploy of the image puts its own mkfs.beamfs and
+    /// fsck.beamfs back, and they are not these. On 2026-09-13 a
+    /// campaign reported 306 inodes beyond correction on a sound
+    /// volume because the checker answering was the image's, 30840
+    /// bytes dated 2011, against the 857568 built here.
+    ///
+    /// Existence was all preflight asked for, and it is not enough: a
+    /// wrong checker does not fail, it answers, and an afternoon goes
+    /// to a defect that was never there.
+    ///
+    /// @local maps a tool name under /usr/sbin to the binary this repo
+    /// built. Returns the ones that differ; empty means all match.
+    pub fn tools_match(&self, local: &[(String, String)]) -> Vec<String> {
+        let mut wrong = Vec::new();
+
+        for (name, path) in local {
+            // No local copy is not a mismatch: the operator may be
+            // running against an image whose tools are the reference.
+            let want = match std::process::Command::new("md5sum").arg(path).output() {
+                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string(),
+                _ => continue,
+            };
+            if want.is_empty() {
+                continue;
+            }
+
+            let got = self
+                .run(
+                    &format!("md5sum /usr/sbin/{name} 2>/dev/null | cut -d' ' -f1"),
+                    Duration::from_secs(20),
+                )
+                .unwrap_or_default();
+            let got = got.trim().to_string();
+
+            if got.is_empty() {
+                wrong.push(format!("{name} is not on the node"));
+            } else if got != want {
+                wrong.push(format!(
+                    "{name}: the node has {}, this repo built {}",
+                    &got[..got.len().min(12)],
+                    &want[..want.len().min(12)]
+                ));
+            }
+        }
+        wrong
+    }
+
     fn probe_dev(&self, dev: &str) -> String {
         format!("$(lsblk -dno SIZE /dev/{dev} 2>/dev/null | tr -d ' ' || echo MISSING)")
     }

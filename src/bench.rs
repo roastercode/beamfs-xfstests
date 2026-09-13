@@ -1018,6 +1018,39 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     println!("  node    : {}", node.name);
     println!("  commit  : {}", commit());
 
+    // The node's tools, against the ones this repo builds.
+    //
+    // Every redeploy of the image puts its own mkfs.beamfs and
+    // fsck.beamfs back. On 2026-09-13 a campaign reported 306 inodes
+    // beyond correction on a sound volume because the checker
+    // answering was the image's, 30840 bytes dated 2011, against the
+    // 857568 built here -- and preflight had only asked whether a file
+    // by that name existed.
+    //
+    // A wrong checker does not fail. It answers, and the answer is
+    // taken for a finding.
+    {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let local = vec![
+            ("fsck.beamfs".to_string(),
+             repo.join("beamfs/tools/fsck.beamfs/fsck.beamfs")
+                 .to_string_lossy().into_owned()),
+        ];
+        let wrong = c.tools_match(&local);
+        if !wrong.is_empty() {
+            println!();
+            for w in &wrong {
+                println!("  {w}");
+            }
+            println!();
+            return Err("the node is not running this repo's tools -- \
+                        redeploy them before measuring anything".into());
+        }
+    }
+
     // ./check mounts TEST_DEV before it will list anything, even under
     // -n, so the node has to be prepared first. A freshly deployed image
     // has no /mnt/test and the enumeration comes back empty with a mount
