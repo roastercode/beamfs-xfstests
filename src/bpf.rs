@@ -110,7 +110,13 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
     }
 
     let cmd = format!(
-        // The redirection inside sudo, not outside it.
+        // The redirection inside sudo, and no quotes on the pattern.
+            //
+            // Those quotes closed the ones sudo sh -c opened, so
+            // the node received a malformed command: the probe
+            // started, the check never ran, and the harness said
+            // the script had not reached the node. Typed by hand it
+            // worked, because the local shell re-quoted it.
         //
         // "sudo rm -f X; sudo cmd > X" has the unprivileged shell
         // create X after root removed it, and root's output goes
@@ -120,7 +126,7 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
         "sudo sh -c 'rm -f {remote_out}; \
          setsid bpftrace {remote} > {remote_out} 2>&1 < /dev/null &' ; \
          sleep 3; \
-         if grep -q 'Attaching' {remote_out}; then echo BX_ATTACHED; \
+         if grep -q Attaching {remote_out}; then echo BX_ATTACHED; \
          else echo BX_FAILED; cat {remote_out}; fi");
     let out = conn.run(&cmd, Duration::from_secs(45))
         .map_err(|e| format!("start {script}: {e:?}"))?;
