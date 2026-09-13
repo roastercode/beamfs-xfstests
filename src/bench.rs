@@ -218,6 +218,51 @@ fn prepare(c: &NodeConn, mkfs_opts: &str) -> Result<String, String> {
     c.run(&cmd, Duration::from_secs(180)).map_err(|e| e.to_string())
 }
 
+/// Watch a node while a test runs, and say when it has stopped working.
+///
+/// Returns a flag to stop the watching and a flag the caller reads:
+/// true means the disk stopped moving with tasks stuck, for long
+/// enough that the test is not going to finish.
+///
+/// The budget alone could not tell those apart. generic/269 was killed
+/// at 900 seconds while it was still writing, and the same 900 would
+/// be far too long for a node that wedged in its first minute.
+fn watch_node(cfg: &Config, node: &Node, quiet_limit: u32)
+    -> (std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>)
+{
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let wedged = Arc::new(AtomicBool::new(false));
+    let (s, w) = (stop.clone(), wedged.clone());
+    let (cfg, node) = (cfg.clone(), node.clone());
+
+    std::thread::spawn(move || {
+        let c = NodeConn::new(&node, &cfg);
+        let mut det = crate::progress::StallDetector::new(quiet_limit);
+        while !s.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_secs(30));
+            if s.load(Ordering::Relaxed) {
+                break;
+            }
+            // A node that will not answer is not evidence either way:
+            // it may be wedged, it may be busy enough that sshd waits.
+            // What ./check does decides that, not this.
+            let Some((written, blocked, _load)) = c.vitals() else { continue };
+            // The verdict count cannot move during one trial, so only
+            // the disk and the blocked tasks reset the detector.
+            if det.update_with_io(0, blocked, Some(written)) {
+                w.store(true, Ordering::Relaxed);
+                break;
+            }
+        }
+    });
+
+    (stop, wedged)
+}
+
 fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, String> {
     let t0 = Instant::now();
     // run_rc, not run: a failing test exits non-zero and that is the
@@ -1232,7 +1277,11 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         let budget: u64 = std::env::var("XFSTESTS_TRIAL_TIMEOUT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| 900 * slowdown);
+            // 2400 rather than 7200: the watcher above cuts a test
+            // that has stopped writing, so the budget only has to
+            // cover the longest test that is genuinely working.
+            // generic/083 takes 495 seconds under KASAN.
+            .unwrap_or_else(|| 300 * slowdown);
 
         // A bpftrace script, attached for the length of the test.
         //
@@ -1258,6 +1307,13 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             },
             _ => None,
         };
+        // Watched while it runs.
+        //
+        // Six polls of thirty seconds: three minutes with the disk
+        // still and tasks stuck is a wedge whatever the budget says,
+        // and a test writing at ninety minutes is working and is left
+        // alone.
+        let (watch_stop, watch_wedged) = watch_node(cfg, node, 6);
         let t = match one_trial(&c, test, Duration::from_secs(budget)) {
             Ok(t) => t,
             Err(e) => {
@@ -1316,6 +1372,12 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                     probe_failed = Some("the probe brought nothing back".into());
                 }
             }
+        }
+
+        watch_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if watch_wedged.load(std::sync::atomic::Ordering::Relaxed) {
+            println!("    the node stopped writing with tasks stuck -- \
+                      this test is not finishing");
         }
 
         if let Some(why) = probe_failed.take() {

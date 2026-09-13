@@ -430,6 +430,36 @@ impl<'a> NodeConn<'a> {
         bad
     }
 
+    /// What the node is doing right now, in one round trip.
+    ///
+    /// Sectors written to the scratch device, tasks in D, and the load.
+    /// One call because each is an ssh round trip and a sweep samples
+    /// this every thirty seconds for hours.
+    pub fn vitals(&self) -> Option<(u64, usize, f32)> {
+        let out = self
+            .run(
+                &format!(
+                    "printf '%s %s %s\\n' \
+                     \"$(awk '/ {} /{{print $10}}' /proc/diskstats)\" \
+                     \"$(ps -eo state= | grep -c '^D')\" \
+                     \"$(cut -d' ' -f1 /proc/loadavg)\"",
+                    self.node.scratch_dev
+                ),
+                Duration::from_secs(15),
+            )
+            .ok()?;
+
+        let f: Vec<&str> = out.split_whitespace().collect();
+        if f.len() < 3 {
+            return None;
+        }
+        Some((
+            f[0].parse().unwrap_or(0),
+            f[1].parse().unwrap_or(0),
+            f[2].parse().unwrap_or(0.0),
+        ))
+    }
+
     fn probe_dev(&self, dev: &str) -> String {
         format!("$(lsblk -dno SIZE /dev/{dev} 2>/dev/null | tr -d ' ' || echo MISSING)")
     }
