@@ -1,0 +1,48 @@
+#!/usr/bin/env bpftrace
+/*
+ * What the inode holds when the allocation path decides.
+ *
+ * Three memsets land on blocks that have taken pointers, at three
+ * offsets in beamfs_inline_lookup_or_alloc_phys -- one per level of
+ * the tree. All three are guarded by "the pointer is zero", all three
+ * callers hold i_alloc_mutex, and the blocks belong to five different
+ * inodes.
+ *
+ * So either the pointer really is zero at that instant, or the block
+ * being zeroed belongs to a different inode than the one that filled
+ * it. This prints both.
+ */
+
+BEGIN { printf("watching the pointer\n"); }
+
+tracepoint:beamfs:beamfs_slot_store
+{
+    @owner[args.parent] = args.ino;
+    @filled[args.parent] = 1;
+}
+
+kprobe:beamfs_inline_lookup_or_alloc_phys
+{
+    $i = (struct inode *)arg0;
+    @ino[tid] = $i->i_ino;
+}
+
+kprobe:beamfs_tc_zeroed
+{
+    $blk = arg2;
+    if (@filled[$blk] == 1) {
+        printf("LIVE %llu: filled for ino=%llu, now zeroed for ino=%lu\n",
+               $blk, @owner[$blk], arg1);
+        if (@owner[$blk] != arg1) {
+            printf("  DIFFERENT INODE\n");
+            @different = count();
+        } else {
+            printf("  same inode -- the pointer read as zero\n");
+            @same = count();
+        }
+    }
+}
+
+kretprobe:beamfs_inline_lookup_or_alloc_phys { delete(@ino[tid]); }
+
+END { clear(@owner); clear(@filled); clear(@ino); printf("\n"); }
