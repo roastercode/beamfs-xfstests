@@ -18,6 +18,7 @@
 
 mod wedge;
 mod deploy;
+mod bisect;
 mod bpf;
 mod bell;
 mod volume;
@@ -112,6 +113,15 @@ fn main() -> std::process::ExitCode {
         Some("bench") => do_bench(&cfg, args.get(2), args.get(3)),
         Some("sweep") => do_sweep(&cfg, args.get(2)),
         Some("deploy") => do_deploy(&cfg, args.get(2)),
+        Some("trend") => {
+            match args.get(2) {
+                Some(t) => bisect::trend(t, 12),
+                None => bisect::worst(20),
+            }
+            // Reading a log is not a campaign: nothing rings and
+            // nothing waits for a key.
+            return std::process::ExitCode::SUCCESS;
+        }
         Some("baseline") => do_baseline(&cfg, args.get(2), args.get(3), args.get(4)),
         Some("--help" | "-h") => usage(),
         // A typo must not start a campaign. "analyses" for "analyse"
@@ -134,7 +144,7 @@ fn main() -> std::process::ExitCode {
 
 fn usage() -> std::process::ExitCode {
     eprintln!(
-        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|matrix|bench|baseline|sweep|deploy|stop]\n\
+        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|matrix|bench|baseline|sweep|trend|deploy|stop]\n\
          \n\
          run      shard the suite across the nodes and follow it (default)\n\
          probe    run one test with console capture and sampling\n\
@@ -148,6 +158,8 @@ fn usage() -> std::process::ExitCode {
          baseline run the same code several times and report the spread\n\
          sweep    run every test of a selection once, one verdict each\n\
                   sweep [selection]   (default: the whole suite)\n\
+         trend    what a test has lost lately, or which tests lose most\n\
+                  trend [test]        (no test: the worst first)\n\
          deploy   put the newest image and this repo's tools on a node,\n\
                   and prove they arrived\n\
                   deploy [node]       (default: the first configured)\n\
