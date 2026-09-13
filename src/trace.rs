@@ -423,7 +423,16 @@ fn read_step(key: &str, host: &str) -> String {
     }
     LAST.store(now, Ordering::Relaxed);
     std::process::Command::new("timeout")
+        // The same options NodeConn uses.
+        //
+        // A redeploy gives the node a new host key, and a caller
+        // checking known_hosts stops on a warning that is not about
+        // this: it appeared in the middle of evidence collection and
+        // read like a finding.
         .args(["5", "ssh", "-i", key])
+        .args(["-o", "StrictHostKeyChecking=no"])
+        .args(["-o", "UserKnownHostsFile=/dev/null"])
+        .args(["-o", "LogLevel=ERROR"])
         .args(["-o", "BatchMode=yes"])
         .args(["-o", "ConnectTimeout=3"])
         .args(["-o", "StrictHostKeyChecking=no"])

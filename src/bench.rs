@@ -1178,6 +1178,15 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     // missing reads, at analysis time, exactly like one that saw
     // nothing -- and on 2026-09-13 the difference cost an afternoon.
     let mut probe_missing: Vec<String> = Vec::new();
+    // Things that went wrong with the apparatus rather than with the
+    // filesystem.
+    //
+    // A measurement taken through broken apparatus is not useless, it
+    // is wrong in a way that reads as a finding: 306 inodes reported
+    // destroyed by a stale checker, four blocks apparently handed
+    // between inodes by a probe capture six hours old. Hours went into
+    // each before the apparatus was suspected.
+    let mut apparatus: Vec<String> = Vec::new();
     // What the watcher saw during the test before this one.
     //
     // A refusal arrives on the next prepare, one iteration after the
@@ -1473,8 +1482,15 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         // race as one that loses 3 and 333.
         crate::history::losses::record(test, t.trial.lost);
 
+        // A failure whose volume could not be frozen cannot be
+        // re-examined: whatever it found is gone with the next mkfs.
+        if !t.trial.passed && !case.dir.join("scratch.img.zst").exists() {
+            apparatus.push(format!("{test}: the volume could not be frozen"));
+        }
+
         if let Some(why) = probe_failed.take() {
             probe_missing.push(format!("{test}: {why}"));
+            apparatus.push(format!("{test}: the probe produced nothing"));
         }
 
         evidence::collect(cfg, node, &case, &t.output);
@@ -1595,6 +1611,17 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         }
     }
 
+    if !apparatus.is_empty() {
+        println!();
+        println!("  the apparatus failed {} time(s) during this run:",
+                 apparatus.len());
+        for a in &apparatus {
+            println!("    {a}");
+        }
+        println!();
+        println!("  numbers from a run with a broken apparatus are not");
+        println!("  findings: fix the above and measure again.");
+    }
     if !probe_missing.is_empty() {
         println!();
         println!("  no probe capture for:");

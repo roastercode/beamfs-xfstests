@@ -92,7 +92,22 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
              Duration::from_secs(20))
         .map_err(|e| format!("{script}: cannot make {dir}: {e:?}"))?;
     conn.push(&local.to_string_lossy(), &remote)
-        .map_err(|e| format!("push {script}: {e:?}"))?;
+        .map_err(|e| format!("{script}: could not be copied to the node: {e:?}"))?;
+
+    // Arrived, and the right size.
+    //
+    // A transfer that reports success and lands nothing is what put a
+    // stale checker on this node once already.
+    let there = conn
+        .run(&format!("stat -c %s {remote} 2>/dev/null || echo 0"),
+             Duration::from_secs(20))
+        .unwrap_or_default();
+    let want = std::fs::metadata(&local).map(|m| m.len()).unwrap_or(0);
+    if there.trim().parse::<u64>().unwrap_or(0) != want {
+        return Err(format!(
+            "{script}: {} bytes here, {} on the node",
+            want, there.trim()));
+    }
 
     let cmd = format!(
         // The redirection inside sudo, not outside it.
@@ -121,8 +136,15 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
             .filter(|l| !l.is_empty() && !l.contains("BX_FAILED"))
             .take(4)
             .collect();
+        // Silence is not bpftrace's answer, it is the absence of one.
+        //
+        // "bpftrace said nothing at all" named the wrong culprit when
+        // the push had failed and there was no script on the node to
+        // run. What the harness knows is that it could not tell, and
+        // saying so sends the reader to the right place.
         return Err(if why.is_empty() {
-            format!("{script}: bpftrace said nothing at all")
+            format!("{script}: no output at all -- \
+                     the script may not have reached the node")
         } else {
             format!("{script}: {}", why.join(" | "))
         });

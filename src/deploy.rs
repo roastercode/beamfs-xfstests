@@ -195,6 +195,15 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
                            String::from_utf8_lossy(&out.stderr).trim()));
     }
 
+    // The old host key, before the node comes back with a new one.
+    //
+    // Everything here passes UserKnownHostsFile=/dev/null, but an
+    // operator's own ssh does not, and a warning about a changed key
+    // is the last thing wanted mid-campaign.
+    let _ = Command::new("ssh-keygen")
+        .args(["-R", &node.host])
+        .output();
+
     let out = Command::new("sudo")
         .args(["virsh", "start", domain])
         .output()
