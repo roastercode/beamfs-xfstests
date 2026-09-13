@@ -1,0 +1,36 @@
+#!/usr/bin/env bpftrace
+/*
+ * A block handed out that was never freed.
+ *
+ * Four blocks per generic/076 go from one inode's tree to another's,
+ * and the free that would explain it never happens: 2734 frees in a run
+ * and none of them is the block in question. So the allocator found the
+ * bit clear for a block nobody cleared.
+ *
+ * This records every allocation and every free, and prints the pair
+ * when a block comes out of the allocator while still recorded as
+ * allocated to somebody.
+ */
+
+BEGIN { printf("watching the bitmap's word\n"); }
+
+tracepoint:beamfs:beamfs_block_alloc
+{
+    if (@held[args.blk] != 0 && @held[args.blk] != args.ino) {
+        printf("HANDED TWICE %llu: held by ino=%llu, now given to ino=%lu\n",
+               args.blk, @held[args.blk], args.ino);
+        printf("  no free in between\n");
+        print(kstack(12));
+        @twice = count();
+    }
+    @held[args.blk] = args.ino;
+    @allocs = count();
+}
+
+tracepoint:beamfs:beamfs_block_free
+{
+    delete(@held[args.blk]);
+    @frees = count();
+}
+
+END { clear(@held); printf("\n"); }
