@@ -1112,13 +1112,17 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     // Asked once: the answer does not change during a sweep, and the
     // node is already answering by the time the first test starts.
     let slowdown: u64 = {
-        let cfgs = c.run("grep -cE '^CONFIG_(KASAN|KCSAN)=y' /proc/config.gz \
-                          2>/dev/null || zgrep -cE '^CONFIG_(KASAN|KCSAN)=y' \
-                          /proc/config.gz 2>/dev/null || echo 0",
-                         std::time::Duration::from_secs(20))
+        // kallsyms, not /proc/config.gz: the image does not build
+        // CONFIG_IKCONFIG and has no zgrep, so the config is not there
+        // to read. The symbols are, and a kernel with KASAN carries
+        // about two hundred of them.
+        let cfgs = c.run("sudo grep -ciE 'kasan|kcsan' /proc/kallsyms 2>/dev/null || echo 0",
+                         std::time::Duration::from_secs(30))
             .unwrap_or_default();
         let n: u64 = cfgs.trim().parse().unwrap_or(0);
-        if n > 0 {
+        // A handful of symbols is a kernel that merely knows the word;
+        // a hundred is one built with the sanitizer.
+        if n > 50 {
             println!("  budget  : x8, the kernel carries a sanitizer");
             8
         } else {
