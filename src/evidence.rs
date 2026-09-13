@@ -478,7 +478,8 @@ pub fn freeze_volume(
         let status = std::process::Command::new("sh")
             .arg("-c")
             .arg(format!(
-                "ssh -i {key} -o BatchMode=yes -o StrictHostKeyChecking=no {user}@{host} \
+                "ssh -i {key} -o BatchMode=yes -o StrictHostKeyChecking=no \
+                 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR {user}@{host} \
                  'sudo dd if=/dev/{dev} bs=1M 2>/dev/null | zstd -3 -T0 -c' > {out}",
                 key = cfg.ssh_key,
                 user = cfg.user,

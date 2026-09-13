@@ -277,7 +277,8 @@ pub fn stop(t: &Tracing, cfg: &Config, node: &Node, offset_start: f64)
         .arg("-q")
         .arg("-e")
         .arg(format!(
-            "ssh -i {} -o BatchMode=yes -o StrictHostKeyChecking=no",
+            "ssh -i {} -o BatchMode=yes -o StrictHostKeyChecking=no \
+                 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR",
             cfg.ssh_key))
         .arg(format!("{}@{}:/var/trace/", cfg.user, node.host))
         .arg(t.dir.as_os_str())

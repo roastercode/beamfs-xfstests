@@ -152,6 +152,7 @@ impl<'a> NodeConn<'a> {
             .arg("-e")
             .arg(format!(
                 "ssh -i {} -o BatchMode=yes -o StrictHostKeyChecking=no \
+                 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
                  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR",
                 self.key))
             .arg("-q")
@@ -190,6 +191,7 @@ impl<'a> NodeConn<'a> {
             .arg("-e")
             .arg(format!(
                 "ssh -i {} -o BatchMode=yes -o StrictHostKeyChecking=no \
+                 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
                  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR",
                 self.key))
             .arg("-q")
