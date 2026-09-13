@@ -1,0 +1,58 @@
+#!/usr/bin/env bpftrace
+/*
+ * Which block gets zeroed, and was it in use?
+ *
+ * The lost pointers happen in memory, in one thread's own buffer,
+ * with no read from the medium: 62 of them in one generic/076, twenty
+ * on a single indirect block in consecutive slots. Nothing but a
+ * memset writes that many zeros at once, and every memset in the
+ * allocation path is guarded by "this block is new".
+ *
+ * beamfs_tc_zeroed is called beside each of them with the block
+ * number. Pairing that against the stores already seen for the same
+ * block says whether the block was new or in use.
+ */
+
+BEGIN { printf("watching zeroing\n"); }
+
+tracepoint:beamfs:beamfs_slot_store
+{
+    @live[args.parent] = args.parent;
+    @stored_in[args.parent] = count();
+}
+
+kprobe:beamfs_tc_zeroed
+{
+    $blk = arg2;
+    @zeroed = count();
+
+    if (@live[$blk] != 0) {
+        printf("ZEROED A LIVE BLOCK %llu (%llu stores before this)\n",
+               $blk, @stored_in[$blk]);
+        print(kstack(12));
+        @zeroed_live = count();
+    }
+    @zeroed_block[$blk] = count();
+}
+
+kprobe:beamfs_alloc_block { @alloc_calls = count(); }
+kretprobe:beamfs_alloc_block
+{
+    /* A block handed out twice without a free between is the other
+     * way this ends up zeroing something in use. */
+    if (@handed[retval] != 0) {
+        printf("ALLOCATED TWICE: %llu\n", retval);
+        @double_alloc = count();
+    }
+    @handed[retval] = 1;
+}
+
+tracepoint:beamfs:beamfs_block_free { delete(@handed[args.blk]); }
+
+END
+{
+    clear(@live);
+    clear(@stored_in);
+    clear(@handed);
+    printf("\n");
+}
