@@ -229,14 +229,19 @@ fn prepare(c: &NodeConn, mkfs_opts: &str) -> Result<String, String> {
 /// be far too long for a node that wedged in its first minute.
 fn watch_node(cfg: &Config, node: &Node, quiet_limit: u32)
     -> (std::sync::Arc<std::sync::atomic::AtomicBool>,
-        std::sync::Arc<std::sync::atomic::AtomicBool>)
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>)
 {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     let stop = Arc::new(AtomicBool::new(false));
     let wedged = Arc::new(AtomicBool::new(false));
-    let (s, w) = (stop.clone(), wedged.clone());
+    // The last few samples, kept for the account a recovery writes.
+    // "The node wedged" and "the node wedged while writing at full
+    // rate with 104 tasks in D" are different findings.
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let (s, w, sn) = (stop.clone(), wedged.clone(), seen.clone());
     let (cfg, node) = (cfg.clone(), node.clone());
 
     std::thread::spawn(move || {
@@ -250,7 +255,22 @@ fn watch_node(cfg: &Config, node: &Node, quiet_limit: u32)
             // A node that will not answer is not evidence either way:
             // it may be wedged, it may be busy enough that sshd waits.
             // What ./check does decides that, not this.
-            let Some((written, blocked, _load)) = c.vitals() else { continue };
+            let Some((written, blocked, load)) = c.vitals() else {
+                if let Ok(mut v) = sn.lock() {
+                    v.push("the node did not answer this poll".into());
+                    while v.len() > 10 { v.remove(0); }
+                }
+                continue;
+            };
+
+            if let Ok(mut v) = sn.lock() {
+                let at = (v.len() as u64 + 1) * 30;
+                v.push(format!(
+                    "{at}s: {written} sectors written, {blocked} task(s) in D, load {load:.1}"));
+                // Ten samples is five minutes, which is as far back as
+                // anything reaching for this needs to see.
+                while v.len() > 10 { v.remove(0); }
+            }
             // The verdict count cannot move during one trial, so only
             // the disk and the blocked tasks reset the detector.
             if det.update_with_io(0, blocked, Some(written)) {
@@ -260,7 +280,7 @@ fn watch_node(cfg: &Config, node: &Node, quiet_limit: u32)
         }
     });
 
-    (stop, wedged)
+    (stop, wedged, seen)
 }
 
 fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, String> {
@@ -1144,6 +1164,12 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     // missing reads, at analysis time, exactly like one that saw
     // nothing -- and on 2026-09-13 the difference cost an afternoon.
     let mut probe_missing: Vec<String> = Vec::new();
+    // What the watcher saw during the test before this one.
+    //
+    // A refusal arrives on the next prepare, one iteration after the
+    // test that caused it, so the account has to survive the loop.
+    let mut last_seen: Vec<String> = Vec::new();
+    let mut last_test = String::new();
     // The case directories this run wrote, for the archive at the end.
     // Not the whole evidence tree: that holds every run before this one.
     let mut produced: Vec<std::path::PathBuf> = Vec::new();
@@ -1233,6 +1259,27 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                                             test.replace('/', "-")));
                 let _ = std::fs::create_dir_all(&dir);
                 let mut jr = Journal::create(&dir);
+
+                // What led here, before anything is repaired.
+                //
+                // A recovery log said which step it was on and nothing
+                // about the minutes before: whether the disk had gone
+                // quiet, whether tasks had piled up, whether the load
+                // had climbed. Those decide whether the node wedged
+                // under work or died idle, and they are gone once the
+                // domain restarts.
+                if !last_seen.is_empty() {
+                    jr.section(&format!("WHAT LED HERE (during {last_test})"));
+                    for l in &last_seen {
+                        jr.line(l);
+                    }
+                    println!("    before it stopped answering, during {last_test}:");
+                    for l in last_seen.iter().rev().take(3).rev() {
+                        println!("      {l}");
+                    }
+                } else {
+                    jr.line("nothing was sampled before the refusal");
+                }
                 let outcome = rec.recover_into(&c, &dom, wedge_attempts,
                                                &mut jr, Some(&dir));
                 wedge_attempts += 1;
@@ -1319,7 +1366,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         // still and tasks stuck is a wedge whatever the budget says,
         // and a test writing at ninety minutes is working and is left
         // alone.
-        let (watch_stop, watch_wedged) = watch_node(cfg, node, 6);
+        let (watch_stop, watch_wedged, watch_seen) = watch_node(cfg, node, 6);
         let t = match one_trial(&c, test, Duration::from_secs(budget)) {
             Ok(t) => t,
             Err(e) => {
@@ -1381,6 +1428,10 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         }
 
         watch_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(v) = watch_seen.lock() {
+            last_seen = v.clone();
+            last_test = test.clone();
+        }
         if watch_wedged.load(std::sync::atomic::Ordering::Relaxed) {
             println!("    the node stopped writing with tasks stuck -- \
                       this test is not finishing");
