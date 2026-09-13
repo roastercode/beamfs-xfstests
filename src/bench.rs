@@ -1152,11 +1152,14 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     // restarted rather than killed a third time.
     let mut wedge_attempts = 0u32;
 
-    // How much slower this kernel is than a plain one.
+    // Whether this kernel carries a sanitizer.
     //
-    // Asked once: the answer does not change during a sweep, and the
-    // node is already answering by the time the first test starts.
-    let slowdown: u64 = {
+    // No longer a multiplier -- the budget is flat and the watcher does
+    // the judging -- but worth saying: a run that takes eight times as
+    // long as the last one should not look like a regression.
+    //
+    // Asked once: the answer does not change during a sweep.
+    {
         // kallsyms, not /proc/config.gz: the image does not build
         // CONFIG_IKCONFIG and has no zgrep, so the config is not there
         // to read. The symbols are, and a kernel with KASAN carries
@@ -1168,12 +1171,10 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         // A handful of symbols is a kernel that merely knows the word;
         // a hundred is one built with the sanitizer.
         if n > 50 {
-            println!("  budget  : x8, the kernel carries a sanitizer");
-            8
-        } else {
-            1
+            println!("  kernel  : carries a sanitizer, expect it slow");
         }
-    };
+        println!("  budget  : 1900s, and the watcher cuts earlier");
+    }
 
     for (i, test) in tests.iter().enumerate() {
         if stopping() {
@@ -1277,11 +1278,16 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         let budget: u64 = std::env::var("XFSTESTS_TRIAL_TIMEOUT")
             .ok()
             .and_then(|v| v.parse().ok())
-            // 2400 rather than 7200: the watcher above cuts a test
-            // that has stopped writing, so the budget only has to
-            // cover the longest test that is genuinely working.
-            // generic/083 takes 495 seconds under KASAN.
-            .unwrap_or_else(|| 300 * slowdown);
+            // 1900, flat, whatever the kernel carries.
+            //
+            // The watcher cuts a test that has stopped writing, so the
+            // budget is a ceiling on patience rather than a judgement.
+            // generic/269 under KASAN took 1859 seconds and produced a
+            // result -- 321 lost blocks, which the old 900 had been
+            // hiding by killing it first -- so the ceiling has to clear
+            // that, and little more: three tests at x8 was two hours
+            // with nothing to read at the end.
+            .unwrap_or(1900);
 
         // A bpftrace script, attached for the length of the test.
         //
