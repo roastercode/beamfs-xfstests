@@ -1039,15 +1039,28 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
              repo.join("beamfs/tools/fsck.beamfs/fsck.beamfs")
                  .to_string_lossy().into_owned()),
         ];
-        let wrong = c.tools_match(&local);
+        // And the rest of what the run is about to assert: that the
+        // kernel on the node is the one built here, and that nothing
+        // is still mounted on the devices the checker will read raw.
+        //
+        // A mounted device gives a table of inodes half-updated and
+        // every CRC in it wrong, which reads exactly like a filesystem
+        // destroyed -- 306 of them on 2026-09-13, on a sound volume.
+        let built = std::fs::metadata(
+            std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
+                .join("yocto/poky/build-qemux86/tmp/deploy/images/qemux86-64/bzImage"))
+            .and_then(|m| m.modified())
+            .ok();
+
+        let wrong = c.ready_to_measure(&local, built);
         if !wrong.is_empty() {
             println!();
             for w in &wrong {
                 println!("  {w}");
             }
             println!();
-            return Err("the node is not running this repo's tools -- \
-                        redeploy them before measuring anything".into());
+            return Err("the node is not what this run would claim it is -- \
+                        fix the above before measuring anything".into());
         }
     }
 

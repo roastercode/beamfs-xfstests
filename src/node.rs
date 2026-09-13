@@ -345,6 +345,91 @@ impl<'a> NodeConn<'a> {
         wrong
     }
 
+    /// Does the kernel on the node carry the commit the run reports?
+    ///
+    /// commit() reads the git tree on the workstation. Nothing links
+    /// it to the kernel that is actually running: an image built two
+    /// commits ago boots, answers, and every result is filed under a
+    /// commit whose code never ran.
+    ///
+    /// beamfs is builtin, so there is no module version to read. What
+    /// there is: the kernel's build timestamp, which moves with every
+    /// compile. @built is the mtime of the vmlinux this workstation
+    /// last produced; a node older than that is running something else.
+    ///
+    /// Returns a description of the mismatch, or None when they agree.
+    pub fn kernel_is_current(&self, built: std::time::SystemTime) -> Option<String> {
+        // /proc/sys/kernel/version holds the build string, which ends
+        // in the date the kernel was linked.
+        let on_node = self
+            .run("cat /proc/sys/kernel/version 2>/dev/null", Duration::from_secs(20))
+            .unwrap_or_default();
+        let on_node = on_node.trim().to_string();
+        if on_node.is_empty() {
+            return Some("the node would not say when its kernel was built".into());
+        }
+
+        // Compare against the local build by seconds since the epoch,
+        // which is what both sides can agree on without parsing a date
+        // in whatever locale the node happens to use.
+        let want = built
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let got = self
+            .run("stat -c %Y /boot/vmlinuz* 2>/dev/null | sort -rn | head -1",
+                 Duration::from_secs(20))
+            .unwrap_or_default();
+        let got: u64 = got.trim().parse().unwrap_or(0);
+
+        // A node whose kernel is newer than the local build is not a
+        // mismatch: somebody may have built elsewhere. Older is.
+        if got != 0 && want != 0 && got + 60 < want {
+            return Some(format!(
+                "the node's kernel is {} seconds older than the one built here",
+                want - got));
+        }
+        None
+    }
+
+    /// Are the test and scratch devices unmounted?
+    ///
+    /// fsck reads the raw device. Reading one the kernel is still
+    /// writing gives a table of inodes half-updated, and every CRC in
+    /// it is wrong -- which reads exactly like a filesystem destroyed.
+    ///
+    /// Returns the ones still mounted.
+    pub fn devices_quiet(&self) -> Vec<String> {
+        let mut busy = Vec::new();
+        for d in [&self.node.test_dev, &self.node.scratch_dev] {
+            let out = self
+                .run(&format!("grep -c '^/dev/{d} ' /proc/mounts || true"),
+                     Duration::from_secs(20))
+                .unwrap_or_default();
+            if out.trim() != "0" && !out.trim().is_empty() {
+                busy.push(format!("/dev/{d} is still mounted"));
+            }
+        }
+        busy
+    }
+
+    /// Everything a run should prove before it starts.
+    ///
+    /// One call, because a check that has to be remembered separately
+    /// is a check that gets forgotten. Returns every complaint; empty
+    /// means the node is what the run is about to claim it is.
+    pub fn ready_to_measure(&self, tools: &[(String, String)],
+                            built: Option<std::time::SystemTime>) -> Vec<String> {
+        let mut bad = self.tools_match(tools);
+        bad.extend(self.devices_quiet());
+        if let Some(t) = built {
+            if let Some(k) = self.kernel_is_current(t) {
+                bad.push(k);
+            }
+        }
+        bad
+    }
+
     fn probe_dev(&self, dev: &str) -> String {
         format!("$(lsblk -dno SIZE /dev/{dev} 2>/dev/null | tr -d ' ' || echo MISSING)")
     }
