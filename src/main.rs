@@ -98,7 +98,10 @@ fn main() -> std::process::ExitCode {
     // exists.
     let long = !matches!(
         args.get(1).map(String::as_str),
-        Some("report" | "history" | "compare" | "--help" | "-h" | "stop")
+        // Commands that read or prepare rather than measure. None of
+        // them is long enough to walk away from, so none of them rings.
+        Some("report" | "history" | "compare" | "trend" | "deploy"
+             | "--help" | "-h" | "stop")
     );
 
     let code = match args.get(1).map(String::as_str) {

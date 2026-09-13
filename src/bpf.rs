@@ -224,3 +224,62 @@ pub fn speak(path: &Path) {
         println!("      {t}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A capture with findings in it is summarised; one without is
+    /// not mistaken for one.
+    #[test]
+    fn speak_finds_what_a_script_reported() {
+        let d = std::env::temp_dir().join(format!("bxb-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("bpf-lostptr.txt");
+        std::fs::write(&p, "Attaching 4 probes...\n\
+             LOST parent=18450 slot=433 held=18714 read as 0, now 18522\n\
+               installed by fsstress, overwritten by kworker/u18:1\n\
+             @lost: 62\n\
+             @reads: 24856\n").unwrap();
+        // No assertion on the printing itself -- it goes to stdout --
+        // but it must not panic on a real capture, which is what a
+        // malformed line would do.
+        speak(&p);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An empty capture is read without complaint.
+    #[test]
+    fn speak_survives_an_empty_capture() {
+        let d = std::env::temp_dir().join(format!("bxb2-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("bpf-none.txt");
+        std::fs::write(&p, "").unwrap();
+        speak(&p);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A file that is not there is not a crash.
+    #[test]
+    fn speak_survives_a_missing_file() {
+        speak(std::path::Path::new("/nonexistent/bpf-nothing.txt"));
+    }
+
+    /// available() lists stems, not filenames: XFSTESTS_BPF takes a
+    /// name, and a user typing "lostptr.bt" should not be the one to
+    /// discover that.
+    #[test]
+    fn available_lists_stems() {
+        let d = std::env::temp_dir().join(format!("bxb3-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("one.bt"), "BEGIN{}").unwrap();
+        std::fs::write(d.join("notascript.txt"), "x").unwrap();
+        // SAFETY: single-threaded test, and the variable is read once
+        // by script_root() below.
+        unsafe { std::env::set_var("XFSTESTS_BPF_SCRIPTS", &d); }
+        let v = available();
+        assert_eq!(v, vec!["one".to_string()], "{v:?}");
+        unsafe { std::env::remove_var("XFSTESTS_BPF_SCRIPTS"); }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

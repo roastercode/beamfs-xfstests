@@ -57,8 +57,16 @@ fn recipe_sources_current() -> Vec<String> {
     let layer = PathBuf::from(&home)
         .join("git/yocto-beamfs/recipes-kernel/beamfs/files/fsck-beamfs-0.1.0");
 
+    diff_trees(&repo, &layer)
+}
+
+/// Which .c and .h files under @a differ from @b, or are missing there.
+///
+/// Its own function so it can be tested without a checkout: the
+/// comparison is what was missing, not the paths.
+fn diff_trees(a: &Path, b: &Path) -> Vec<String> {
     let mut stale = Vec::new();
-    let Ok(d) = std::fs::read_dir(&repo) else { return stale };
+    let Ok(d) = std::fs::read_dir(a) else { return stale };
     for e in d.flatten() {
         let p = e.path();
         let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
@@ -66,9 +74,9 @@ fn recipe_sources_current() -> Vec<String> {
             continue;
         }
         let Some(name) = p.file_name() else { continue };
-        let there = layer.join(name);
+        let there = b.join(name);
         let same = match (std::fs::read(&p), std::fs::read(&there)) {
-            (Ok(a), Ok(b)) => a == b,
+            (Ok(x), Ok(y)) => x == y,
             (Ok(_), Err(_)) => {
                 stale.push(format!("{} is not in the layer at all",
                                    name.to_string_lossy()));
@@ -93,11 +101,12 @@ fn build_tools() -> Result<Vec<(String, PathBuf)>, String> {
     let home = PathBuf::from(std::env::var("HOME").map_err(|e| e.to_string())?);
     let fsck_dir = home.join("git/beamfs/tools/fsck.beamfs");
 
-    let st = Command::new("make")
+    // Quiet: a clean that prints its rm line in the middle of a
+    // deploy adds nothing and hides the lines that matter.
+    let _ = Command::new("make")
         .current_dir(&fsck_dir)
         .arg("clean")
-        .status();
-    let _ = st;
+        .output();
     let out = Command::new("make")
         .current_dir(&fsck_dir)
         .arg("LDFLAGS=-static")
@@ -267,4 +276,40 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
     let k = c.run("uname -r", Duration::from_secs(20)).unwrap_or_default();
     println!("  kernel  : {}", k.trim());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The comparison that was missing when a two-day-old checker
+    /// answered a campaign's questions.
+    #[test]
+    fn a_file_that_differs_is_reported() {
+        let d = std::env::temp_dir().join(format!("bxd-{}", std::process::id()));
+        let a = d.join("repo");
+        let b = d.join("layer");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("same.c"), "int main(void){return 0;}").unwrap();
+        std::fs::write(b.join("same.c"), "int main(void){return 0;}").unwrap();
+        std::fs::write(a.join("moved.c"), "new").unwrap();
+        std::fs::write(b.join("moved.c"), "old").unwrap();
+        std::fs::write(a.join("only-here.c"), "x").unwrap();
+
+        let stale = diff_trees(&a, &b);
+        assert!(stale.iter().any(|s| s.contains("moved.c")), "{stale:?}");
+        assert!(stale.iter().any(|s| s.contains("only-here.c")), "{stale:?}");
+        assert!(!stale.iter().any(|s| s.contains("same.c")), "{stale:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A tree with nothing in it is not a divergence: an operator
+    /// running against an image whose tools are the reference should
+    /// not be refused.
+    #[test]
+    fn a_missing_tree_is_not_a_divergence() {
+        let d = std::env::temp_dir().join(format!("bxd2-{}", std::process::id()));
+        assert!(diff_trees(&d.join("nowhere"), &d.join("nor-here")).is_empty());
+    }
 }
