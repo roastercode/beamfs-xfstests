@@ -17,8 +17,10 @@ BEGIN { printf("watching zeroing\n"); }
 
 tracepoint:beamfs:beamfs_slot_store
 {
+    /* Plain sums, not count(): a count_t cannot be printed, and what
+     * is wanted here is the number in a message rather than a map. */
     @live[args.parent] = args.parent;
-    @stored_in[args.parent] = count();
+    @stored_in[args.parent] = @stored_in[args.parent] + 1;
 }
 
 kprobe:beamfs_tc_zeroed
