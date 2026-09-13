@@ -1506,11 +1506,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         // race as one that loses 3 and 333.
         crate::history::losses::record(test, t.trial.lost);
 
-        // A failure whose volume could not be frozen cannot be
-        // re-examined: whatever it found is gone with the next mkfs.
-        if !t.trial.passed && !case.dir.join("scratch.img.zst").exists() {
-            apparatus.push(format!("{test}: the volume could not be frozen"));
-        }
+
 
         if let Some(why) = probe_failed.take() {
             probe_missing.push(format!("{test}: {why}"));
@@ -1533,7 +1529,13 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                         volume::report_to(&v, Some(&case.dir));
                     }
                 }
-                Err(e) => println!("    volume not kept: {e}"),
+                Err(e) => {
+                    println!("    volume not kept: {e}");
+                    // A failure whose volume could not be kept cannot
+                    // be re-examined: whatever it found is gone with
+                    // the next mkfs.
+                    apparatus.push(format!("{test}: the volume could not be frozen"));
+                }
             }
         }
     }
