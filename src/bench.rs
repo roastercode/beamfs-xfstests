@@ -202,7 +202,21 @@ fn commit() -> String {
 /// disk. Both are cleared here rather than being diagnosed again.
 fn prepare(c: &NodeConn, mkfs_opts: &str) -> Result<String, String> {
     let cmd = format!(
-        "sudo sh -c 'pkill -9 xfs_io 2>/dev/null; \
+        // check and fsstress, not only xfs_io.
+        //
+        // A test declared unreachable leaves its own processes behind,
+        // and the next test inherits them: after generic/589 the node
+        // carried a running ./check, dozens of fsstress and a load of
+        // 132, which is not a node the next measurement happens on.
+        //
+        // Killed by name and waited for: pkill returns before the
+        // processes are gone, and a mount that is still held refuses to
+        // go however many times it is asked.
+        "sudo sh -c 'pkill -9 check fsstress xfs_io fsx 2>/dev/null; \
+         for i in 1 2 3 4 5; do \
+           pgrep -x check >/dev/null 2>&1 || break; \
+           sleep 1; \
+         done; \
          for i in 1 2 3 4 5; do \
            umount /mnt/test /mnt/scratch 2>/dev/null; \
            [ \"$(mount | grep -c \" /mnt/test \")\" -eq 0 ] && break; \
@@ -1391,6 +1405,23 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                 "FAIL ({}s, {} blocks lost)",
                 t.trial.secs, t.trial.lost
             ));
+
+            // What this test lost the last few times it ran.
+            //
+            // One number read alone says the wrong thing: generic/076
+            // lost 3 blocks in one run and 333 in another, and either
+            // figure on its own reads as a finding rather than as the
+            // race it is.
+            let spread = crate::history::losses_for(test, 6);
+            if spread.len() > 1 {
+                let lo = spread.iter().min().copied().unwrap_or(0);
+                let hi = spread.iter().max().copied().unwrap_or(0);
+                if lo != hi {
+                    println!("    previously: {} -- between {lo} and {hi}",
+                             spread.iter().map(|n| n.to_string())
+                                   .collect::<Vec<_>>().join(", "));
+                }
+            }
         }
 
         // Archived whichever way it went: a passing test's state is
@@ -1436,6 +1467,11 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             println!("    the node stopped writing with tasks stuck -- \
                       this test is not finishing");
         }
+
+        // Kept whichever way it went: a pass is a zero, and a test
+        // that loses nothing this time and 333 the next is the same
+        // race as one that loses 3 and 333.
+        crate::history::losses::record(test, t.trial.lost);
 
         if let Some(why) = probe_failed.take() {
             probe_missing.push(format!("{test}: {why}"));

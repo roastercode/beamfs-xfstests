@@ -46,6 +46,70 @@ impl Delta {
     }
 }
 
+/// What a test has lost, run after run.
+///
+/// The results file keeps a verdict and a duration; the number of
+/// blocks lost is what says whether a failure is steady or a race, and
+/// it had nowhere to live.
+///
+/// One line per run per test, appended. Small enough to keep forever:
+/// a year of daily sweeps over eight hundred tests is a few megabytes.
+pub mod losses {
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    fn path() -> PathBuf {
+        super::History::default_root().join("losses.log")
+    }
+
+    /// Record what a test lost this time.
+    pub fn record(test: &str, lost: usize) {
+        let p = path();
+        let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
+        let when = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true).append(true).open(&p)
+        {
+            let _ = writeln!(f, "{when} {test} {lost}");
+        }
+    }
+
+    /// The last @n losses for a test, oldest first.
+    ///
+    /// Reads the whole file: it is small, and a partial read that
+    /// silently drops the interesting run is worse than a slow one.
+    #[must_use]
+    pub fn recent(test: &str, n: usize) -> Vec<usize> {
+        let Ok(body) = std::fs::read_to_string(path()) else {
+            return Vec::new();
+        };
+        let mut v: Vec<usize> = body
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split_whitespace();
+                let _when = f.next()?;
+                let name = f.next()?;
+                if name != test {
+                    return None;
+                }
+                f.next()?.parse().ok()
+            })
+            .collect();
+        if v.len() > n {
+            v.drain(..v.len() - n);
+        }
+        v
+    }
+}
+
+/// The last @n losses for a test, oldest first.
+pub fn losses_for(test: &str, n: usize) -> Vec<usize> {
+    losses::recent(test, n)
+}
+
 impl History {
     #[must_use]
     pub fn new(root: &Path) -> Self {
