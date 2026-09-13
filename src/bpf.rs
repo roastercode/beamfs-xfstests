@@ -86,13 +86,28 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
     let cmd = format!(
         "sudo rm -f {remote_out}; \
          sudo setsid bpftrace {remote} > {remote_out} 2>&1 < /dev/null & \
-         sleep 2; \
-         grep -q 'Attaching' {remote_out} && echo attached || \
-           (echo failed; cat {remote_out})");
+         sleep 3; \
+         if grep -q 'Attaching' {remote_out}; then echo BX_ATTACHED; \
+         else echo BX_FAILED; cat {remote_out}; fi");
     let out = conn.run(&cmd, Duration::from_secs(45))
         .map_err(|e| format!("start {script}: {e:?}"))?;
-    if !out.contains("attached") {
-        return Err(format!("{script} did not attach: {}", out.trim()));
+    if !out.contains("BX_ATTACHED") {
+        // What bpftrace said, not that something went wrong.
+        //
+        // The first version reported "did not attach: failed" and the
+        // reason -- a tracepoint field named slotval where the script
+        // said val -- stayed on the node in a file nobody fetched.
+        let why: Vec<&str> = out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.contains("BX_FAILED"))
+            .take(4)
+            .collect();
+        return Err(if why.is_empty() {
+            format!("{script}: bpftrace said nothing at all")
+        } else {
+            format!("{script}: {}", why.join(" | "))
+        });
     }
 
     Ok(Running {
