@@ -24,12 +24,19 @@ pub fn pack_run(cases: &[PathBuf], stamp: &str) -> Option<(PathBuf, u64)> {
     if cases.is_empty() {
         return None;
     }
-    let out = PathBuf::from(format!("/tmp/beamfs-xfstests-{stamp}.tar.zst"));
+    // xz, not zstd.
+    //
+    // The archive leaves this machine to be read somewhere else, and
+    // zstd is not everywhere yet -- a reader without it gets "Cannot
+    // exec: No such file or directory" and the run's whole record is
+    // unreadable for want of a decompressor. xz is older and is on
+    // everything.
+    let out = PathBuf::from(format!("/tmp/beamfs-xfstests-{stamp}.tar.xz"));
     let root = cases[0].parent()?.to_path_buf();
 
     let mut args: Vec<String> = vec![
         "-C".into(), root.to_string_lossy().into_owned(),
-        "--zstd".into(), "-cf".into(),
+        "-cJf".into(),
         out.to_string_lossy().into_owned(),
     ];
     for c in cases {
