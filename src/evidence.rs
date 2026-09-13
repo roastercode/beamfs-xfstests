@@ -147,6 +147,24 @@ pub fn speak(case: &Case) {
         std::fs::read_to_string(case.dir.join(name)).unwrap_or_default()
     };
 
+    // How old the frozen volume is.
+    //
+    // A case directory is emptied now, so a stale image cannot survive
+    // a run -- but an image that failed to freeze leaves nothing, and
+    // silence there reads like a volume nobody needed. Say it either
+    // way.
+    match std::fs::metadata(case.dir.join("scratch.img.zst"))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+    {
+        Some(d) if d.as_secs() > 300 => println!(
+            "    the frozen volume is {} minutes old -- not this run's",
+            d.as_secs() / 60),
+        Some(_) => {}
+        None => println!("    no volume was frozen for this failure"),
+    }
+
     // What the kernel said, deduplicated.
     //
     // A ratelimited message repeats; the same sentence forty times is

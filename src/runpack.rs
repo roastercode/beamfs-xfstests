@@ -51,9 +51,38 @@ pub fn pack_run(cases: &[PathBuf], stamp: &str) -> Option<(PathBuf, u64)> {
     Some((out, size))
 }
 
+/// Delete archives older than a week.
+///
+/// A dozen of them, eleven megabytes each, accumulated in /tmp in one
+/// day. The evidence they hold is still under the evidence root; what
+/// the archive adds is the carrying, and a week is longer than anyone
+/// waits to carry one.
+fn prune(keep_days: u64) -> usize {
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(keep_days * 86_400);
+    let mut n = 0;
+    let Ok(d) = std::fs::read_dir("/tmp") else { return 0 };
+    for e in d.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("beamfs-xfstests-") || !name.ends_with(".tar.xz") {
+            continue;
+        }
+        if let Ok(t) = e.metadata().and_then(|m| m.modified()) {
+            if t < cutoff && std::fs::remove_file(e.path()).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 /// Say where it went.
 pub fn announce(path: &Path, size: u64) {
+    let gone = prune(7);
     println!();
+    if gone > 0 {
+        println!("  {gone} archive(s) older than a week removed from /tmp");
+    }
     println!("  everything this run kept: {}", path.display());
     println!("    {} KiB, unpack with: tar -xf {}", size / 1024, path.display());
 }

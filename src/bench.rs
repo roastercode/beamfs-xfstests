@@ -1095,6 +1095,10 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     let mut refused_times = 0u32;
     // Tests set aside because they wedge the node every time.
     let mut wedging: Vec<String> = Vec::new();
+    // Tests whose probe did not produce anything. A capture that is
+    // missing reads, at analysis time, exactly like one that saw
+    // nothing -- and on 2026-09-13 the difference cost an afternoon.
+    let mut probe_missing: Vec<String> = Vec::new();
     // The case directories this run wrote, for the archive at the end.
     // Not the whole evidence tree: that holds every run before this one.
     let mut produced: Vec<std::path::PathBuf> = Vec::new();
@@ -1102,6 +1106,25 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     // escalates on it: a node killed twice and still blocked is
     // restarted rather than killed a third time.
     let mut wedge_attempts = 0u32;
+
+    // How much slower this kernel is than a plain one.
+    //
+    // Asked once: the answer does not change during a sweep, and the
+    // node is already answering by the time the first test starts.
+    let slowdown: u64 = {
+        let cfgs = c.run("grep -cE '^CONFIG_(KASAN|KCSAN)=y' /proc/config.gz \
+                          2>/dev/null || zgrep -cE '^CONFIG_(KASAN|KCSAN)=y' \
+                          /proc/config.gz 2>/dev/null || echo 0",
+                         std::time::Duration::from_secs(20))
+            .unwrap_or_default();
+        let n: u64 = cfgs.trim().parse().unwrap_or(0);
+        if n > 0 {
+            println!("  budget  : x8, the kernel carries a sanitizer");
+            8
+        } else {
+            1
+        }
+    };
 
     for (i, test) in tests.iter().enumerate() {
         if stopping() {
@@ -1195,16 +1218,24 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         }
         unreachable_run = 0;
 
-        let budget = std::env::var("XFSTESTS_TRIAL_TIMEOUT")
+        // The budget follows what the kernel carries.
+        //
+        // KASAN runs this filesystem at about an eighth of its speed:
+        // generic/083 took 62 seconds without it and 495 with. A fixed
+        // 900 killed generic/269 and generic/464 mid-test and reported
+        // them as wedges, which is a measurement of the budget rather
+        // than of the filesystem.
+        let budget: u64 = std::env::var("XFSTESTS_TRIAL_TIMEOUT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(900);
+            .unwrap_or_else(|| 900 * slowdown);
 
         // A bpftrace script, attached for the length of the test.
         //
         // XFSTESTS_BPF names one of scripts/*.bt. Nothing runs without
         // it: bpftrace instruments the kernel, and a campaign measuring
         // durations must not carry a probe it did not ask for.
+        let mut probe_failed: Option<String> = None;
         let probe = match std::env::var("XFSTESTS_BPF") {
             Ok(name) if !name.is_empty() => match bpf::start(&c, &name) {
                 Ok(r) => {
@@ -1212,7 +1243,12 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                     Some(r)
                 }
                 Err(e) => {
+                    // Kept for the verdict, not just printed here: on
+                    // 2026-09-13 ptrval failed to attach, the line
+                    // scrolled past, and the analysis that followed was
+                    // read off the previous run's capture.
                     println!("    {name} did not start: {e}");
+                    probe_failed = Some(format!("{name}: {e}"));
                     None
                 }
             },
@@ -1271,8 +1307,15 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                              n / 1024);
                     bpf::speak(&p);
                 }
-                None => println!("    the probe brought nothing back"),
+                None => {
+                    println!("    the probe brought nothing back");
+                    probe_failed = Some("the probe brought nothing back".into());
+                }
             }
+        }
+
+        if let Some(why) = probe_failed.take() {
+            probe_missing.push(format!("{test}: {why}"));
         }
 
         evidence::collect(cfg, node, &case, &t.output);
@@ -1339,6 +1382,13 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     if removed > 0 {
         println!();
         println!("  {removed} older volume image(s) pruned");
+    }
+    if !probe_missing.is_empty() {
+        println!();
+        println!("  no probe capture for:");
+        for t in &probe_missing {
+            println!("    {t}");
+        }
     }
     if !wedging.is_empty() {
         println!();
