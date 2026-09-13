@@ -1,0 +1,48 @@
+#!/usr/bin/env bpftrace
+/*
+ * Who freed the block that gets handed to somebody else?
+ *
+ * A block filled for inode 46 is zeroed for inode 62, filled for 85 and
+ * zeroed for 197, four times in one generic/076. The allocator is doing
+ * its job -- the block was on the free list -- so the question is what
+ * put it there while the first inode still pointed at it.
+ *
+ * This keeps the stack of every free and prints it when the same block
+ * comes back from the allocator for a different inode.
+ */
+
+BEGIN { printf("watching frees\n"); }
+
+tracepoint:beamfs:beamfs_slot_store
+{
+    @owner[args.parent] = args.ino;
+    @filled[args.parent] = 1;
+}
+
+tracepoint:beamfs:beamfs_block_free
+{
+    @freed_by[args.blk] = kstack(14);
+    @freed_for[args.blk] = args.ino;
+    @freed_site[args.blk] = args.site;
+    @frees = count();
+}
+
+kprobe:beamfs_tc_zeroed
+{
+    $blk = arg2;
+    if (@filled[$blk] == 1 && @owner[$blk] != arg1) {
+        printf("\n=== %llu: filled for ino=%llu, zeroed for ino=%lu ===\n",
+               $blk, @owner[$blk], arg1);
+        printf("freed for ino=%llu at site %llu, by:\n",
+               @freed_for[$blk], @freed_site[$blk]);
+        print(@freed_by[$blk]);
+        @caught = count();
+    }
+}
+
+END
+{
+    clear(@owner); clear(@filled);
+    clear(@freed_by); clear(@freed_for); clear(@freed_site);
+    printf("\n");
+}
