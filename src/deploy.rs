@@ -37,6 +37,53 @@ fn newest_image() -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
+/// Are the Yocto recipe's sources the ones this repo builds from?
+///
+/// fsck.beamfs lives twice: once under beamfs/tools/fsck.beamfs, which
+/// is what gets edited, and once under the layer's
+/// files/fsck-beamfs-0.1.0, which is what the image compiles. Nothing
+/// kept them together.
+///
+/// On 2026-09-13 the image's copy was missing fsck_read.c and
+/// fsck_pass6.c entirely -- half the checker's passes -- and three more
+/// files had diverged. The binary in the image was 98368 bytes against
+/// the 857568 built here, and it answered a campaign's questions for an
+/// afternoon.
+///
+/// Returns the files that differ.
+fn recipe_sources_current() -> Vec<String> {
+    let Ok(home) = std::env::var("HOME") else { return Vec::new() };
+    let repo = PathBuf::from(&home).join("git/beamfs/tools/fsck.beamfs");
+    let layer = PathBuf::from(&home)
+        .join("git/yocto-beamfs/recipes-kernel/beamfs/files/fsck-beamfs-0.1.0");
+
+    let mut stale = Vec::new();
+    let Ok(d) = std::fs::read_dir(&repo) else { return stale };
+    for e in d.flatten() {
+        let p = e.path();
+        let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
+        if ext != "c" && ext != "h" {
+            continue;
+        }
+        let Some(name) = p.file_name() else { continue };
+        let there = layer.join(name);
+        let same = match (std::fs::read(&p), std::fs::read(&there)) {
+            (Ok(a), Ok(b)) => a == b,
+            (Ok(_), Err(_)) => {
+                stale.push(format!("{} is not in the layer at all",
+                                   name.to_string_lossy()));
+                continue;
+            }
+            _ => true,
+        };
+        if !same {
+            stale.push(format!("{} differs from the layer's copy",
+                               name.to_string_lossy()));
+        }
+    }
+    stale
+}
+
 /// Build the static tools this repo ships to the node.
 ///
 /// Static because the node's libc is not this machine's, and a tool
@@ -109,6 +156,23 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
         .unwrap_or(0);
     println!("  image   : {} ({} min old)",
              image.file_name().unwrap_or_default().to_string_lossy(), age);
+
+    // The layer's copy of the checker, against this repo's.
+    //
+    // Not fatal: deploy pushes the binary built here, so the node ends
+    // up correct either way. But the image carries the other one, and
+    // anything that reads the image rather than the node -- a fresh
+    // boot before deploy has run -- gets the stale checker.
+    let stale = recipe_sources_current();
+    if !stale.is_empty() {
+        println!();
+        println!("  the layer's fsck sources are behind this repo's:");
+        for f in &stale {
+            println!("    {f}");
+        }
+        println!("  the image will carry a checker that is not this one");
+        println!();
+    }
 
     // The tools first: a build that fails should not cost a reboot.
     let tools = build_tools()?;
