@@ -1,0 +1,41 @@
+#!/usr/bin/env bpftrace
+/*
+ * Why does the allocation path think the block is new?
+ *
+ * beamfs_tc_zeroed lands on blocks that have taken sixty-four pointers,
+ * from beamfs_inline_lookup_or_alloc_phys on an ordinary write. Every
+ * memset there is guarded by a test that the pointer is zero, so either
+ * the pointer really is zero in the inode at that instant, or the
+ * memset is reached by a path that does not test it.
+ *
+ * This prints the inode's three tree pointers at the moment the zeroing
+ * happens. Guessing which of the two it is has been wrong eight times;
+ * the value settles it.
+ */
+
+BEGIN { printf("watching the allocation decision\n"); }
+
+tracepoint:beamfs:beamfs_slot_store { @live[args.parent] = 1; }
+
+kprobe:beamfs_tc_zeroed
+{
+    $ino  = (struct inode *)0;
+    $blk  = arg2;
+
+    if (@live[$blk] == 1) {
+        printf("ZEROED LIVE %llu  ino=%lu\n", $blk, arg1);
+        printf("  offset in caller: %s\n", ksym(reg("ip")));
+        print(kstack(4));
+        @live_zero = count();
+    }
+}
+
+/* The decision itself: what the inode held on entry. */
+kprobe:beamfs_inline_lookup_or_alloc_phys
+{
+    @in[tid] = ((struct inode *)arg0)->i_ino;
+}
+
+kretprobe:beamfs_inline_lookup_or_alloc_phys { delete(@in[tid]); }
+
+END { clear(@live); clear(@in); printf("\n"); }
