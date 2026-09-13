@@ -1207,6 +1207,19 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         // what a failing one has to be compared against.
         let case = Case::new(&root, test, 1);
 
+        // Emptied before anything writes into it.
+        //
+        // A case directory is named for the test, so a second run of
+        // the same test lands in the first one's. What this run does
+        // not produce -- a probe that did not start, a checker that
+        // did not run -- stays behind and reads as if it had.
+        //
+        // On 2026-09-13 seven probe captures dated 13:03 sat beside a
+        // dmesg dated 19:25, and four findings from the old ones were
+        // read as this run's.
+        let _ = std::fs::remove_dir_all(&case.dir);
+        let _ = std::fs::create_dir_all(&case.dir);
+
         // The probe first: stopped before the checker runs, so what it
         // saw is the test rather than the test plus its verification.
         if let Some(r) = probe {
