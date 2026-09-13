@@ -38,7 +38,7 @@ tracepoint:beamfs:beamfs_slot_store
 tracepoint:beamfs:beamfs_ind_read
 {
     @reads = count();
-    if (args.val == 0) {
+    if (args.slotval == 0) {
         @read_zero = count();
         @read_zero_by[comm] = count();
     }
