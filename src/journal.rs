@@ -29,6 +29,18 @@ pub struct Journal {
     file: Option<File>,
     /// Directory holding one file per failing test.
     artifacts: PathBuf,
+    /// The shape of the last line written, and how many times it has
+    /// repeated since. See `line`.
+    last_shape: Option<String>,
+    repeats: u64,
+}
+
+impl Drop for Journal {
+    /// A journal ending on its thousandth identical line should say
+    /// so, not end on the first one.
+    fn drop(&mut self) {
+        self.flush_repeats();
+    }
 }
 
 impl Journal {
@@ -46,7 +58,11 @@ impl Journal {
         let artifacts = dir.join(format!("xfstests-{stamp}.d"));
         let _ = std::fs::create_dir_all(&artifacts);
         let file = OpenOptions::new().create(true).append(true).open(&path).ok();
-        let mut j = Self { path, file, artifacts };
+        let mut j = Self {
+            path, file, artifacts,
+            last_shape: None,
+            repeats: 0,
+        };
         j.section("RUN STARTED");
         j
     }
@@ -71,15 +87,78 @@ impl Journal {
     }
 
     pub fn section(&mut self, title: &str) {
+        self.flush_repeats();
+        self.last_shape = None;
         if let Some(f) = self.file.as_mut() {
             let _ = writeln!(f, "\n=== {} {title} ===", Self::stamp());
             let _ = f.flush();
         }
     }
 
+    /// The shape of a line: its text with every run of digits replaced.
+    ///
+    /// "region block 1244 subblock 9" and "region block 8104 subblock
+    /// 6" are one finding with two addresses. Comparing the text
+    /// itself made them two, and 1390 of them reached one journal.
+    fn shape(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut in_num = false;
+        for ch in text.chars() {
+            if ch.is_ascii_digit() {
+                if !in_num {
+                    out.push('#');
+                    in_num = true;
+                }
+            } else {
+                out.push(ch);
+                in_num = false;
+            }
+        }
+        out
+    }
+
+    /// Write a line, or count it when it repeats.
+    ///
+    /// A run wrote 1390 identical lines out of 3422, and a KCSAN
+    /// report sat in the middle of them. The first of a kind is
+    /// written in full; the rest are counted, and the count appears as
+    /// soon as something else is written:
+    ///
+    ///     beamfs: region block 1244 encodes and decodes
+    ///       ... x1390
+    ///
+    /// Nothing is lost: the line is there, the number of times is
+    /// there, and what came after is readable.
     pub fn line(&mut self, text: &str) {
+        let shape = Self::shape(text);
+
+        if self.last_shape.as_deref() == Some(shape.as_str()) {
+            self.repeats += 1;
+            return;
+        }
+
+        self.flush_repeats();
+        self.last_shape = Some(shape);
+
         if let Some(f) = self.file.as_mut() {
             let _ = writeln!(f, "{} {text}", Self::stamp());
+            let _ = f.flush();
+        }
+    }
+
+    /// Write the pending repeat count, if any.
+    ///
+    /// Called before anything that is not a repeat, and at close: a
+    /// journal ending on its thousandth identical line should say so
+    /// rather than end on the first.
+    fn flush_repeats(&mut self) {
+        if self.repeats == 0 {
+            return;
+        }
+        let n = self.repeats;
+        self.repeats = 0;
+        if let Some(f) = self.file.as_mut() {
+            let _ = writeln!(f, "  ... x{}", n + 1);
             let _ = f.flush();
         }
     }
@@ -166,5 +245,62 @@ mod tests {
         let p = j.artifacts().join("generic-013.log");
         assert_eq!(std::fs::read_to_string(p).unwrap_or_default(), "diff output here");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+
+    #[test]
+    fn numbers_do_not_make_two_findings() {
+        assert_eq!(
+            Journal::shape("region block 1244 subblock 9"),
+            Journal::shape("region block 8104 subblock 6"));
+    }
+
+    #[test]
+    fn different_sentences_stay_different() {
+        assert_ne!(
+            Journal::shape("region block 1244 encodes and decodes"),
+            Journal::shape("region block 1244 beyond correction"));
+    }
+
+    #[test]
+    fn a_line_with_no_numbers_is_itself() {
+        assert_eq!(Journal::shape("no lost pointer seen"),
+                   "no lost pointer seen");
+    }
+
+    #[test]
+    fn a_run_of_digits_collapses_to_one_mark() {
+        assert_eq!(Journal::shape("block 123456"), "block #");
+    }
+
+    #[test]
+    fn repeats_are_counted_and_the_line_survives() {
+        let d = std::env::temp_dir().join(format!("bxj-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        {
+            let mut j = Journal::create(&d);
+            j.line("region block 1 encodes and decodes");
+            for k in 2..=1390 {
+                j.line(&format!("region block {k} encodes and decodes"));
+            }
+            j.line("something else entirely");
+        }
+        let log = std::fs::read_dir(&d).unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|x| x == "log"))
+            .expect("a log");
+        let text = std::fs::read_to_string(log).unwrap();
+
+        // The finding is there once, its count is there, and what came
+        // after it is readable.
+        assert_eq!(text.matches("encodes and decodes").count(), 1);
+        assert!(text.contains("... x1390"), "{text}");
+        assert!(text.contains("something else entirely"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
