@@ -262,7 +262,10 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
             // test that fails on the scratch one look the same from
             // here, and the checker is cheap.
             "@fsck" => format!(
-                "for d in {} {}; do echo \"--- $d ---\"; \
+                // /dev/ prefixed here: the node carries the bare
+                // name, and fsck given "vdb" looks for a file called
+                // vdb in the working directory and finds none.
+                "for d in /dev/{} /dev/{}; do echo \"--- $d ---\"; \
                  sudo fsck.beamfs -v $d 2>&1 | head -400; done",
                 node.test_dev, node.scratch_dev),
             "@tracing" => "sudo sh -c 'for e in /sys/kernel/debug/tracing/events/beamfs/*/enable; \
