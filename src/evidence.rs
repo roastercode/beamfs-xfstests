@@ -52,7 +52,72 @@ impl Case {
 
     fn put(&self, name: &str, body: &str) {
         let _ = std::fs::create_dir_all(&self.dir);
-        let _ = std::fs::write(self.dir.join(name), body);
+        let _ = std::fs::write(self.dir.join(name), Self::collapse(body));
+    }
+
+    /// Keep the first of each kind of line and count the rest.
+    ///
+    /// generic/269's dmesg said the same thing 2305 times in 204 KiB,
+    /// and the run before it kept a 704 KiB one. The sentence is worth
+    /// keeping; the copies are what makes the file unreadable.
+    ///
+    ///     [12.3] beamfs: indirect block 9702 has no parity written yet
+    ///       ... x2305
+    ///
+    /// Consecutive only: a line that returns after something else is a
+    /// second occasion, and a log that reorders its own history is
+    /// worse than a long one.
+    fn collapse(body: &str) -> String {
+        let mut out = String::with_capacity(body.len() / 4);
+        let mut last: Option<String> = None;
+        let mut n = 0u64;
+
+        let flush = |out: &mut String, n: u64| {
+            if n > 0 {
+                out.push_str(&format!("  ... x{}\n", n + 1));
+            }
+        };
+
+        for line in body.lines() {
+            let sh = Self::shape(line);
+            if last.as_deref() == Some(sh.as_str()) {
+                n += 1;
+                continue;
+            }
+            flush(&mut out, n);
+            n = 0;
+            last = Some(sh);
+            out.push_str(line);
+            out.push('\n');
+        }
+        flush(&mut out, n);
+        out
+    }
+
+    /// A line's shape: timestamp removed, digit runs marked.
+    ///
+    /// The kernel's "[ 12.345678]" is dropped rather than marked: its
+    /// digit runs differ with the width of the number, which split one
+    /// finding into a group of 1684 and a group of 621.
+    fn shape(line: &str) -> String {
+        let rest = match (line.find('['), line.find(']')) {
+            (Some(a), Some(b)) if a == 0 && b > a => &line[b + 1..],
+            _ => line,
+        };
+        let mut out = String::with_capacity(rest.len());
+        let mut in_num = false;
+        for ch in rest.chars() {
+            if ch.is_ascii_digit() {
+                if !in_num {
+                    out.push('#');
+                    in_num = true;
+                }
+            } else {
+                out.push(ch);
+                in_num = false;
+            }
+        }
+        out
     }
 }
 
@@ -683,5 +748,50 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&p);
         p
+    }
+}
+
+#[cfg(test)]
+mod collapse_tests {
+    use super::*;
+
+    #[test]
+    fn the_timestamp_does_not_split_a_finding() {
+        assert_eq!(
+            Case::shape("[ 12.3] beamfs: indirect block 9702 has no parity"),
+            Case::shape("[  4.5] beamfs: indirect block 10926 has no parity"));
+    }
+
+    #[test]
+    fn different_sentences_stay_apart() {
+        assert_ne!(
+            Case::shape("[1.0] beamfs: block 1 has no parity"),
+            Case::shape("[1.0] beamfs: block 1 beyond correction"));
+    }
+
+    #[test]
+    fn a_repeat_is_counted_and_the_line_survives() {
+        let body = "[1.0] beamfs: block 1 has no parity\n\
+                    [1.1] beamfs: block 2 has no parity\n\
+                    [1.2] beamfs: block 3 has no parity\n\
+                    [1.3] something else\n";
+        let out = Case::collapse(body);
+        assert_eq!(out.matches("has no parity").count(), 1, "{out}");
+        assert!(out.contains("... x3"), "{out}");
+        assert!(out.contains("something else"), "{out}");
+    }
+
+    #[test]
+    fn a_line_returning_later_is_a_second_occasion() {
+        let body = "[1.0] A\n[1.1] B\n[1.2] A\n";
+        let out = Case::collapse(body);
+        // Not reordered into one group: the history is what it is.
+        assert_eq!(out.matches("] A").count(), 2, "{out}");
+    }
+
+    #[test]
+    fn nothing_is_lost_when_nothing_repeats() {
+        let body = "[1.0] A\n[1.1] B\n[1.2] C\n";
+        assert_eq!(Case::collapse(body).lines().count(), 3);
     }
 }
