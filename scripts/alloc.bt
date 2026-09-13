@@ -1,0 +1,44 @@
+#!/usr/bin/env bpftrace
+/*
+ * Blocks allocated and never referenced.
+ *
+ * fsck counts them at the end -- "27 used-but-unreferenced" -- and by
+ * then the path that lost them is three minutes gone. This pairs each
+ * allocation with the store that should follow it: an allocation whose
+ * block never appears as the new value of a slot store, and is never
+ * freed, is a leak at the moment it becomes one.
+ */
+
+BEGIN { printf("watching allocation\n"); }
+
+tracepoint:beamfs:beamfs_block_alloc
+{
+    @allocated[args.blk] = args.ino;
+    @alloc_at[args.blk] = nsecs;
+    @allocs = count();
+    @alloc_by[comm] = count();
+}
+
+tracepoint:beamfs:beamfs_slot_store
+{
+    /* The block found a home. */
+    delete(@allocated[args.new]);
+    delete(@alloc_at[args.new]);
+    @placed = count();
+}
+
+tracepoint:beamfs:beamfs_block_free
+{
+    delete(@allocated[args.blk]);
+    delete(@alloc_at[args.blk]);
+    @frees = count();
+}
+
+/* Anything still in @allocated at the end was allocated and left. */
+END
+{
+    printf("\nstill allocated and unplaced at exit:\n");
+    print(@allocated, 20);
+    clear(@alloc_at);
+    printf("\n");
+}

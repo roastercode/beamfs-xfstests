@@ -17,6 +17,7 @@
 //! TCG, and the suite is around 737 tests.
 
 mod wedge;
+mod bpf;
 mod bell;
 mod volume;
 mod evidence;
@@ -68,6 +69,22 @@ fn main() -> std::process::ExitCode {
     // them, so it works after any command without every command having
     // to know about it.
     let mut args: Vec<String> = std::env::args().collect();
+    // Asked and answered before anything else: somebody wanting the
+    // list wants it now, not after a node check.
+    if args.iter().any(|a| a == "--probes") {
+        let v = bpf::available();
+        if v.is_empty() {
+            eprintln!("no scripts under {}", bpf::script_root().display());
+        } else {
+            eprintln!("scripts under {}:", bpf::script_root().display());
+            for n in v {
+                eprintln!("  {n}");
+            }
+            eprintln!("\nXFSTESTS_BPF=<name> attaches one for the length of each test");
+        }
+        return std::process::ExitCode::SUCCESS;
+    }
+
     let quiet = args.iter().any(|a| a == "--no-bell");
     args.retain(|a| a != "--no-bell");
 
@@ -133,13 +150,16 @@ fn usage() -> std::process::ExitCode {
          \n\
          options:\n\
            --no-bell               finish without ringing\n\
+           --probes                list the bpftrace scripts and exit\n\
          \n\
          environment:\n\
          \x20 XFSTESTS_TIMEOUT        seconds per test, default 300\n\
          \x20 XFSTESTS_MKFS_OPTIONS   passed to mkfs.beamfs, default -N 16384\n\
          \x20 XFSTESTS_NODES          name:host:test_dev:scratch_dev, comma separated\n\
          \x20 XFSTESTS_NO_RESUME      start over instead of resuming\n\
-         \x20 BEAMFS_NO_BELL          same as --no-bell, for a whole shell\n"
+         \x20 BEAMFS_NO_BELL          same as --no-bell, for a whole shell\n\
+         \x20 XFSTESTS_BPF            a script from --probes, attached per test\n\
+         \x20 XFSTESTS_BPF_SCRIPTS    where to look for them\n"
     );
     std::process::ExitCode::from(2)
 }

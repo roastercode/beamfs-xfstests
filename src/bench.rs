@@ -35,6 +35,7 @@ use crate::volume;
 use crate::mem_trace;
 use crate::wedge;
 use crate::runpack;
+use crate::bpf;
 use crate::recovery::Recovery;
 use crate::journal::Journal;
 use crate::trace_stack::{self, Tracing};
@@ -1125,6 +1126,24 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             .and_then(|v| v.parse().ok())
             .unwrap_or(900);
 
+        // A bpftrace script, attached for the length of the test.
+        //
+        // XFSTESTS_BPF names one of scripts/*.bt. Nothing runs without
+        // it: bpftrace instruments the kernel, and a campaign measuring
+        // durations must not carry a probe it did not ask for.
+        let probe = match std::env::var("XFSTESTS_BPF") {
+            Ok(name) if !name.is_empty() => match bpf::start(&c, &name) {
+                Ok(r) => {
+                    println!("    {} attached on {}", r.name, r.node());
+                    Some(r)
+                }
+                Err(e) => {
+                    println!("    {name} did not start: {e}");
+                    None
+                }
+            },
+            _ => None,
+        };
         let t = match one_trial(&c, test, Duration::from_secs(budget)) {
             Ok(t) => t,
             Err(e) => {
@@ -1154,6 +1173,21 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         // Archived whichever way it went: a passing test's state is
         // what a failing one has to be compared against.
         let case = Case::new(&root, test, 1);
+
+        // The probe first: stopped before the checker runs, so what it
+        // saw is the test rather than the test plus its verification.
+        if let Some(r) = probe {
+            match r.stop_into(&c, &case.dir) {
+                Some((p, n)) => {
+                    println!("    kept {} ({} KiB)",
+                             p.file_name().unwrap_or_default().to_string_lossy(),
+                             n / 1024);
+                    bpf::speak(&p);
+                }
+                None => println!("    the probe brought nothing back"),
+            }
+        }
+
         evidence::collect(cfg, node, &case, &t.output);
         evidence::speak(&case);
         produced.push(case.dir.clone());

@@ -1,0 +1,50 @@
+#!/usr/bin/env bpftrace
+/*
+ * Where the parity work goes.
+ *
+ * Every indirect block read verifies its parity, and every indirect
+ * block written updates it; both decode or encode sixteen RS codewords
+ * over a 4096-byte region block. perf says that is 12.9% of the machine
+ * on a busy volume. This says which blocks, how often, and whether the
+ * reads and the writes are looking at the same ones.
+ *
+ * A region block appearing under @update but never under @verify is one
+ * nobody reads back. The reverse is one nobody maintains.
+ */
+
+BEGIN { printf("watching parity\n"); }
+
+kprobe:beamfs_ind_parity_update
+{
+    @updates = count();
+    @update_block[((struct buffer_head *)arg1)->b_blocknr] = count();
+    @update_by[comm] = count();
+}
+
+kprobe:beamfs_ind_parity_verify
+{
+    @verifies = count();
+    @verify_block[((struct buffer_head *)arg1)->b_blocknr] = count();
+    @verify_by[comm] = count();
+}
+
+/* What a verify costs, which is what 12.9% is made of. */
+kprobe:beamfs_ind_parity_verify { @vstart[tid] = nsecs; }
+kretprobe:beamfs_ind_parity_verify /@vstart[tid]/
+{
+    @verify_ns = hist(nsecs - @vstart[tid]);
+    delete(@vstart[tid]);
+}
+
+/* A verify that fails is the interesting one. */
+kretprobe:beamfs_ind_parity_verify /retval != 0/
+{
+    @verify_failed = count();
+    @failed_by[comm, kstack(6)] = count();
+}
+
+END
+{
+    clear(@vstart);
+    printf("\n");
+}

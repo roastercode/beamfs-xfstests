@@ -1,0 +1,49 @@
+#!/usr/bin/env bpftrace
+/*
+ * Does a dirtied block reach the medium?
+ *
+ * An indirect block is dirtied, attached to an inode's metadata list,
+ * and something has to carry it out. Three things can -- write_inode's
+ * sync, sync_inode_metadata, evict's invalidate -- and only two of them
+ * write. A block that arrives as 0xcd was dirtied and taken off the
+ * list by the third.
+ *
+ * The block layer says what actually left. A block number under
+ * @dirtied but never under @written is one that did not.
+ */
+
+BEGIN { printf("watching metadata flush\n"); }
+
+kprobe:mmb_mark_buffer_dirty
+{
+    @dirtied[((struct buffer_head *)arg0)->b_blocknr] = nsecs;
+    @n_dirtied = count();
+}
+
+kprobe:mmb_sync    { @sync_calls = count(); @syncing[tid] = 1; }
+kretprobe:mmb_sync { delete(@syncing[tid]); }
+
+/* The one that does not write. */
+kprobe:mmb_invalidate
+{
+    @invalidate_calls = count();
+    @invalidate_by[comm, kstack(6)] = count();
+}
+
+/* What the block layer was actually asked to write. */
+tracepoint:block:block_rq_issue /args.rwbs == "W" || args.rwbs == "WS"/
+{
+    @issued = count();
+}
+
+tracepoint:writeback:writeback_single_inode_start
+{
+    @wb_inodes[args.ino] = count();
+}
+
+END
+{
+    clear(@dirtied);
+    clear(@syncing);
+    printf("\n");
+}

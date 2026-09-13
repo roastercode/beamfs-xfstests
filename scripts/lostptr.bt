@@ -1,0 +1,56 @@
+#!/usr/bin/env bpftrace
+/*
+ * A pointer that was installed and reads back as zero.
+ *
+ * This is the shape of every open defect: xfs_io writes 18518 into slot
+ * 1 of indirect block 18516, and twenty-five seconds later a writeback
+ * kworker reads the same slot as zero and puts 22512 there instead. The
+ * treecheck in the kernel reports it after the fact; this watches it
+ * happen and says who was on each side.
+ *
+ * @installed remembers what went into each (block, slot). A store into
+ * a pair already remembered, with an old value of zero, is a pointer
+ * that vanished between the two.
+ */
+
+BEGIN { printf("watching indirect slots\n"); }
+
+tracepoint:beamfs:beamfs_slot_store
+{
+    $key = (args.parent << 16) | args.slot;
+
+    if (args.old == 0 && @installed[$key] != 0 && @installed[$key] != args.new) {
+        printf("LOST parent=%llu slot=%u held=%llu read as 0, now %llu\n",
+               args.parent, args.slot, @installed[$key], args.new);
+        printf("  installed by %s, overwritten by %s (pid %d)\n",
+               @installer[$key], comm, pid);
+        print(kstack(10));
+        @lost = count();
+        @lost_by[comm] = count();
+    }
+
+    @installed[$key] = args.new;
+    @installer[$key] = comm;
+    @stores = count();
+}
+
+/* Which path reads the block back, and what it finds there. */
+tracepoint:beamfs:beamfs_ind_read
+{
+    @reads = count();
+    if (args.val == 0) {
+        @read_zero = count();
+        @read_zero_by[comm] = count();
+    }
+    if (args.fresh == 1) {
+        /* The cache did not have it: what came back is from the medium. */
+        @read_from_medium = count();
+    }
+}
+
+END
+{
+    clear(@installed);
+    clear(@installer);
+    printf("\n");
+}
