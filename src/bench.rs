@@ -1542,6 +1542,59 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         println!();
         println!("  {removed} older volume image(s) pruned");
     }
+    // Saved, so the next run has something to be compared against.
+    //
+    // compare has existed all along and had nothing to read: run saves
+    // its results and sweep never did, so the question a fix is judged
+    // on -- did this pass before I touched it -- had no answer from the
+    // command that runs the whole suite.
+    {
+        let hist = crate::history::History::new(
+            &crate::history::History::default_root());
+        let mut all: Vec<crate::result::TestResult> = Vec::new();
+        for (name, _) in &failed {
+            all.push(crate::result::TestResult {
+                name: name.clone(),
+                outcome: crate::result::Outcome::Fail,
+                seconds: 0,
+                node: node.name.clone(),
+                reason: String::new(),
+            });
+        }
+        for name in &aborted {
+            all.push(crate::result::TestResult {
+                name: name.clone(),
+                outcome: crate::result::Outcome::NotRun,
+                seconds: 0,
+                node: node.name.clone(),
+                reason: "the node would not prepare".into(),
+            });
+        }
+        // Passes are the tests the sweep was asked for that did not
+        // fail or abort: a results file listing only failures cannot
+        // tell a fix from a test that stopped running.
+        for t in &tests {
+            if !failed.iter().any(|(n, _)| n == t) && !aborted.contains(t) {
+                all.push(crate::result::TestResult {
+                    name: t.clone(),
+                    outcome: crate::result::Outcome::Pass,
+                    seconds: 0,
+                    node: node.name.clone(),
+                    reason: String::new(),
+                });
+            }
+        }
+        all.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let tag = format!("sweep-{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs()).unwrap_or(0));
+        match hist.save(&tag, &all) {
+            Ok(_) => println!("  saved as {tag}; compare it with: beamfs-xfstests compare"),
+            Err(e) => println!("  could not save this run: {e}"),
+        }
+    }
+
     if !probe_missing.is_empty() {
         println!();
         println!("  no probe capture for:");
