@@ -1088,8 +1088,12 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                 println!("    bringing the node back");
                 let rec = Recovery::new(cfg);
                 let dom = rec.domain_for(&node.name);
-                let mut jr = Journal::create(&root);
-                let outcome = rec.recover(&c, &dom, wedge_attempts, &mut jr);
+                let dir = root.join(format!("wedged-{}",
+                                            test.replace('/', "-")));
+                let _ = std::fs::create_dir_all(&dir);
+                let mut jr = Journal::create(&dir);
+                let outcome = rec.recover_into(&c, &dom, wedge_attempts,
+                                               &mut jr, Some(&dir));
                 wedge_attempts += 1;
                 println!("    recovery: {}", outcome.as_str());
                 if outcome.usable() {

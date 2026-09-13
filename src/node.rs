@@ -165,6 +165,101 @@ impl<'a> NodeConn<'a> {
         }
     }
 
+    /// Copy a file from the node.
+    ///
+    /// scp rather than `cat` through run(): the ftrace buffer is
+    /// hundreds of megabytes and run() returns a String, which means
+    /// the whole thing in the harness's memory on a host that is
+    /// already short of it.
+    pub fn pull(&self, remote: &str, local: &str) -> Result<(), NodeError> {
+        let out = Command::new("timeout")
+            .arg("300")
+            .arg("scp")
+            .args(["-i", &self.key])
+            .args(["-o", "BatchMode=yes"])
+            .args(["-o", "StrictHostKeyChecking=no"])
+            .args(["-o", "UserKnownHostsFile=/dev/null"])
+            .args(["-o", "LogLevel=ERROR"])
+            .arg("-O")
+            .arg(format!("{}@{}:{remote}", self.user, self.node.host))
+            .arg(local)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| NodeError::Unreachable(format!("{}: {e}", self.node.host)))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(NodeError::Command {
+                rc: out.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            })
+        }
+    }
+
+    /// Everything the guest holds that a restart would destroy.
+    ///
+    /// Written into @dir, best-effort, each piece independent of the
+    /// others: a node too far gone to answer one of these is usually
+    /// still able to answer the next, and half the record beats none.
+    ///
+    /// Returns what it managed to keep, for the log to say so.
+    pub fn drain_volatile(&self, dir: &std::path::Path) -> Vec<(String, u64)> {
+        let mut kept = Vec::new();
+        let _ = std::fs::create_dir_all(dir);
+
+        // Copied to /tmp on the node first: reading a debugfs file over
+        // ssh holds it open for as long as the transfer takes, and the
+        // ftrace buffer is not a file that likes being read slowly.
+        let staged = [
+            ("trace.txt",
+             "sudo cat /sys/kernel/debug/tracing/trace > /tmp/ev-trace.txt 2>/dev/null; \
+              sudo chmod 644 /tmp/ev-trace.txt",
+             "/tmp/ev-trace.txt"),
+            ("dmesg.txt",
+             "sudo dmesg > /tmp/ev-dmesg.txt 2>/dev/null; sudo chmod 644 /tmp/ev-dmesg.txt",
+             "/tmp/ev-dmesg.txt"),
+            ("tracing-state.txt",
+             "sudo sh -c 'for e in /sys/kernel/debug/tracing/events/beamfs/*/enable; do \
+                echo \"$(basename $(dirname $e)) $(cat $e)\"; done' > /tmp/ev-state.txt 2>/dev/null; \
+              sudo chmod 644 /tmp/ev-state.txt",
+             "/tmp/ev-state.txt"),
+        ];
+
+        for (name, prep, remote) in staged {
+            if self.run(prep, Duration::from_secs(60)).is_err() {
+                continue;
+            }
+            let local = dir.join(name);
+            if self.pull(remote, &local.to_string_lossy()).is_ok() {
+                if let Ok(m) = std::fs::metadata(&local) {
+                    if m.len() > 0 {
+                        kept.push((name.to_string(), m.len()));
+                    }
+                }
+            }
+        }
+
+        // Small enough to come back through run().
+        let inline = [
+            ("meminfo.txt", "cat /proc/meminfo"),
+            ("slabinfo.txt", "sudo cat /proc/slabinfo"),
+            ("mounts.txt", "cat /proc/mounts"),
+            ("loadavg.txt", "cat /proc/loadavg; uptime"),
+        ];
+        for (name, cmd) in inline {
+            if let Ok(out) = self.run(cmd, Duration::from_secs(20)) {
+                if !out.is_empty() {
+                    let local = dir.join(name);
+                    if std::fs::write(&local, &out).is_ok() {
+                        kept.push((name.to_string(), out.len() as u64));
+                    }
+                }
+            }
+        }
+        kept
+    }
+
     /// Is the node up, and does it have what the suite needs?
     ///
     /// Checked before launching rather than discovered afterwards: a

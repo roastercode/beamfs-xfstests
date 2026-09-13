@@ -84,12 +84,44 @@ impl<'a> Recovery<'a> {
     pub fn recover(&self, conn: &NodeConn, domain: &str, attempt: u32,
                    jr: &mut Journal) -> RecoveryOutcome
     {
+        self.recover_into(conn, domain, attempt, jr, None)
+    }
+
+    /// Recover, keeping whatever the node holds into @evidence first.
+    ///
+    /// The caller passes a directory when it has one -- a sweep does --
+    /// and the guest's volatile record lands there before any step
+    /// touches the machine.
+    pub fn recover_into(&self, conn: &NodeConn, domain: &str, attempt: u32,
+                        jr: &mut Journal,
+                        evidence: Option<&std::path::Path>) -> RecoveryOutcome
+    {
         let name = conn.node.name.clone();
         jr.section(&format!("RECOVERY {name}"));
 
         // Step 0: evidence, before anything is disturbed.
         let (stacks, dmesg, mounts) = conn.stall_evidence();
         jr.stall_evidence(&name, "(stall)", &stacks, &dmesg, &mounts);
+
+        // And the volatile record, which a restart destroys.
+        //
+        // The ftrace buffer and the whole of dmesg live in the guest's
+        // memory. On 2026-09-13 a restart took a 250 MB trace with it
+        // and the campaign that produced it ran for three hours.
+        if let Some(dir) = evidence {
+            let kept = conn.drain_volatile(dir);
+            if kept.is_empty() {
+                jr.line(&format!("{name}: nothing volatile could be kept"));
+                println!("      the node kept nothing back");
+            } else {
+                for (what, n) in &kept {
+                    jr.line(&format!("{name}: kept {what} ({n} bytes)"));
+                }
+                let total: u64 = kept.iter().map(|(_, n)| n).sum();
+                println!("      kept {} file(s), {} KiB, in {}",
+                         kept.len(), total / 1024, dir.display());
+            }
+        }
 
         // Step 1, but only the first two times. A node that has
         // already been killed twice and come back blocked will come
