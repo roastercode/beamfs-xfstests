@@ -197,9 +197,9 @@ echo 0 > $T/tracing_on
 # good case: the loop was clean. Without the guard every clean loop is
 # reported as a failed one.
 echo fsck > /tmp/beamfs-step
-fsck.beamfs -v {dev} 2>&1 > /tmp/beamfs-fsck.out
-grep -oE '[0-9]+ referenced-but-free' /tmp/beamfs-fsck.out | grep -oE '^[0-9]+' | head -1 | sed 's/^/DANGLING /' || true
-grep -oE 'block [0-9]+ marked' /tmp/beamfs-fsck.out | grep -oE '[0-9]+' || true
+fsck.beamfs -v {dev} 2>&1 > /var/tmp/beamfs-fsck.log
+grep -oE '[0-9]+ referenced-but-free' /var/tmp/beamfs-fsck.log | grep -oE '^[0-9]+' | head -1 | sed 's/^/DANGLING /' || true
+grep -oE 'block [0-9]+ marked' /var/tmp/beamfs-fsck.log | grep -oE '[0-9]+' || true
 exit 0
 "#,
         no_test_mount = std::env::var("XFSTESTS_LOAD_NO_TEST_MOUNT")

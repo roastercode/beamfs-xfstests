@@ -78,8 +78,19 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
         return Err("the node has no bpftrace".into());
     }
 
-    let remote = format!("/tmp/bx-{script}.bt");
-    let remote_out = format!("/tmp/bx-{script}.out");
+    // Not /tmp, and not named .out.
+    //
+    // xfstests' check does "rm -f /tmp/*.rawout /tmp/*.out /tmp/*.err
+    // /tmp/*.time" at line 548, between the test and its verification.
+    // A probe writing /tmp/bx-lostptr.out attaches, runs, records
+    // everything, and has its file deleted by the harness it is
+    // watching -- which is what "the probe brought nothing back" was.
+    let dir = "/var/tmp/beamfs-bx";
+    let remote = format!("{dir}/{script}.bt");
+    let remote_out = format!("{dir}/{script}.trace");
+    conn.run(&format!("sudo mkdir -p {dir} && sudo chmod 1777 {dir}"),
+             Duration::from_secs(20))
+        .map_err(|e| format!("{script}: cannot make {dir}: {e:?}"))?;
     conn.push(&local.to_string_lossy(), &remote)
         .map_err(|e| format!("push {script}: {e:?}"))?;
 
