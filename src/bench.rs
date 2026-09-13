@@ -1131,7 +1131,31 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             .and_then(|m| m.modified())
             .ok();
 
-        let wrong = c.ready_to_measure(&local, built);
+        // Skipped when deploy has just done it on this same boot.
+        //
+        // The checks cost four round trips and deploy establishes the
+        // same thing; what makes the shortcut safe is the node's
+        // uptime, which cannot have grown by the elapsed time unless
+        // the machine is the one deploy talked to.
+        let fresh = crate::nodestate::read(&node.name).is_some_and(|v| {
+            // Uptime and kernel in one round trip: the shortcut is not
+            // worth two, and a kernel that changed without the uptime
+            // resetting is a machine that is not the one deploy saw.
+            let out = c.run("cut -d. -f1 /proc/uptime; uname -r",
+                            std::time::Duration::from_secs(20))
+                .unwrap_or_default();
+            let mut it = out.split_whitespace();
+            let up: u64 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            let kernel = it.next().unwrap_or_default();
+            crate::nodestate::still_current(&v, up) && kernel == v.kernel
+        });
+
+        let wrong = if fresh {
+            println!("  node    : verified by the last deploy, same boot");
+            Vec::new()
+        } else {
+            c.ready_to_measure(&local, built)
+        };
         if !wrong.is_empty() {
             println!();
             for w in &wrong {

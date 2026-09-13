@@ -40,6 +40,7 @@ mod console;
 mod history;
 mod journal;
 mod node;
+mod nodestate;
 mod probe;
 mod recovery;
 mod progress;

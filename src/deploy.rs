@@ -275,6 +275,18 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
 
     let k = c.run("uname -r", Duration::from_secs(20)).unwrap_or_default();
     println!("  kernel  : {}", k.trim());
+
+    // Written down, so the next command does not ask again.
+    //
+    // sweep checks the same tools and the same kernel before its first
+    // test: four round trips to establish what this just did. The
+    // node's uptime goes with it -- a node rebooted by hand in between
+    // has a smaller one, and the record stops applying.
+    let up = c.run("cut -d. -f1 /proc/uptime", Duration::from_secs(20))
+        .unwrap_or_default();
+    crate::nodestate::mark(&node.name,
+                           up.trim().parse().unwrap_or(0),
+                           k.trim());
     Ok(())
 }
 
