@@ -1,0 +1,61 @@
+#!/usr/bin/env bpftrace
+/*
+ * A block allocated and never placed in a tree.
+ *
+ * Six of the eight failing tests leave blocks marked used that nothing
+ * references, in small runs, never written: 327 in generic/269, 185 in
+ * generic/083, 58 in generic/464. fsck says where they are and whose
+ * neighbours they have; it cannot say which path allocated them and
+ * walked away.
+ *
+ * Every legitimate allocation is followed, within the same call, by a
+ * store of that block number into a slot -- or by its installation in
+ * the inode itself. One that is never stored and never freed is the
+ * leak, and the stack at allocation time says who did it.
+ */
+
+BEGIN { printf("watching allocations that go nowhere\n"); }
+
+tracepoint:beamfs:beamfs_block_alloc
+{
+    @pending[args.blk] = args.ino;
+    @at[args.blk] = nsecs;
+    @stack[args.blk] = kstack(10);
+    @allocs = count();
+}
+
+/* Placed in a tree. */
+tracepoint:beamfs:beamfs_slot_store
+{
+    delete(@pending[args.new]);
+    delete(@at[args.new]);
+    delete(@stack[args.new]);
+    @placed = count();
+}
+
+/* Or given back. */
+tracepoint:beamfs:beamfs_block_free
+{
+    delete(@pending[args.blk]);
+    delete(@at[args.blk]);
+    delete(@stack[args.blk]);
+    @frees = count();
+}
+
+/* A block still pending after a second is one nobody is going to
+ * place: the allocation and the store happen in the same call, under
+ * i_alloc_mutex, microseconds apart. */
+interval:s:5
+{
+    $now = nsecs;
+    @swept = count();
+}
+
+END
+{
+    printf("\nstill allocated and never placed:\n");
+    print(@pending, 25);
+    printf("\nwhere they were allocated:\n");
+    print(@stack, 3);
+    clear(@at);
+}
