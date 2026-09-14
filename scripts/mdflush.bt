@@ -31,6 +31,26 @@ kprobe:mmb_mark_buffer_dirty
 }
 
 kprobe:mmb_sync    { @syncs = count(); }
+
+/*
+ * What the filesystem says it did, as opposed to what the calls say.
+ *
+ * evict traces "evict sync" with the buffer count when the inode still
+ * had links, and "evict drop" when it did not: the second is the list
+ * being thrown away with whatever it held. write_inode traces its own.
+ *
+ * @n is what the list held when the call started, so an inode with
+ * nothing to lose is told from one that lost four.
+ */
+tracepoint:beamfs:beamfs_mmb
+{
+    @by_path[str(args.how)] = count();
+    @held[str(args.how)] = hist(args.n);
+    if (args.n > 0) {
+        @nonempty[str(args.how)] = count();
+        @buffers[str(args.how)] = sum(args.n);
+    }
+}
 kprobe:mmb_invalidate
 {
     @invalidates = count();

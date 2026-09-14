@@ -176,6 +176,17 @@ pub fn digest(dirs: &[PathBuf]) -> std::io::Result<PathBuf> {
                 writeln!(f, "{l}")?;
             }
             writeln!(f, "```")?;
+            /*
+             * Where the rest of it is.
+             *
+             * The totals are ten lines and the capture is megabytes;
+             * a reader who needs the stacks needs the path, and
+             * looking for it on the node finds nothing -- the probe
+             * pulls it here and removes it there.
+             */
+            writeln!(f, "\nthe whole capture: {}, {} bytes\n",
+                     e.path().display(),
+                     std::fs::metadata(e.path()).map(|m| m.len()).unwrap_or(0))?;
         }
     }
 
