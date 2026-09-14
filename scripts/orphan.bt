@@ -33,7 +33,14 @@ tracepoint:beamfs:beamfs_block_alloc
 tracepoint:beamfs:beamfs_slot_store
 {
     @placed = count();
-    if ((args.new & 511) == 0) {
+    /*
+     * Only what is being followed.
+     *
+     * delete on a key that is not there is not an error and bpftrace
+     * warns anyway, four lines a time: 81 KB of capture, almost all of
+     * it the same two warnings.
+     */
+    if ((args.new & 511) == 0 && @watched[args.new]) {
         delete(@watched[args.new]);
         delete(@stack[args.new]);
     }
@@ -42,7 +49,14 @@ tracepoint:beamfs:beamfs_slot_store
 tracepoint:beamfs:beamfs_block_free
 {
     @frees = count();
-    if ((args.blk & 511) == 0) {
+    /*
+     * Only what is being followed.
+     *
+     * delete on a key that is not there is not an error and bpftrace
+     * warns anyway, four lines a time: 81 KB of capture, almost all of
+     * it the same two warnings.
+     */
+    if ((args.blk & 511) == 0 && @watched[args.blk]) {
         delete(@watched[args.blk]);
         delete(@stack[args.blk]);
     }
