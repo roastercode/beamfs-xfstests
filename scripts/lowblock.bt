@@ -1,0 +1,47 @@
+#!/usr/bin/env bpftrace
+/*
+ * Who writes below data_start?
+ *
+ * generic/075 left two blocks of the inode table -- 7 and 246 -- full
+ * of fsx's fill bytes, with seven inodes in them beyond correction and
+ * 40437 pointers naming blocks outside the device.
+ *
+ * The allocator returns s_data_start + bit and cannot go lower, and
+ * free_block refuses anything below it, so whatever wrote there did
+ * not come through either. This says what did.
+ *
+ * On a 1 GiB volume: block 0 is the superblock, 1..1024 the inode
+ * table, 1025..1032 the bitmap, 1033..18442 the parity region, and
+ * data starts at 18443. Each of those has one writer, and a write to
+ * the inode table from anywhere but write_inode is the finding.
+ */
+
+BEGIN { printf("watching writes below data_start\n"); }
+
+kprobe:mark_buffer_dirty
+{
+    $bh = (struct buffer_head *)arg0;
+    $blk = $bh->b_blocknr;
+
+    if ($blk > 0 && $blk < 1025) {
+        @table_writes[$blk] = count();
+        @table_by[comm] = count();
+        /* The stack is the answer: write_inode is expected here, and
+         * anything else is not. */
+        @table_stack[kstack(10)] = count();
+    }
+}
+
+kprobe:beamfs_write_inode_raw_flags { @write_inode = count(); }
+
+/* And the allocator, to close the question for good. */
+tracepoint:beamfs:beamfs_block_alloc
+{
+    @allocs = count();
+    if (args.blk < 18443) {
+        printf("ALLOCATOR HANDED %llu, below data_start\n", args.blk);
+        @low_alloc = count();
+    }
+}
+
+END { printf("\n"); }

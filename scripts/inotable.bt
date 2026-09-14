@@ -1,0 +1,46 @@
+#!/usr/bin/env bpftrace
+/*
+ * Who writes into the inode table?
+ *
+ * generic/075 left two blocks of it full of 0x39 and 0x3b -- fsx's own
+ * fill bytes -- with seven inodes in them beyond correction and 40437
+ * pointers naming blocks outside the device.
+ *
+ * The allocator cannot hand out a block below s_data_start and
+ * free_block refuses one, so whatever wrote there did not go through
+ * either. This says what did.
+ *
+ * The inode table starts at block 1 and data at 18443, so any write to
+ * a block under 18443 that is not the superblock, the bitmap or the
+ * parity region is a write nobody meant.
+ */
+
+BEGIN { printf("watching writes below data_start\n"); }
+
+kprobe:mark_buffer_dirty
+{
+    $bh = (struct buffer_head *)arg0;
+    $blk = $bh->b_blocknr;
+
+    /* Above data_start is ordinary. Below it, only the superblock (0),
+     * the inode table (1..1024), the bitmap (1025..1032) and the parity
+     * region (1033..18442) live, and each has one writer. */
+    if ($blk > 0 && $blk < 1025) {
+        @inode_table[$blk] = count();
+        @by[comm, kstack(8)] = count();
+    }
+}
+
+kprobe:beamfs_write_inode_raw_flags { @write_inode = count(); }
+
+/* What the allocator hands out, to be sure it never goes low. */
+tracepoint:beamfs:beamfs_block_alloc
+{
+    @allocs = count();
+    if (args.blk < 18443) {
+        printf("ALLOCATOR HANDED %llu, below data_start\n", args.blk);
+        @low_alloc = count();
+    }
+}
+
+END { printf("\n"); }
