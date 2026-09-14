@@ -123,7 +123,16 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
         // somewhere the shell cannot read back. The probe attached
         // fine and the harness reported "bpftrace said nothing at all"
         // twice.
-        "sudo sh -c 'rm -f {remote_out}; \
+        /*
+         * Whatever is still attached, first.
+         *
+         * A bpftrace left from an earlier sweep holds the
+         * tracepoints and the new one exits without attaching.
+         * The same command works by hand because a hand starts
+         * by killing what is there.
+         */
+        "sudo pkill -x bpftrace 2>/dev/null; sleep 1; \
+         sudo sh -c 'rm -f {remote_out}; \
          setsid bpftrace {remote} > {remote_out} 2>&1 < /dev/null &' ; \
          sleep 3; \
          if grep -q Attaching {remote_out}; then echo BX_ATTACHED; \
