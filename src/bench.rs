@@ -628,6 +628,13 @@ pub fn run(
         // reported over the last two days came from a stale file that
         // way.
         let case = Case::new(&evidence_root(), &r.test, n);
+        // Recorded here too, not only in sweep.
+        //
+        // trend read five sweeps and ignored ten baseline trials --
+        // the most solid measurement this harness makes was the one
+        // its own reporting could not see.
+        crate::history::losses::record(&r.test, t.trial.lost);
+
         evidence::collect(cfg, node, &case, &t.output);
         evidence::speak(&case);
         if !t.trial.passed && !t.aborted {
