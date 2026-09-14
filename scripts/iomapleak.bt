@@ -1,0 +1,53 @@
+#!/usr/bin/env bpftrace
+/*
+ * Blocks allocated against bytes written.
+ *
+ * generic/075 leaves thousands of blocks marked used that nothing
+ * references, allocated and never written -- 64 of them in 32 runs,
+ * the longest three.
+ *
+ * Two explanations fit and want opposite fixes. Either a write is
+ * shorter than the mapping it was given, and beamfs has no iomap_end
+ * to give the rest back; or iomap_begin declares a length covering
+ * several blocks while allocating only the first, and the ones after
+ * it are allocated by a later begin that nobody uses.
+ *
+ * The numbers separate them: a length that always equals one block
+ * means the first, a length larger than one block means the second.
+ */
+
+BEGIN { printf("watching the mapping\n"); }
+
+kprobe:beamfs_inline_iomap_begin
+{
+    @begins = count();
+    @pos[tid] = arg1;
+    @len[tid] = arg2;
+    @flags[tid] = arg3;
+}
+
+kretprobe:beamfs_inline_iomap_begin
+/@len[tid]/
+{
+    /* 3824 bytes of payload per 4096-byte block. */
+    @length_asked = hist(@len[tid] / 3824);
+    if (@flags[tid] & 1) {
+        @write_begins = count();
+        @write_len = hist(@len[tid]);
+    }
+    delete(@pos[tid]);
+    delete(@len[tid]);
+    delete(@flags[tid]);
+}
+
+tracepoint:beamfs:beamfs_block_alloc { @allocs = count(); }
+tracepoint:beamfs:beamfs_block_free  { @frees = count(); }
+
+/* What actually reaches the device, to compare against. */
+tracepoint:block:block_rq_issue
+/args.rwbs == "W" || args.rwbs == "WS"/
+{
+    @written_sectors = sum(args.nr_sector);
+}
+
+END { clear(@pos); clear(@len); clear(@flags); printf("\n"); }
