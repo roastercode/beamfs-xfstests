@@ -1685,6 +1685,16 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         .unwrap_or(0);
     let kept: Vec<std::path::PathBuf> =
         produced.iter().filter(|p| p.exists()).cloned().collect();
+    // The same evidence as one plain file, beside the archive.
+    //
+    // Seventeen files per case and a compressed image is right for
+    // keeping and wrong for reading: a reader opens the one they
+    // expect and concludes from the sixteen they did not.
+    match crate::runpack::digest(&kept) {
+        Ok(p) => println!("  and as one file to read: {}", p.display()),
+        Err(e) => println!("  could not write the digest: {e}"),
+    }
+
     match runpack::pack_run(&kept, &format!("{stamp}")) {
         Some((path, size)) => runpack::announce(&path, size),
         None if kept.is_empty() => {}

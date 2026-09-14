@@ -76,6 +76,112 @@ fn prune(keep_days: u64) -> usize {
     n
 }
 
+/// One plain text file with everything worth reading in it.
+///
+/// The archive holds seventeen files per case and a compressed volume
+/// image, which is right for keeping and wrong for reading: a reader
+/// opens the one file they expect, misses the sixteen others, and
+/// concludes from what they did not look at.
+///
+/// This is the same evidence as a single document -- what the checker
+/// said, what the kernel said, what the probe counted -- with the
+/// bulk left in the archive beside it.
+pub fn digest(dirs: &[PathBuf]) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let out = PathBuf::from(format!("/tmp/beamfs-xfstests-{stamp}.md"));
+    let mut f = std::fs::File::create(&out)?;
+
+    writeln!(f, "# run {stamp}")?;
+
+    for d in dirs {
+        let name = d.file_name().unwrap_or_default().to_string_lossy();
+        writeln!(f, "\n## {name}\n")?;
+
+        // The verdict and the reason, first: everything else is
+        // detail under them.
+        for (title, file, lines) in [
+            ("what the checker found", "full", 40usize),
+            ("what it named", "fsck.verbose", 60),
+            ("why the test failed", "check.out", 12),
+            ("what the probe counted", "", 0),
+        ] {
+            if file.is_empty() {
+                continue;
+            }
+            let p = d.join(file);
+            let Ok(body) = std::fs::read_to_string(&p) else { continue };
+            let picked: Vec<&str> = body
+                .lines()
+                .filter(|l| !l.trim().is_empty() && !l.starts_with('+'))
+                .filter(|l| file != "full" || l.contains("fsck") || l.contains("pass"))
+                .take(lines)
+                .collect();
+            if picked.is_empty() {
+                continue;
+            }
+            writeln!(f, "### {title}\n```")?;
+            for l in picked {
+                writeln!(f, "{l}")?;
+            }
+            writeln!(f, "```")?;
+        }
+
+        // The kernel, collapsed: a run says the same sentence
+        // hundreds of times and the count is the information.
+        if let Ok(body) = std::fs::read_to_string(d.join("dmesg")) {
+            let mut seen: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
+            for l in body.lines() {
+                if !l.contains("beamfs") {
+                    continue;
+                }
+                let msg = l.split_once("] ").map(|x| x.1).unwrap_or(l);
+                let shape: String = msg
+                    .chars()
+                    .map(|c| if c.is_ascii_digit() { '#' } else { c })
+                    .collect();
+                *seen.entry(shape).or_insert(0) += 1;
+            }
+            if !seen.is_empty() {
+                let mut v: Vec<(String, usize)> = seen.into_iter().collect();
+                v.sort_by_key(|r| std::cmp::Reverse(r.1));
+                writeln!(f, "### what the kernel said\n```")?;
+                for (msg, n) in v.iter().take(20) {
+                    writeln!(f, "{n:6}  {msg}")?;
+                }
+                writeln!(f, "```")?;
+            }
+        }
+
+        // Whatever the probe left, by its counters only: a capture is
+        // megabytes and its totals are ten lines.
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if !n.starts_with("bpf-") {
+                continue;
+            }
+            let Ok(body) = std::fs::read_to_string(e.path()) else { continue };
+            let totals: Vec<&str> = body
+                .lines()
+                .filter(|l| l.starts_with('@') && l.contains(':'))
+                .take(20)
+                .collect();
+            writeln!(f, "### {n}\n```")?;
+            for l in totals {
+                writeln!(f, "{l}")?;
+            }
+            writeln!(f, "```")?;
+        }
+    }
+
+    Ok(out)
+}
+
 /// Say where it went.
 pub fn announce(path: &Path, size: u64) {
     let gone = prune(7);

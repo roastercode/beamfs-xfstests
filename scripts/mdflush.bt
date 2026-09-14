@@ -20,8 +20,13 @@ BEGIN { printf("watching the metadata lists\n"); }
 
 kprobe:mmb_mark_buffer_dirty
 {
-    $bh = (struct buffer_head *)arg0;
-    @dirtied[$bh->b_blocknr] = 1;
+    /*
+     * Counted, not remembered.
+     *
+     * Keeping a key per block filled bpftrace's map in seconds and
+     * the capture became 21 MB of "Map full; can't update element"
+     * -- a probe measuring nothing but its own overflow.
+     */
     @n_dirtied = count();
 }
 
@@ -53,4 +58,4 @@ kretprobe:beamfs_inline_lookup_or_alloc_phys
 kprobe:beamfs_evict_inode { @evictions = count(); }
 kprobe:beamfs_write_inode { @write_inodes = count(); }
 
-END { clear(@dirtied); printf("\n"); }
+END { printf("\n"); }
