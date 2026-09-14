@@ -1,0 +1,43 @@
+#!/usr/bin/env bpftrace
+/*
+ * Which write actually reaches a block below data_start?
+ *
+ * The first probe watched mark_buffer_dirty and found nothing: every
+ * write to the inode table went through beamfs_write_inode, and the
+ * allocator never handed out a low block. But file data does not use
+ * buffer heads at all -- beamfs_inline goes through iomap, and iomap
+ * builds bios.
+ *
+ * So the mapping is what is wrong, not the allocation: iomap_begin
+ * hands back a physical block and nobody checks it is above
+ * data_start. On a 1 GiB volume that is 18443; blocks 7 and 246 are
+ * the inode table.
+ */
+
+BEGIN { printf("watching the block layer\n"); }
+
+/* The device's own queue: sector 8 per 4 KiB block. */
+tracepoint:block:block_rq_issue
+/args.rwbs == "W" || args.rwbs == "WS" || args.rwbs == "WM"/
+{
+    $blk = args.sector / 8;
+    @writes = count();
+
+    /* 18443 is data_start on the 1 GiB volumes these tests use. Under
+     * it lives metadata, each with one writer; a data-sized write
+     * there is the finding. */
+    if ($blk < 18443 && args.nr_sector >= 8) {
+        printf("WRITE to block %llu (%d sectors) by %s\n",
+               $blk, args.nr_sector, comm);
+        @low[$blk] = count();
+        @low_by[comm] = count();
+        @low_writes = count();
+    }
+}
+
+/* What the filesystem said the block was. */
+kretprobe:beamfs_inline_lookup_or_alloc_phys { @lookups = count(); }
+
+tracepoint:beamfs:beamfs_block_alloc { @allocs = count(); }
+
+END { printf("\n"); }
