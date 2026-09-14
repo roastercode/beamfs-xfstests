@@ -104,11 +104,26 @@ pub fn digest(dirs: &[PathBuf]) -> std::io::Result<PathBuf> {
 
         // The verdict and the reason, first: everything else is
         // detail under them.
+        /*
+         * Whole, not sampled.
+         *
+         * The first digest kept 3884 bytes of the 46087 the case
+         * holds in text -- the rest of the directory is a compressed
+         * volume image, which has no place in a file meant to be
+         * read. full is 66 lines, fsck.verbose 19, dmesg 173: there
+         * was never anything to save by cutting them.
+         *
+         * The cap is high enough to be no cap at all in practice and
+         * low enough that a runaway log cannot make this unreadable.
+         */
         for (title, file, lines) in [
-            ("what the checker found", "full", 40usize),
-            ("what it named", "fsck.verbose", 60),
-            ("why the test failed", "check.out", 12),
-            ("what the probe counted", "", 0),
+            ("what the checker found", "full", 400usize),
+            ("what it named", "fsck.verbose", 400),
+            ("why the test failed", "check.out", 40),
+            ("where it was mounted", "mounts", 20),
+            ("what the device did", "diskstats", 10),
+            ("what memory looked like", "meminfo", 12),
+            ("which tracepoints were on", "tracing.state", 12),
         ] {
             if file.is_empty() {
                 continue;
@@ -118,7 +133,7 @@ pub fn digest(dirs: &[PathBuf]) -> std::io::Result<PathBuf> {
             let picked: Vec<&str> = body
                 .lines()
                 .filter(|l| !l.trim().is_empty() && !l.starts_with('+'))
-                .filter(|l| file != "full" || l.contains("fsck") || l.contains("pass"))
+
                 .take(lines)
                 .collect();
             if picked.is_empty() {
@@ -151,7 +166,7 @@ pub fn digest(dirs: &[PathBuf]) -> std::io::Result<PathBuf> {
                 let mut v: Vec<(String, usize)> = seen.into_iter().collect();
                 v.sort_by_key(|r| std::cmp::Reverse(r.1));
                 writeln!(f, "### what the kernel said\n```")?;
-                for (msg, n) in v.iter().take(20) {
+                for (msg, n) in v.iter().take(60) {
                     writeln!(f, "{n:6}  {msg}")?;
                 }
                 writeln!(f, "```")?;
@@ -169,7 +184,7 @@ pub fn digest(dirs: &[PathBuf]) -> std::io::Result<PathBuf> {
             let totals: Vec<&str> = body
                 .lines()
                 .filter(|l| l.starts_with('@') && l.contains(':'))
-                .take(20)
+                .take(80)
                 .collect();
             writeln!(f, "### {n}\n```")?;
             for l in totals {
