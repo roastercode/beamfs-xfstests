@@ -166,6 +166,50 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
     println!("  image   : {} ({} min old)",
              image.file_name().unwrap_or_default().to_string_lossy(), age);
 
+    // Is the image newer than the code it is supposed to carry?
+    //
+    // deploy said how old the image was and left the reader to do the
+    // arithmetic. A commit made after the last build is not in the
+    // image, and measuring against it is measuring the commit before
+    // -- which is how an afternoon went to a defect that had already
+    // been fixed.
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        for tree in ["git/beamfs", "git/yocto-beamfs"] {
+            let p = PathBuf::from(&home).join(tree);
+            let out = Command::new("git")
+                .args(["-C", &p.to_string_lossy(), "log", "-1", "--format=%ct %h %s"])
+                .output();
+            let Ok(o) = out else { continue };
+            if !o.status.success() {
+                continue;
+            }
+            let line = String::from_utf8_lossy(&o.stdout);
+            let mut f = line.trim().splitn(3, ' ');
+            let when: u64 = f.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            let short = f.next().unwrap_or("");
+            let subject = f.next().unwrap_or("");
+
+            let built = std::fs::metadata(&image)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            if when > built {
+                println!();
+                println!("  {} has a commit the image does not carry:",
+                         tree.rsplit('/').next().unwrap_or(tree));
+                println!("    {short} {}", &subject[..subject.len().min(58)]);
+                println!("  the image was built {} minutes before it -- \
+                          run bitbake first",
+                         (when - built) / 60);
+                println!();
+            }
+        }
+    }
+
     // The layer's copy of the checker, against this repo's.
     //
     // Not fatal: deploy pushes the binary built here, so the node ends
