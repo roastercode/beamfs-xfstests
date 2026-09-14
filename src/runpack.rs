@@ -76,6 +76,58 @@ fn prune(keep_days: u64) -> usize {
     n
 }
 
+/// Every text file of a case, concatenated, nothing dropped.
+///
+/// The digest picks and cuts, which is right for a first read and
+/// wrong when the answer is in a file it does not pick. slabinfo held
+/// 413940 live buffer_heads and vmstat held 2967695 pages dirtied
+/// against 1998614 written -- a million pages dirtied and never
+/// written on a volume that had run out of space -- and neither was in
+/// any digest, through run after run.
+///
+/// This one drops nothing but the compressed images.
+pub fn trace(dirs: &[PathBuf]) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let out = PathBuf::from(format!("/tmp/beamfs-xfstests-{stamp}.trace"));
+    let mut f = std::fs::File::create(&out)?;
+
+    for d in dirs {
+        let name = d.file_name().unwrap_or_default().to_string_lossy();
+
+        let mut files: Vec<PathBuf> = std::fs::read_dir(d)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect();
+        files.sort();
+
+        for p in files {
+            let n = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            // The images are megabytes of compressed bytes and belong
+            // in the archive; everything else is text and stays.
+            if n.ends_with(".zst") || n.ends_with(".img") {
+                continue;
+            }
+            let Ok(body) = std::fs::read_to_string(&p) else { continue };
+            if body.trim().is_empty() {
+                continue;
+            }
+            writeln!(f, "\n===== {name}/{n} ({} bytes) =====\n",
+                     body.len())?;
+            f.write_all(body.as_bytes())?;
+        }
+    }
+
+    Ok(out)
+}
+
 /// One plain text file with everything worth reading in it.
 ///
 /// The archive holds seventeen files per case and a compressed volume
