@@ -1,0 +1,56 @@
+#!/usr/bin/env bpftrace
+/*
+ * A metadata block dirtied and never written.
+ *
+ * generic/269 fills the volume, and leaves 2230 indirect blocks whose
+ * pointer is installed and whose contents never reached the medium --
+ * fsck reads them as "never described", the subtree under each
+ * unreachable -- plus 353 data blocks allocated and never written.
+ *
+ * Every one of those blocks goes onto an inode's i_metadata_bhs by
+ * mmb_mark_buffer_dirty, and comes off it by mmb_sync from write_inode
+ * or by mmb_invalidate from evict. The first writes, the second does
+ * not.
+ *
+ * So: which blocks go on, which come off by which path, and what does
+ * ENOSPC leave behind.
+ */
+
+BEGIN { printf("watching the metadata lists\n"); }
+
+kprobe:mmb_mark_buffer_dirty
+{
+    $bh = (struct buffer_head *)arg0;
+    @dirtied[$bh->b_blocknr] = 1;
+    @n_dirtied = count();
+}
+
+kprobe:mmb_sync    { @syncs = count(); }
+kprobe:mmb_invalidate
+{
+    @invalidates = count();
+    @invalidate_by[comm] = count();
+    /* The stack says whether this is eviction, unmount or something
+     * that should have synced first. */
+    @invalidate_stack[kstack(6)] = count();
+}
+
+/* ENOSPC on the allocation path: what the tree looks like when the
+ * volume runs out mid-construction. */
+kretprobe:beamfs_alloc_block
+/retval == 0/
+{
+    @alloc_failed = count();
+}
+
+kretprobe:beamfs_inline_lookup_or_alloc_phys
+/(int64)retval == -28/
+{
+    @lookup_enospc = count();
+    @enospc_stack[kstack(6)] = count();
+}
+
+kprobe:beamfs_evict_inode { @evictions = count(); }
+kprobe:beamfs_write_inode { @write_inodes = count(); }
+
+END { clear(@dirtied); printf("\n"); }
