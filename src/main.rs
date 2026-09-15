@@ -35,6 +35,7 @@ mod load;
 mod trace;
 mod archive;
 mod runpack;
+mod scenario;
 mod config;
 mod console;
 mod history;
@@ -117,6 +118,21 @@ fn main() -> std::process::ExitCode {
         Some("bench") => do_bench(&cfg, args.get(2), args.get(3)),
         Some("sweep") => do_sweep(&cfg, args.get(2)),
         Some("deploy") => do_deploy(&cfg, args.get(2)),
+        Some("scenario") => {
+            let Some(node) = cfg.nodes.first() else {
+                eprintln!("no nodes configured");
+                return std::process::ExitCode::FAILURE;
+            };
+            let blocks = args.get(2).and_then(|x| x.parse().ok()).unwrap_or(32);
+            let keep = args.get(3).and_then(|x| x.parse().ok()).unwrap_or(4);
+            match scenario::partial_write(&cfg, node, blocks, keep) {
+                Ok(()) => return std::process::ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("  {e}");
+                    return std::process::ExitCode::FAILURE;
+                }
+            }
+        }
         Some("trend") => {
             match args.get(2) {
                 Some(t) => bisect::trend(t, 12),
