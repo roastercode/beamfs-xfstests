@@ -131,12 +131,34 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
          * The same command works by hand because a hand starts
          * by killing what is there.
          */
+        /*
+         * Wait for it, rather than guess at it.
+         *
+         * Three seconds and a grep was wrong both ways: it reported
+         * failure on a probe that had attached and was writing, and it
+         * reported success on one that would die a second later. The
+         * message that followed named a cause it could not know -- "the
+         * script may not have reached the node" while the script sat on
+         * the node -- and three fixes today moved that symptom without
+         * removing it.
+         *
+         * bpftrace prints "Attaching N probes" when it is ready, so:
+         * poll for it, up to fifteen seconds, and say what the file
+         * holds if it never comes.
+         */
         "sudo pkill -x bpftrace 2>/dev/null; sleep 1; \
          sudo sh -c 'rm -f {remote_out}; \
          setsid bpftrace {remote} > {remote_out} 2>&1 < /dev/null &' ; \
-         sleep 3; \
-         if grep -q Attaching {remote_out}; then echo BX_ATTACHED; \
-         else echo BX_FAILED; cat {remote_out}; fi");
+         for i in $(seq 1 30); do \
+           if grep -q Attaching {remote_out} 2>/dev/null; then break; fi; \
+           if ! pgrep -x bpftrace >/dev/null; then break; fi; \
+           sleep 0.5; \
+         done; \
+         if grep -q Attaching {remote_out} 2>/dev/null && \
+            pgrep -x bpftrace >/dev/null; then echo BX_ATTACHED; \
+         else echo BX_FAILED; \
+              echo \"--- bpftrace said ---\"; cat {remote_out} 2>/dev/null; \
+              echo \"--- running: $(pgrep -c bpftrace) ---\"; fi");
     let out = conn.run(&cmd, Duration::from_secs(45))
         .map_err(|e| format!("start {script}: {e:?}"))?;
     if !out.contains("BX_ATTACHED") {
