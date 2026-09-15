@@ -2,70 +2,54 @@
 /*
  * A block allocated and never placed in a tree.
  *
- * Six of the eight failing tests leave blocks marked used that nothing
- * references, never written, each one on its own: generic/269's 220 in
- * 64 runs of one. fsck says where they are and whose neighbours they
- * have; it cannot say which path allocated them and walked away.
+ * generic/476 ends with 867 blocks marked used, every one of them
+ * 4096 zero bytes, in 37 runs -- and the kernel says nothing at all
+ * about them. A block that is allocated, never written and never
+ * referenced was never attached to an inode: alloc_block returned it
+ * and no slot_store followed.
  *
- * Sampled, not exhaustive.
+ * Every legitimate allocation is followed by a slot_store for the same
+ * block, within the same call, under i_alloc_mutex. So the map holds
+ * what has been allocated and not yet placed, slot_store and
+ * block_free take entries out, and whatever is left at the end is the
+ * answer.
  *
- * A key per block filled bpftrace's map in seconds -- 65379 "Map full"
- * lines in a 21 MB capture, a probe measuring its own overflow. One
- * block in 512 is followed instead, which is plenty: the leak is
- * hundreds of blocks out of tens of thousands, so a sample of that
- * rate still catches several, and the stack is the same for all of
- * them or the finding is that it is not.
+ * Exhaustive rather than sampled: 867 out of tens of thousands is too
+ * thin to sample, and the map stays small because almost everything
+ * that goes in comes straight back out.
  */
 
-BEGIN { printf("following one allocation in 512\n"); }
+BEGIN { printf("allocations that go nowhere\n"); }
 
 tracepoint:beamfs:beamfs_block_alloc
 {
     @allocs = count();
-    /* Cheap, deterministic, and spread across the volume. */
-    if ((args.blk & 511) == 0) {
-        @watched[args.blk] = args.ino;
-        @stack[args.blk] = kstack(8);
-        @followed = count();
-    }
+    @pending[args.blk] = args.ino;
+    @where[args.blk] = kstack(6);
 }
 
 tracepoint:beamfs:beamfs_slot_store
 {
     @placed = count();
-    /*
-     * Only what is being followed.
-     *
-     * delete on a key that is not there is not an error and bpftrace
-     * warns anyway, four lines a time: 81 KB of capture, almost all of
-     * it the same two warnings.
-     */
-    if ((args.new & 511) == 0 && @watched[args.new]) {
-        delete(@watched[args.new]);
-        delete(@stack[args.new]);
+    if (@pending[args.new]) {
+        delete(@pending[args.new]);
+        delete(@where[args.new]);
     }
 }
 
 tracepoint:beamfs:beamfs_block_free
 {
     @frees = count();
-    /*
-     * Only what is being followed.
-     *
-     * delete on a key that is not there is not an error and bpftrace
-     * warns anyway, four lines a time: 81 KB of capture, almost all of
-     * it the same two warnings.
-     */
-    if ((args.blk & 511) == 0 && @watched[args.blk]) {
-        delete(@watched[args.blk]);
-        delete(@stack[args.blk]);
+    if (@pending[args.blk]) {
+        delete(@pending[args.blk]);
+        delete(@where[args.blk]);
     }
 }
 
 END
 {
     printf("\nallocated, never placed, never freed:\n");
-    print(@watched, 20);
-    printf("\nwhere they came from:\n");
-    print(@stack, 3);
+    print(@pending, 30);
+    printf("\nand where they came from:\n");
+    print(@where, 4);
 }
