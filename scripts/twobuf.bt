@@ -34,7 +34,13 @@ kretprobe:__bread_gfp
     @reads = count();
 }
 
-kretprobe:__getblk_gfp
+/*
+ * __getblk_gfp is not traceable -- inlined or notrace -- and the probe
+ * that named it took the whole script down with it. bdev_getblk is the
+ * caller it is reached through and it is traceable, which is close
+ * enough: what matters is that a buffer was handed out for a block.
+ */
+kretprobe:bdev_getblk
 /retval != 0/
 {
     $bh = (struct buffer_head *)retval;
