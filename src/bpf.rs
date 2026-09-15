@@ -143,13 +143,18 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
          * removing it.
          *
          * bpftrace prints "Attaching N probes" when it is ready, so:
-         * poll for it, up to fifteen seconds, and say what the file
-         * holds if it never comes.
+         * poll for it and say what the file holds if it never comes.
+         *
+         * A minute, not fifteen seconds: a script with kstack on three
+         * tracepoints took eighteen to compile and attach, and was
+         * reported as failed while it ran for the next twenty-three
+         * minutes. The loop exits as soon as it sees the word, so the
+         * ceiling costs nothing when the probe is quick.
          */
         "sudo pkill -x bpftrace 2>/dev/null; sleep 1; \
          sudo sh -c 'rm -f {remote_out}; \
          setsid bpftrace {remote} > {remote_out} 2>&1 < /dev/null &' ; \
-         for i in $(seq 1 30); do \
+         for i in $(seq 1 120); do \
            if grep -q Attaching {remote_out} 2>/dev/null; then break; fi; \
            if ! pgrep -x bpftrace >/dev/null; then break; fi; \
            sleep 0.5; \
