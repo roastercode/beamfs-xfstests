@@ -1,0 +1,26 @@
+#!/usr/bin/env bpftrace
+/*
+ * Does iomap_end run, and with what.
+ *
+ * generic/013 leaves runs of fifteen and thirty blocks allocated and
+ * never written -- one write's worth each -- and iomap_end was added to
+ * give exactly those back. Either it is not called, or it is called
+ * and declines.
+ */
+BEGIN { printf("watching iomap_end\n"); }
+
+kprobe:beamfs_inline_iomap_begin { @begins = count(); }
+
+kprobe:beamfs_inline_iomap_end
+{
+    @ends = count();
+    $written = (int64)arg3;
+    $length  = (int64)arg2;
+    @by_outcome[$written >= $length ? "full" :
+                ($written < 0 ? "error" : "short")] = count();
+    if ($written < $length && $written >= 0) {
+        @short_len = hist($length - $written);
+    }
+}
+
+kprobe:beamfs_inline_free_blocks_from { @freed_from = count(); }
