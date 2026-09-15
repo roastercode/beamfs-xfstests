@@ -221,11 +221,32 @@ pub fn speak(case: &Case) {
     // A ratelimited message repeats; the same sentence forty times is
     // one finding, and printing it forty times buries the other one.
     let dmesg = read("dmesg");
+    // What treecheck caught in the act, kept apart from the rest.
+    let mut caught: Vec<String> = Vec::new();
     let mut kernel: Vec<String> = Vec::new();
     for line in dmesg.lines() {
         let Some(i) = line.find("beamfs") else { continue };
         let msg = &line[i..];
         // Mount and unmount lines are the run working, not a finding.
+        /*
+         * What the filesystem's own checker caught, first and whole.
+         *
+         * treecheck prints LOST POINTER with the parent, the slot, who
+         * put the pointer there and who found it gone -- the defect
+         * named at the moment it happens, which is what every probe in
+         * this harness is trying to reconstruct afterwards.
+         *
+         * It fired on generic/083 and generic/476 in one sweep and the
+         * summary said nothing, because the loop below keeps the first
+         * few of each shape and these were neither first nor frequent.
+         */
+        if msg.contains("LOST POINTER") || msg.contains("treecheck:") {
+            if !msg.contains("no lost pointer") {
+                caught.push(msg.trim().to_string());
+            }
+            continue;
+        }
+
         if msg.contains("mounted v") || msg.contains("bitmaps initialized")
             || msg.contains("module loaded") || msg.contains("unmounting") {
             continue;
@@ -252,6 +273,16 @@ pub fn speak(case: &Case) {
         }
         if kernel.len() > 6 {
             println!("      and {} more kind(s), in dmesg", kernel.len() - 6);
+        }
+    }
+
+    if !caught.is_empty() {
+        println!("    the filesystem's own checker caught it happening:");
+        for c in caught.iter().take(6) {
+            println!("      {c}");
+        }
+        if caught.len() > 6 {
+            println!("      and {} more, in dmesg", caught.len() - 6);
         }
     }
 
