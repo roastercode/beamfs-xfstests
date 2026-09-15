@@ -1,0 +1,62 @@
+#!/usr/bin/env bpftrace
+/*
+ * Two buffers for one block, or one buffer changing under a reader.
+ *
+ * treecheck says a slot held 18806 and was read as 0, in the same
+ * function and for the same inode, with the write order forced -- so
+ * the block was on the medium when the second read returned zero.
+ * Something between the two is not what the first one wrote.
+ *
+ * Two shapes, and this tells them apart:
+ *
+ *   - two buffer_heads for the same block number, one holding what was
+ *     written and the other what the medium held before it
+ *   - one buffer_head whose contents changed, which means it was
+ *     invalidated and re-read
+ *
+ * The first shows as two addresses for one block. The second as one
+ * address appearing twice with a gap where nothing read it.
+ */
+
+BEGIN { printf("watching buffers for indirect blocks\n"); }
+
+/*
+ * Every buffer handed out for a block, by block number.
+ *
+ * @seen counts distinct addresses: bpftrace has no set, so the count
+ * of a map keyed on (block, address) is the number of distinct pairs.
+ */
+kretprobe:__bread_gfp
+/retval != 0/
+{
+    $bh = (struct buffer_head *)retval;
+    @bufs[$bh->b_blocknr, (uint64)retval] = count();
+    @reads = count();
+}
+
+kretprobe:__getblk_gfp
+/retval != 0/
+{
+    $bh = (struct buffer_head *)retval;
+    @bufs[$bh->b_blocknr, (uint64)retval] = count();
+    @gets = count();
+}
+
+/* A buffer dropped: the next reader gets a fresh one. */
+kprobe:invalidate_bh_lru { @invalidated = count(); }
+kprobe:__brelse         { @released = count(); }
+
+/*
+ * And the moment treecheck catches it, so the capture can be lined up
+ * against the block it names.
+ */
+kprobe:beamfs_tc_store
+{
+    @stores = count();
+}
+
+END
+{
+    printf("\nbuffers per block, where more than one address appeared:\n");
+    print(@bufs, 40);
+}
