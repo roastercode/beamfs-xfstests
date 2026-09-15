@@ -232,6 +232,7 @@ fn prepare(c: &NodeConn, mkfs_opts: &str) -> Result<String, String> {
          done; \
          mkdir -p /mnt/test /mnt/scratch; \
          rm -f /usr/xfstests/results/generic/*.full /usr/xfstests/results/generic/*.out.bad; \
+         sed -i \"s|^export MKFS_OPTIONS=.*|export MKFS_OPTIONS=\\\"-N 16384 {mkfs_opts}\\\"|\" /usr/xfstests/local.config; \
          mkfs.beamfs {mkfs_opts} /dev/vdb >/dev/null 2>&1; \
          mount -t beamfs /dev/vdb /mnt/test; \
          dmesg -C; \
