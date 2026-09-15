@@ -26,12 +26,24 @@ BEGIN { printf("watching buffers for indirect blocks\n"); }
  * @seen counts distinct addresses: bpftrace has no set, so the count
  * of a map keyed on (block, address) is the number of distinct pairs.
  */
+/*
+ * Only the indirection region, and only the address.
+ *
+ * Every buffer for every block filled 80 MB and answered a question
+ * nobody asked. The blocks that matter sit just above data_start,
+ * where indirect blocks are allocated first, and what matters about
+ * them is how many distinct addresses one block saw -- not how many
+ * times each was handed out.
+ */
 kretprobe:__bread_gfp
 /retval != 0/
 {
     $bh = (struct buffer_head *)retval;
-    @bufs[$bh->b_blocknr, (uint64)retval] = count();
     @reads = count();
+    if ($bh->b_blocknr >= 18440 && $bh->b_blocknr < 18900) {
+        @addrs[$bh->b_blocknr] = count();
+        @seen[$bh->b_blocknr, (uint64)retval] = 1;
+    }
 }
 
 /*
@@ -44,8 +56,11 @@ kretprobe:bdev_getblk
 /retval != 0/
 {
     $bh = (struct buffer_head *)retval;
-    @bufs[$bh->b_blocknr, (uint64)retval] = count();
     @gets = count();
+    if ($bh->b_blocknr >= 18440 && $bh->b_blocknr < 18900) {
+        @addrs[$bh->b_blocknr] = count();
+        @seen[$bh->b_blocknr, (uint64)retval] = 1;
+    }
 }
 
 /* A buffer dropped: the next reader gets a fresh one. */
@@ -61,8 +76,27 @@ kprobe:beamfs_tc_store
     @stores = count();
 }
 
+/*
+ * The moment treecheck catches one, and what the block's buffers were.
+ *
+ * 80 MB of every buffer for every block answers a question nobody
+ * asked. What matters is the handful of blocks a LOST POINTER names,
+ * and those are known only when it fires -- so the map stays, and this
+ * prints the entry for the block in question when it does.
+ *
+ * beamfs_tc_store's third argument is the parent block: the one whose
+ * slot was read as zero.
+ */
+kprobe:beamfs_tc_store
+/arg2 != 0/
+{
+    @watch[arg2] = count();
+}
+
 END
 {
-    printf("\nbuffers per block, where more than one address appeared:\n");
-    print(@bufs, 40);
+    printf("\ndistinct buffer addresses per indirect block:\n");
+    print(@seen, 60);
+    printf("\nparent blocks treecheck stored into:\n");
+    print(@watch, 20);
 }
