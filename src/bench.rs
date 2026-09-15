@@ -49,6 +49,14 @@ use crate::node::NodeConn;
 struct Attempt {
     trial: Trial,
     aborted: bool,
+    /// The budget ran out and the shell killed it.
+    ///
+    /// Not a failure and not an abort: a test that was still working
+    /// when it was stopped. generic/074 hit 1870 seconds and BX kept
+    /// its evidence as if the filesystem had been found inconsistent
+    /// -- 663 out-of-range pointers in a volume photographed mid-write,
+    /// which is a picture of the interruption, not of a defect.
+    killed: bool,
     /// What the harness objected to, empty when it passed.
     reason: String,
     /// Everything check printed, kept whole rather than filtered: the
@@ -325,6 +333,15 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
     // verdict. Counting it as a failure is how a stale mount became an
     // afternoon of chasing a defect that was not there.
     let aborted = out.contains("aborting");
+    /*
+     * The shell reports its own kill, not the test's.
+     *
+     * "Killed" with the timeout's pid is what a budget running out
+     * looks like from here, and the volume at that moment is one that
+     * was being written when it stopped.
+     */
+    let killed = out.contains("Killed")
+        && (out.contains("timeout -k") || out.contains("./check"));
     // Whether the check ran at all. Without it, a count of zero means
     // the question was never asked.
     let (checked, _) = c
@@ -421,6 +438,7 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
     Ok(Attempt {
         trial: Trial { passed, lost, violations, secs: t0.elapsed().as_secs() },
         aborted,
+        killed,
         output: out.clone(),
         // Carried rather than printed: the indicator owns the current
         // line until finish() clears it, and a println here lands on
@@ -1209,6 +1227,8 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     // missing reads, at analysis time, exactly like one that saw
     // nothing -- and on 2026-09-13 the difference cost an afternoon.
     let mut probe_missing: Vec<String> = Vec::new();
+    // Tests the budget stopped rather than defects.
+    let mut killed_tests: Vec<String> = Vec::new();
     // Things that went wrong with the apparatus rather than with the
     // filesystem.
     //
@@ -1511,6 +1531,10 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         // Kept whichever way it went: a pass is a zero, and a test
         // that loses nothing this time and 333 the next is the same
         // race as one that loses 3 and 333.
+        if t.killed {
+            killed_tests.push(test.clone());
+        }
+
         crate::history::losses::record(test, t.trial.lost);
 
 
@@ -1523,6 +1547,12 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         evidence::collect(cfg, node, &case, &t.output);
         evidence::speak(&case);
         produced.push(case.dir.clone());
+        if t.killed {
+            println!("    the budget ran out and the shell killed it: \
+                      the volume below was being written when it stopped, \
+                      so what the checker finds in it is the interruption");
+        }
+
         if !t.trial.passed {
             if !t.reason.is_empty() {
                 println!("    reason: {}", t.reason);
@@ -1654,6 +1684,15 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         println!();
         println!("  numbers from a run with a broken apparatus are not");
         println!("  findings: fix the above and measure again.");
+    }
+    if !killed_tests.is_empty() {
+        println!();
+        println!("  stopped by the budget, not by a defect:");
+        for t in &killed_tests {
+            println!("    {t}");
+        }
+        println!("  what a checker finds in a volume stopped mid-write is");
+        println!("  the interruption, not a finding.");
     }
     if !probe_missing.is_empty() {
         println!();
