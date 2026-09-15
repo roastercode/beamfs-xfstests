@@ -140,6 +140,26 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
     let out = conn.run(&cmd, Duration::from_secs(45))
         .map_err(|e| format!("start {script}: {e:?}"))?;
     if !out.contains("BX_ATTACHED") {
+        /*
+         * Kept anyway.
+         *
+         * The check can be wrong -- it looks for one word in output
+         * that a warning can push out of reach -- and the capture is
+         * on the node either way. Ten sweeps went by with the probe
+         * attached, the capture sitting there, and the harness
+         * reporting that the script had not arrived.
+         */
+        let keep = std::path::Path::new("/tmp")
+            .join(format!("bpf-{script}-unclaimed.txt"));
+        if conn.pull(&remote_out, &keep.to_string_lossy()).is_ok() {
+            if let Ok(m) = std::fs::metadata(&keep) {
+                if m.len() > 0 {
+                    println!("    {script}: the capture is at {} ({} bytes)",
+                             keep.display(), m.len());
+                }
+            }
+        }
+
         // What bpftrace said, not that something went wrong.
         //
         // The first version reported "did not attach: failed" and the
@@ -157,9 +177,18 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
         // the push had failed and there was no script on the node to
         // run. What the harness knows is that it could not tell, and
         // saying so sends the reader to the right place.
+        /*
+         * What the node actually said.
+         *
+         * "may not have reached the node" was printed ten times in one
+         * sweep while the script sat on the node and bpftrace was
+         * attached to it: the check looks for "Attaching" and the
+         * capture had scrolled past it, or a warning came first. A
+         * message that names the wrong cause is worse than none.
+         */
         return Err(if why.is_empty() {
-            format!("{script}: no output at all -- \
-                     the script may not have reached the node")
+            format!("{script}: the node gave no sign either way -- \
+                     the capture is in the case directory")
         } else {
             format!("{script}: {}", why.join(" | "))
         });
