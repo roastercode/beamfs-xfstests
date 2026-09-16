@@ -248,6 +248,38 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
                            String::from_utf8_lossy(&out.stderr).trim()));
     }
 
+    /*
+     * And it is the same image, byte for byte.
+     *
+     * cp reports success on a short write to a full filesystem, and
+     * the node then boots whatever was there before: six hours of
+     * measurements went into a rootfs from an earlier build, with
+     * deploy saying "the node is ready" each time. The tools are
+     * checksummed after transfer for exactly this reason and the root
+     * filesystem -- the larger thing, and the one carrying the
+     * kernel's own format -- was not.
+     */
+    {
+        let want = md5(&image).ok_or("cannot hash the built image")?;
+        let got = Command::new("sudo")
+            .args(["md5sum", &target])
+            .output()
+            .map_err(|e| format!("md5sum on the node image: {e}"))?;
+        let got = String::from_utf8_lossy(&got.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if got != want {
+            return Err(format!(
+                "the image on the node is not the one just built: \
+                 {} against {}", got, want));
+        }
+        println!("  rootfs  : {} ({} bytes)",
+                 &want[..12.min(want.len())],
+                 std::fs::metadata(&image).map(|m| m.len()).unwrap_or(0));
+    }
+
     // The old host key, before the node comes back with a new one.
     //
     // Everything here passes UserKnownHostsFile=/dev/null, but an
