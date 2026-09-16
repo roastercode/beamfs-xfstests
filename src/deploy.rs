@@ -350,7 +350,48 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
                   Duration::from_secs(30));
 
     let k = c.run("uname -r", Duration::from_secs(20)).unwrap_or_default();
-    println!("  kernel  : {}", k.trim());
+
+    /*
+     * Which build, not which version.
+     *
+     * uname -r is 7.3.0-rc2 for every build of the day, and
+     * /proc/version carries a KBUILD_BUILD_TIMESTAMP Yocto pins, so
+     * neither tells two kernels apart. The symbol table does: every
+     * build lays it out differently, and a node still running the
+     * previous one answers with a different hash.
+     *
+     * A node booted before the kernel was built ran a day of
+     * measurements against code none of the fixes were in.
+     */
+    let sym = c.run("sudo md5sum /proc/kallsyms | cut -d' ' -f1",
+                    Duration::from_secs(30))
+        .unwrap_or_default();
+    let sym = sym.trim();
+    println!("  kernel  : {} ({})", k.trim(),
+             &sym[..12.min(sym.len())]);
+
+    {
+        let built = std::path::Path::new(
+            "/home/aurelien/yocto/poky/build-qemux86/tmp/deploy/images/qemux86-64/bzImage");
+        let age = std::fs::metadata(built)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| d.as_secs());
+        let boot = c.run("cut -d. -f1 /proc/uptime", Duration::from_secs(20))
+            .unwrap_or_default()
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(0);
+
+        if let Some(age) = age {
+            if boot > age {
+                return Err(format!(
+                    "the node booted {boot}s ago and the kernel was built \
+                     {age}s ago: it is running the previous one"));
+            }
+        }
+    }
 
     // Written down, so the next command does not ask again.
     //
