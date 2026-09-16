@@ -318,8 +318,19 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
     // The step file the indicator reads. Without it every trial shows
     // "start" for its whole duration and the spinner calls a healthy
     // three-minute run STALLED.
+    /*
+     * And the ring, so what follows belongs to this test.
+     *
+     * dmesg was cleared once at deploy and read as "tail -200" after
+     * every trial, so a case's evidence carried whatever the previous
+     * cases had said. generic/360 came with an uncorrectable subblock
+     * timestamped two hours before it ran, and it was read as its own.
+     *
+     * A kernel message is only evidence when it can be dated to the
+     * test that produced it.
+     */
     let _ = c.run(
-        "sudo sh -c 'echo check > /tmp/beamfs-step'",
+        "sudo sh -c 'echo check > /tmp/beamfs-step; dmesg -C'",
         Duration::from_secs(20),
     );
     let (out, _rc) = c
@@ -719,8 +730,13 @@ pub fn run(
             during: after.delta(&before),
             before,
             after,
+            /*
+             * The whole ring, not the last 200 lines: it was cleared
+             * when this trial started, so everything in it is this
+             * trial's. A tail would cut the beginning of a noisy one.
+             */
             dmesg: c
-                .run("sudo dmesg | tail -200", Duration::from_secs(30))
+                .run("sudo dmesg", Duration::from_secs(30))
                 .unwrap_or_default(),
         });
         if t.trial.passed {
