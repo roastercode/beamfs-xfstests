@@ -1,0 +1,56 @@
+#!/usr/bin/env bpftrace
+/*
+ * A block allocated, placed in the tree, and never written.
+ *
+ * generic/013 ends with 32 such blocks in four runs, the longest of
+ * fifteen, all belonging to one inode -- and the kernel says nothing:
+ * no lost pointer, no uncorrectable subblock, no failed encode. The
+ * allocation succeeded, the slot took the pointer, and the data never
+ * arrived.
+ *
+ * Fifteen consecutive blocks is one write's worth. So: which blocks
+ * are allocated, which are sealed, and what is in the difference.
+ */
+
+BEGIN { printf("allocated, placed, and never sealed\n"); }
+
+tracepoint:beamfs:beamfs_block_alloc
+{
+    @allocs = count();
+    @live[args.blk] = args.ino;
+}
+
+/*
+ * Sealing is what puts bytes and parity into a data block. A block
+ * that is never sealed is one nothing ever wrote.
+ */
+kprobe:beamfs_seal_data_block
+{
+    @seals = count();
+}
+
+kretprobe:beamfs_seal_data_block
+{
+    @sealed_ok = count();
+}
+
+tracepoint:beamfs:beamfs_block_free
+{
+    @frees = count();
+    if (@live[args.blk]) {
+        delete(@live[args.blk]);
+    }
+}
+
+/*
+ * Writeback: how many blocks a single writeback_range covers, and how
+ * many it seals. If a range maps fifteen blocks and seals one, that is
+ * the shape of the leak.
+ */
+kprobe:beamfs_inline_writeback_range { @wb_calls = count(); }
+
+END
+{
+    printf("\nstill live at the end, by inode:\n");
+    print(@live, 40);
+}
