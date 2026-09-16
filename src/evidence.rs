@@ -443,7 +443,20 @@ fn implicated_devices(output: &str, node: &Node) -> Vec<String> {
         }
     }
 
+    /*
+     * Both, when the output does not say which.
+     *
+     * "filesystem on /dev/vdX is inconsistent" names the volume; an
+     * output mismatch names nothing, and the scratch alone was kept.
+     * generic/013 fails that way and its defect was on the test
+     * device: the frozen image showed two inodes on a volume that had
+     * just been reformatted, and an afternoon went into reading it.
+     *
+     * A gigabyte each, compressed to a few megabytes. Keeping the one
+     * that does not matter costs less than missing the one that does.
+     */
     if devs.is_empty() {
+        devs.push(node.test_dev.trim_start_matches("/dev/").to_string());
         devs.push(node.scratch_dev.trim_start_matches("/dev/").to_string());
     }
     devs
