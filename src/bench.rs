@@ -252,8 +252,10 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str)
          sed -i \"s|^export FSTYP=.*|export FSTYP={fstyp}|\" /usr/xfstests/local.config; \
          {mkfs} /dev/vdb >/dev/null 2>&1; \
          mount -t {fstyp} /dev/vdb /mnt/test; \
+         if [ -e /sys/kernel/debug/kcsan ]; then echo on > /sys/kernel/debug/kcsan; fi; \
          dmesg -C; \
-         printf \"mounts=%s\\n\" \"$(mount | grep -cE \"vdb|vdc\")\"'"
+         printf \"kcsan=%s\\n\" \"$(cat /sys/kernel/debug/kcsan 2>/dev/null | head -1)\"; \
+         printf \"mounts=%s\\n\" \"$(mount | grep -cE \" /mnt/test | /mnt/scratch \")\"'"
     );
     c.run(&cmd, Duration::from_secs(180)).map_err(|e| e.to_string())
 }
