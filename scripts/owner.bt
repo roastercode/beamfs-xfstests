@@ -1,0 +1,60 @@
+#!/usr/bin/env bpftrace
+/*
+ * Who owns each block that is still allocated.
+ *
+ * fsck names the blocks a test leaked -- "136 used-but-unreferenced" --
+ * and nothing says which inode obtained them. The allocator knows, at
+ * the moment it hands the block out, and then forgets.
+ *
+ * This keeps that one fact and nothing else: a block that has been
+ * allocated and not freed maps to the inode it was given to. At the
+ * end, every block a test left allocated is listed with its owner, and
+ * the leaked blocks are a subset of that list.
+ *
+ * Why not alloc.bt: that script deletes the entry as soon as the block
+ * is stored in a slot, which answers "what was never put anywhere". The
+ * blocks lost here were put somewhere -- their pointer sits in an
+ * indirect block that later reads as undescribed -- so alloc.bt forgets
+ * them at the moment they start mattering.
+ *
+ * Size. The map holds live blocks, not allocations: 51528 allocations
+ * in one generic/013, but the two counters below say how many of those
+ * were freed. bpftrace caps a map at 4096 keys unless
+ * BPFTRACE_MAX_MAP_KEYS says otherwise, and past the cap it prints
+ * "Map full; can't update element" and carries on with a map that is
+ * missing entries it never mentions again. @allocs against the size of
+ * the printed map is what says whether that happened, so both are
+ * printed and neither is a guess.
+ *
+ * BX_TEST_DEV and BX_SCRATCH_DEV are replaced by beamfs-xfstests with
+ * the dev_t of this node's two volumes. Without the filter the node's
+ * own beamfs root is counted too, and an earlier run attributed 62 of
+ * 64 live blocks to inode 27192 of /dev/vda -- a different filesystem.
+ */
+
+BEGIN { printf("owner of every block still allocated\n"); }
+
+tracepoint:beamfs:beamfs_block_alloc
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    @owner[args.blk] = args.ino;
+    @allocs = count();
+}
+
+tracepoint:beamfs:beamfs_block_free
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    delete(@owner[args.blk]);
+    @frees = count();
+}
+
+/*
+ * Printed whole. A list that stops at twenty entries for a leak of a
+ * hundred and thirty-six is not a list of the leak.
+ */
+END
+{
+    printf("\nblock -> owning inode, every block still allocated:\n");
+    print(@owner);
+    printf("\n");
+}

@@ -254,7 +254,7 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
          */
         "sudo pkill -x bpftrace 2>/dev/null; sleep 1; \
          sudo sh -c 'rm -f {remote_out}; \
-         setsid bpftrace {remote} > {remote_out} 2>&1 < /dev/null &' ; \
+         setsid env BPFTRACE_MAX_MAP_KEYS=1000000 bpftrace {remote} > {remote_out} 2>&1 < /dev/null &' ; \
          for i in $(seq 1 {ticks}); do \
            if grep -q Attaching {remote_out} 2>/dev/null; then break; fi; \
            if ! pgrep -x bpftrace >/dev/null; then break; fi; \
@@ -368,8 +368,24 @@ impl Running {
 /// Narrow on purpose: the lines a script prints when it sees the thing
 /// it watches for, and the totals. The histograms and the per-block
 /// maps stay in the file.
+/// Whether bpftrace dropped entries it will never mention again.
+///
+/// A map past its key limit prints this once and carries on. Everything
+/// printed afterwards looks like a complete answer and is not one, so a
+/// script whose output says this has produced no usable list -- only a
+/// lower bound.
+pub fn map_overflowed(text: &str) -> bool {
+    text.contains("Map full")
+}
+
 pub fn speak(path: &Path) {
     let Ok(text) = std::fs::read_to_string(path) else { return };
+
+    if map_overflowed(&text) {
+        println!("    {} OVERFLOWED its map: what follows is incomplete, \
+                  and how incomplete is not knowable from it",
+                 path.file_name().unwrap_or_default().to_string_lossy());
+    }
 
     let mut findings: Vec<&str> = Vec::new();
     let mut totals: Vec<&str> = Vec::new();
@@ -483,5 +499,21 @@ mod attach_tests {
     #[test]
     fn ticks_are_half_seconds() {
         assert_eq!(attach_ticks(), ATTACH_SECS * 2);
+    }
+}
+
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    #[test]
+    fn a_full_map_is_recognised() {
+        assert!(map_overflowed("Map full; can't update element\n@owner[12]: 3\n"));
+    }
+
+    #[test]
+    fn an_ordinary_capture_is_not_an_overflow() {
+        assert!(!map_overflowed("Attaching 2 probes...\n@owner[12]: 3\n"));
     }
 }
