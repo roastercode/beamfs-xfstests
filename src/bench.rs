@@ -248,7 +248,7 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str)
              echo \"export DUMP_CORRUPT_FS=1\" >> /usr/xfstests/local.config; \
            printf \"dumpfs=yes\\n\"; \
          else printf \"dumpfs=no\\n\"; fi; \
-         sed -i \"s|^export MKFS_OPTIONS=.*|export MKFS_OPTIONS=\\\"-N 16384 {mkfs_opts}\\\"|\" /usr/xfstests/local.config; \
+         sed -i \"s|^export MKFS_OPTIONS=.*|export MKFS_OPTIONS=\\\"{mkfs_opts}\\\"|\" /usr/xfstests/local.config; \
          sed -i \"s|^export FSTYP=.*|export FSTYP={fstyp}|\" /usr/xfstests/local.config; \
          {mkfs} /dev/vdb >/dev/null 2>&1; \
          mount -t {fstyp} /dev/vdb /mnt/test; \
@@ -1037,6 +1037,18 @@ fn append_record(test: &str, n: u32, t: &Trial, during: &crate::state::Snapshot)
 }
 
 
+/// Whether a selection names a test family rather than a group or a test.
+///
+/// "generic" is a directory under tests/, not a group: ./check -n -g
+/// generic answers "Group \"generic\" is empty or not defined?" and
+/// lists nothing. The full-campaign runner never hit this because it
+/// enumerates by listing that directory. A sweep asked for every test
+/// of a family should do the same rather than report an empty harness.
+pub fn is_family(selection: &str) -> bool {
+    !selection.is_empty()
+        && selection.chars().all(|c| c.is_ascii_lowercase())
+}
+
 /// The tests a selection covers, as the harness itself resolves it.
 ///
 /// ./check -n prints what it would run and runs nothing. Parsing that
@@ -1044,12 +1056,21 @@ fn append_record(test: &str, n: u32, t: &Trial, during: &crate::state::Snapshot)
 /// own exclusions, its group files and its _requires, and a list built
 /// here would disagree with it in ways that only show up as spurious
 /// failures.
+///
+/// A family is the exception, because there is nothing for the harness
+/// to resolve: it is a directory, no group of that name exists, and
+/// ./check lists nothing. There the directory is read directly, which
+/// is also what the full-campaign runner does.
 fn enumerate_tests(c: &NodeConn, selection: &str) -> Result<Vec<String>, String> {
+    let cmd = if is_family(selection) {
+        format!(
+            "ls /usr/xfstests/tests/{selection}/[0-9]*.out 2>/dev/null \
+             | sed 's|.*/||; s|\\.out$||; s|^|{selection}/|'")
+    } else {
+        format!("cd /usr/xfstests && sudo ./check -n {selection} 2>&1 || true")
+    };
     let (out, _) = c
-        .run_rc(
-            &format!("cd /usr/xfstests && sudo ./check -n {selection} 2>&1 || true"),
-            Duration::from_secs(300),
-        )
+        .run_rc(&cmd, Duration::from_secs(300))
         .map_err(|e| e.to_string())?;
 
     let mut v: Vec<String> = out
@@ -1774,6 +1795,15 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_family_is_not_a_group() {
+        assert!(is_family("generic"));
+        assert!(is_family("shared"));
+        assert!(!is_family("generic/013"));
+        assert!(!is_family("-g auto"));
+        assert!(!is_family(""));
+    }
 
     fn r(p: usize, f: usize, a: usize) -> Run {
         Run { commit: "abc".into(), test: "generic/464".into(),
