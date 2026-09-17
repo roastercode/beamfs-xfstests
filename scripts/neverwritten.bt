@@ -8,8 +8,13 @@
  * allocation succeeded, the slot took the pointer, and the data never
  * arrived.
  *
- * Fifteen consecutive blocks is one write's worth. So: which blocks
- * are allocated, which are sealed, and what is in the difference.
+ * Fifteen consecutive blocks is one write's worth. So: how many
+ * blocks are allocated, how many are freed, how many are sealed,
+ * and which inodes those belong to.
+ *
+ * Counts rather than a list of blocks: 51528 allocations in one
+ * generic/013 overflow a bpftrace map, and a list that silently
+ * stops being a list is worse than a number.
  */
 
 /*
@@ -28,7 +33,16 @@ tracepoint:beamfs:beamfs_block_alloc
 /args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
 {
     @allocs = count();
-    @live[args.dev, args.blk] = args.ino;
+    /*
+     * Counted, not listed.
+     *
+     * 51528 allocations in one generic/013 overflow the map and
+     * bpftrace drops the rest: "Map full; can't update element".
+     * A list that silently stops being a list is worse than a
+     * number, and the number answers the question -- allocated
+     * and freed in equal counts, or not.
+     */
+    @alloc_by_ino[args.ino] = count();
 }
 
 /*
@@ -40,20 +54,29 @@ kprobe:beamfs_seal_data_block
  ((struct super_block *)arg0)->s_dev == BX_SCRATCH_DEV/
 {
     @seals = count();
+    @sealing[tid] = 1;
 }
 
+/*
+ * The return, filtered like its entry.
+ *
+ * A kretprobe has no arguments to filter on, so the entry records
+ * that this thread is sealing a block of a volume under test and
+ * the return reads that. Unfiltered it counted the node's root
+ * too, and reported 145027 returns for 141666 calls.
+ */
 kretprobe:beamfs_seal_data_block
+/@sealing[tid]/
 {
     @sealed_ok = count();
+    delete(@sealing[tid]);
 }
 
 tracepoint:beamfs:beamfs_block_free
 /args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
 {
     @frees = count();
-    if (@live[args.dev, args.blk]) {
-        delete(@live[args.dev, args.blk]);
-    }
+    @freed_by_ino[args.ino] = count();
 }
 
 /*
@@ -61,10 +84,17 @@ tracepoint:beamfs:beamfs_block_free
  * many it seals. If a range maps fifteen blocks and seals one, that is
  * the shape of the leak.
  */
-kprobe:beamfs_inline_writeback_range { @wb_calls = count(); }
+kprobe:beamfs_inline_writeback_range
+/((struct iomap_writepage_ctx *)arg0)->inode->i_sb->s_dev == BX_TEST_DEV ||
+ ((struct iomap_writepage_ctx *)arg0)->inode->i_sb->s_dev == BX_SCRATCH_DEV/
+{
+    @wb_calls = count();
+}
 
 END
 {
-    printf("\nstill live at the end, by inode:\n");
-    print(@live, 40);
+    printf("\nallocated and freed, by inode:\n");
+    print(@alloc_by_ino, 20);
+    print(@freed_by_ino, 20);
+    clear(@sealing);
 }
