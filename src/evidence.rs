@@ -207,6 +207,29 @@ pub fn restore(cfg: &Config, node: &Node, test: &str) {
 /// rather than in a directory. Deliberately narrow: the kernel's own
 /// complaints, and the checker's named blocks. Everything else is in
 /// the files.
+/// The largest inode count a checker reported in @text.
+fn inodes_walked(text: &str) -> Option<u64> {
+    text.match_indices("inode(s) walked")
+        .filter_map(|(i, _)| {
+            text[..i]
+                .rsplit(|c: char| !c.is_ascii_digit())
+                .find(|w| !w.is_empty())
+                .and_then(|w| w.parse::<u64>().ok())
+        })
+        .max()
+}
+
+/// Did the volume get remade between the two checkers?
+///
+/// Returns the two inode counts when the one read afterwards is a
+/// small fraction of the one read during the test, which is what a
+/// fresh mkfs looks like: two inodes against sixteen hundred.
+fn remade_after(full: &str, fsck: &str) -> Option<(u64, u64)> {
+    let during = inodes_walked(full)?;
+    let after = inodes_walked(fsck)?;
+    (during > 16 && after * 8 < during).then_some((during, after))
+}
+
 pub fn speak(case: &Case) {
     let read = |name: &str| -> String {
         std::fs::read_to_string(case.dir.join(name)).unwrap_or_default()
@@ -287,7 +310,29 @@ pub fn speak(case: &Case) {
     }
 
     // What the checker named.
+    //
+    // Two checkers run over the same device and they do not always see
+    // the same volume. xfstests runs its own from _check_generic_-
+    // filesystem while the test is still finishing, and remakes the
+    // TEST_DEV when that check fails so the next test starts from a
+    // sound one. The harness's fsck runs after that, and then reads a
+    // volume nobody tested.
+    //
+    // One generic/013 had 96 used-but-unreferenced blocks over 1637
+    // inodes in full, and "bitmap consistent with inode table" over 2
+    // inodes in fsck.verbose. Both were true of the device they saw.
+    // Reading the second as the test's verdict is how a run with 96
+    // leaked blocks was called clean.
+    //
+    // The inode counts tell them apart, so say so rather than print a
+    // verdict that belongs to a fresh volume.
     let fsck = read("fsck.verbose");
+    let full = read("full");
+    if let Some((during, after)) = remade_after(&full, &fsck) {
+        println!("    fsck.verbose describes a volume that was remade \
+                  after the test: {after} inode(s) against {during} \
+                  during it -- the verdict is the one in full");
+    }
     let mut named: Vec<&str> = Vec::new();
     for line in fsck.lines() {
         if line.contains("never described")
@@ -824,5 +869,41 @@ mod collapse_tests {
     fn nothing_is_lost_when_nothing_repeats() {
         let body = "[1.0] A\n[1.1] B\n[1.2] C\n";
         assert_eq!(Case::collapse(body).lines().count(), 3);
+    }
+}
+
+#[cfg(test)]
+mod remade_tests {
+    use super::*;
+
+    /// The run that was called clean while it had leaked 96 blocks.
+    #[test]
+    fn a_volume_remade_between_the_two_checkers_is_named() {
+        let full = "fsck.beamfs: pass 3: inode table OK (1637 inode(s) walked)\n\
+                    fsck.beamfs: pass 4: 0 referenced-but-free, 96 \
+                    used-but-unreferenced block(s)";
+        let fsck = "fsck.beamfs: pass 3: inode table OK (2 inode(s) walked)\n\
+                    fsck.beamfs: pass 4: bitmap consistent with inode table";
+        assert_eq!(remade_after(full, fsck), Some((1637, 2)));
+    }
+
+    #[test]
+    fn the_same_volume_twice_is_not_reported() {
+        let t = "fsck.beamfs: pass 3: inode table OK (282 inode(s) walked)";
+        assert_eq!(remade_after(t, t), None);
+    }
+
+    /// A test that creates almost nothing leaves counts too close to
+    /// tell apart, and a false alarm there would discredit the real one.
+    #[test]
+    fn a_small_test_is_left_alone() {
+        let full = "pass 3: inode table OK (12 inode(s) walked)";
+        let fsck = "pass 3: inode table OK (2 inode(s) walked)";
+        assert_eq!(remade_after(full, fsck), None);
+    }
+
+    #[test]
+    fn a_missing_count_is_not_a_verdict() {
+        assert_eq!(remade_after("nothing here", "pass 3: (2 inode(s) walked)"), None);
     }
 }
