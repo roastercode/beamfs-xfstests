@@ -853,6 +853,20 @@ pub fn run(
 }
 
 /// Print the rate, and what it means against the previous run.
+/// Whether the node's kernel was built with KASAN or KCSAN.
+///
+/// kallsyms, not /proc/config.gz: the image does not build
+/// CONFIG_IKCONFIG and has no zgrep, so the config is not there to
+/// read. The symbols are, and a kernel with a sanitizer carries a few
+/// hundred of them; a handful is a kernel that merely knows the word.
+pub fn carries_sanitizer(c: &NodeConn) -> bool {
+    let out = c
+        .run("sudo grep -ciE 'kasan|kcsan' /proc/kallsyms 2>/dev/null || echo 0",
+             std::time::Duration::from_secs(30))
+        .unwrap_or_default();
+    out.trim().parse::<u64>().unwrap_or(0) > 50
+}
+
 fn report(r: &Run) {
     println!("  === {} at {} ===", r.test, r.commit);
     println!(
@@ -1274,22 +1288,10 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     // long as the last one should not look like a regression.
     //
     // Asked once: the answer does not change during a sweep.
-    {
-        // kallsyms, not /proc/config.gz: the image does not build
-        // CONFIG_IKCONFIG and has no zgrep, so the config is not there
-        // to read. The symbols are, and a kernel with KASAN carries
-        // about two hundred of them.
-        let cfgs = c.run("sudo grep -ciE 'kasan|kcsan' /proc/kallsyms 2>/dev/null || echo 0",
-                         std::time::Duration::from_secs(30))
-            .unwrap_or_default();
-        let n: u64 = cfgs.trim().parse().unwrap_or(0);
-        // A handful of symbols is a kernel that merely knows the word;
-        // a hundred is one built with the sanitizer.
-        if n > 50 {
-            println!("  kernel  : carries a sanitizer, expect it slow");
-        }
-        println!("  budget  : 1900s, and the watcher cuts earlier");
+    if carries_sanitizer(&c) {
+        println!("  kernel  : carries a sanitizer, expect it slow");
     }
+    println!("  budget  : 1900s, and the watcher cuts earlier");
 
     for (i, test) in tests.iter().enumerate() {
         if stopping() {

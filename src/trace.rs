@@ -57,6 +57,18 @@ pub struct Capture {
     pub dir: PathBuf,
 }
 
+/// How long one loop may take.
+///
+/// A loop is mkfs, mount, five seconds of load, unmount and fsck:
+/// median 14s on this node, max 16s. Three hundred seconds was ample
+/// until the kernel carried KCSAN, which runs the machine at a fraction
+/// of its speed; every loop then hit the budget and was reported as the
+/// node being unreachable.
+pub fn loop_budget(sanitizer: bool) -> Duration {
+    const BASE: u64 = 300;
+    Duration::from_secs(if sanitizer { BASE * 4 } else { BASE })
+}
+
 /// Drain the ring and bring it back, with the lost-block list.
 fn pull(c: &NodeConn, dir: &Path, lost: &[u64], scratch: &str)
     -> Result<usize, String> {
@@ -271,6 +283,8 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
     // more than the remaining loops.
     const GIVE_UP_AFTER: u32 = 3;
     let mut failures = 0u32;
+    let budget = loop_budget(crate::bench::carries_sanitizer(&c));
+    println!("  per loop: {}s", budget.as_secs());
     let scratch = format!("/dev/{}", node.scratch_dev);
     let stamp = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -349,7 +363,7 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
         });
         let lost = match load::run_loop(
             &c, &l, &scratch, "/mnt/scratch", "-N 16384",
-            loops % 12 == 1, Duration::from_secs(300),
+            loops % 12 == 1, budget,
         ) {
             Ok(r) => {
                 if r.formatted {
@@ -462,4 +476,19 @@ fn read_step(key: &str, host: &str) -> String {
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn a_plain_kernel_keeps_the_measured_budget() {
+        assert_eq!(loop_budget(false), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn a_sanitizer_kernel_gets_room_to_finish() {
+        assert!(loop_budget(true) > loop_budget(false));
+    }
 }

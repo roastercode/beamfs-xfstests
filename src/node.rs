@@ -33,6 +33,13 @@ pub enum ShardState {
 #[derive(Debug)]
 pub enum NodeError {
     Unreachable(String),
+    /// The connection was made and the command outlived its budget.
+    ///
+    /// Not the same as unreachable, and calling it that sent an
+    /// afternoon looking for a network fault on a node that answered
+    /// ping and had port 22 open: the loop simply took longer than the
+    /// budget allowed, because the kernel under it carries a sanitizer.
+    TimedOut { host: String, secs: u64 },
     /// A command that ran and exited non-zero.
     ///
     /// Both streams are carried. A failing xfstests run writes its
@@ -47,6 +54,9 @@ impl std::fmt::Display for NodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unreachable(h) => write!(f, "{h} unreachable"),
+            Self::TimedOut { host, secs } => {
+                write!(f, "{host} did not finish within its {secs}s budget")
+            }
             Self::Command { rc, stderr, .. } => {
                 // stdout is carried for the caller, not for the message:
                 // a failing test writes megabytes there and an error
@@ -126,7 +136,10 @@ impl<'a> NodeConn<'a> {
 
         // 124 is timeout(1)'s "the command outlived its deadline".
         if out.status.code() == Some(124) {
-            return Err(NodeError::Unreachable(format!("{} timed out", self.node.host)));
+            return Err(NodeError::TimedOut {
+                host: self.node.host.clone(),
+                secs: deadline.as_secs(),
+            });
         }
         if !out.status.success() {
             return Err(NodeError::Command {
@@ -611,5 +624,24 @@ impl<'a> NodeConn<'a> {
              sleep 1; sudo umount -l /mnt/test /mnt/scratch 2>/dev/null; true",
             Duration::from_secs(30),
         );
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn a_budget_overrun_does_not_claim_the_node_is_unreachable() {
+        let e = NodeError::TimedOut { host: "10.0.0.1".into(), secs: 300 };
+        let s = e.to_string();
+        assert!(s.contains("300s"), "{s}");
+        assert!(!s.contains("unreachable"), "{s}");
+    }
+
+    #[test]
+    fn a_node_that_cannot_be_reached_still_says_so() {
+        let e = NodeError::Unreachable("10.0.0.1".into());
+        assert!(e.to_string().contains("unreachable"));
     }
 }
