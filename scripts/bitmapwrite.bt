@@ -24,13 +24,13 @@ BEGIN { printf("bitmap writes, by path\n"); }
 tracepoint:beamfs:beamfs_block_alloc
 /args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
 {
-    @allocs = count();
+    @allocs[args.dev] = count();
 }
 
 tracepoint:beamfs:beamfs_block_free
 /args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
 {
-    @frees = count();
+    @frees[args.dev] = count();
 }
 
 /*
@@ -48,26 +48,41 @@ kprobe:beamfs_write_bitmap_block
 /((struct super_block *)arg0)->s_dev == BX_TEST_DEV ||
  ((struct super_block *)arg0)->s_dev == BX_SCRATCH_DEV/
 {
-    @wbb = count();
+    $dev = ((struct super_block *)arg0)->s_dev;
+    @wbb[$dev] = count();
     if (arg2 == 0) {
-        @wbb_no_owner = count();
+        @wbb_no_owner[$dev] = count();
     } else {
         if (((struct inode *)arg2)->i_state.__state & 0x0100) {
-            @wbb_owner_freeing = count();
+            @wbb_owner_freeing[$dev] = count();
         } else {
-            @wbb_attached = count();
+            @wbb_attached[$dev] = count();
         }
     }
 }
 
 /*
+ * What the two flush paths found and wrote.
+ *
  * beamfs_free_data_blocks, beamfs_put_super and beamfs_sync_fs are
- * static and the compiler inlines them, so kprobe cannot attach and
- * bpftrace refuses the whole script over it. Counting them needs a
- * tracepoint in the kernel, not a probe here.
+ * static and inlined, so kprobe cannot attach to them; the kernel
+ * carries a tracepoint instead. This is where a free that was never
+ * attached to an inode has its last chance of reaching the medium.
  */
+tracepoint:beamfs:beamfs_bitmap_flush
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    @flush[args.dev, str(args.where)] = count();
+    @flush_dirty[args.dev, str(args.where)] = sum(args.dirty);
+    @flush_written[args.dev, str(args.where)] = sum(args.written);
+    if (args.err != 0) {
+        @flush_err[args.dev, str(args.where)] = count();
+    }
+}
+
 
 END
 {
-    printf("\nallocs + frees should equal wbb\n");
+    printf("\nper volume: allocs + frees should equal wbb\n");
+    printf("a free that reaches no inode reaches the medium only here\n");
 }

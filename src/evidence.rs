@@ -207,23 +207,22 @@ pub fn restore(cfg: &Config, node: &Node, test: &str) {
 /// rather than in a directory. Deliberately narrow: the kernel's own
 /// complaints, and the checker's named blocks. Everything else is in
 /// the files.
-/// The largest inode count a checker reported in @text.
+/// How many inodes the checker found to own blocks, in @text.
 ///
-/// Two phrasings, because the two checkers do not print the same one.
-/// Run verbosely the checker says "N inode(s) walked"; run by xfstests
-/// through fsck(8) it prints only its findings and the closing line,
-/// "block ownership OK (N inode(s))". Looking for the first alone made
-/// this say nothing on exactly the run it was written for.
-fn inodes_walked(text: &str) -> Option<u64> {
-    ["inode(s) walked", "inode(s))"]
-        .iter()
-        .flat_map(|pat| {
-            text.match_indices(pat).filter_map(|(i, _)| {
-                text[..i]
-                    .rsplit(|c: char| !c.is_ascii_digit())
-                    .find(|w| !w.is_empty())
-                    .and_then(|w| w.parse::<u64>().ok())
-            })
+/// The pass 6 line and no other. "N inode(s) walked" from pass 3 is
+/// the size of the inode table -- 16384 on every volume of this lab,
+/// full or empty -- and taking the largest number of either phrasing
+/// read 16384 for a freshly made volume against 1602 for the one that
+/// had been tested, which is the comparison backwards. Twice this
+/// check stayed silent on the run it was written for; both times the
+/// pattern had never been tried against a real file.
+fn inodes_owning(text: &str) -> Option<u64> {
+    text.match_indices("block ownership OK (")
+        .filter_map(|(i, pat)| {
+            text[i + pat.len()..]
+                .split(|c: char| !c.is_ascii_digit())
+                .find(|w| !w.is_empty())
+                .and_then(|w| w.parse::<u64>().ok())
         })
         .max()
 }
@@ -234,8 +233,8 @@ fn inodes_walked(text: &str) -> Option<u64> {
 /// small fraction of the one read during the test, which is what a
 /// fresh mkfs looks like: two inodes against sixteen hundred.
 fn remade_after(full: &str, fsck: &str) -> Option<(u64, u64)> {
-    let during = inodes_walked(full)?;
-    let after = inodes_walked(fsck)?;
+    let during = inodes_owning(full)?;
+    let after = inodes_owning(fsck)?;
     (during > 16 && after * 8 < during).then_some((during, after))
 }
 
@@ -888,17 +887,20 @@ mod remade_tests {
     /// The run that was called clean while it had leaked 96 blocks.
     #[test]
     fn a_volume_remade_between_the_two_checkers_is_named() {
-        let full = "fsck.beamfs: pass 3: inode table OK (1637 inode(s) walked)\n\
-                    fsck.beamfs: pass 4: 0 referenced-but-free, 96 \
-                    used-but-unreferenced block(s)";
-        let fsck = "fsck.beamfs: pass 3: inode table OK (2 inode(s) walked)\n\
-                    fsck.beamfs: pass 4: bitmap consistent with inode table";
+        let full = "fsck.beamfs: pass 4: 0 referenced-but-free, 96 \
+                    used-but-unreferenced block(s)\n\
+                    fsck.beamfs: pass 6: directories, links and block \
+                    ownership OK (1637 inode(s))";
+        let fsck = "fsck.beamfs: pass 3: inode table OK (16384 inode(s) walked)\n\
+                    fsck.beamfs: pass 6: directories, links and block \
+                    ownership OK (2 inode(s))";
         assert_eq!(remade_after(full, fsck), Some((1637, 2)));
     }
 
     #[test]
     fn the_same_volume_twice_is_not_reported() {
-        let t = "fsck.beamfs: pass 3: inode table OK (282 inode(s) walked)";
+        let t = "fsck.beamfs: pass 6: directories, links and block \
+                 ownership OK (282 inode(s))";
         assert_eq!(remade_after(t, t), None);
     }
 
@@ -906,8 +908,8 @@ mod remade_tests {
     /// tell apart, and a false alarm there would discredit the real one.
     #[test]
     fn a_small_test_is_left_alone() {
-        let full = "pass 3: inode table OK (12 inode(s) walked)";
-        let fsck = "pass 3: inode table OK (2 inode(s) walked)";
+        let full = "pass 6: block ownership OK (12 inode(s))";
+        let fsck = "pass 6: block ownership OK (2 inode(s))";
         assert_eq!(remade_after(full, fsck), None);
     }
 
@@ -916,7 +918,7 @@ mod remade_tests {
     fn the_closing_line_counts_too() {
         let full = "fsck.beamfs: pass 6: directories, links and block \
                     ownership OK (86 inode(s))";
-        let fsck = "fsck.beamfs: pass 3: inode table OK (2 inode(s) walked)\n\
+        let fsck = "fsck.beamfs: pass 3: inode table OK (16384 inode(s) walked)\n\
                     fsck.beamfs: pass 6: directories, links and block \
                     ownership OK (2 inode(s))";
         assert_eq!(remade_after(full, fsck), Some((86, 2)));
@@ -924,6 +926,6 @@ mod remade_tests {
 
     #[test]
     fn a_missing_count_is_not_a_verdict() {
-        assert_eq!(remade_after("nothing here", "pass 3: (2 inode(s) walked)"), None);
+        assert_eq!(remade_after("nothing here", "block ownership OK (2 inode(s))"), None);
     }
 }
