@@ -1,0 +1,68 @@
+#!/usr/bin/env bpftrace
+/*
+ * Does every change to the bitmap reach the block that carries it?
+ *
+ * generic/013 allocates 51528 blocks and frees 51528 on the volumes
+ * under test, so the bitmap in memory is right, and fsck still reports
+ * blocks marked used that nothing references -- one of them with 0 of
+ * 4096 bytes set, allocated and never written. The change is made and
+ * the medium does not have it.
+ *
+ * beamfs_write_bitmap_block is the one path from a changed bit to the
+ * block that holds it. It is called once per allocation and once per
+ * free, so its count should equal allocs + frees. It also decides
+ * whether the buffer joins an inode's metadata list: owner is NULL on
+ * the free path from beamfs_free_data_blocks, and skipped when the
+ * owner is already I_FREEING, and in both cases nothing marks an inode
+ * to carry it.
+ *
+ * BX_TEST_DEV and BX_SCRATCH_DEV are replaced by beamfs-xfstests.
+ */
+
+BEGIN { printf("bitmap writes, by path\n"); }
+
+tracepoint:beamfs:beamfs_block_alloc
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    @allocs = count();
+}
+
+tracepoint:beamfs:beamfs_block_free
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    @frees = count();
+}
+
+/*
+ * arg0 is the superblock, arg2 the owning inode or NULL.
+ *
+ * I_FREEING is (1U << 8) in include/linux/fs.h, read there rather
+ * than remembered: 0x10 was wrong by a factor of sixteen and would
+ * have matched I_DIRTY_SYNC instead. An owner in that state
+ * takes the same path as no owner at all: the buffer is dirtied and
+ * attached to nothing.
+ */
+kprobe:beamfs_write_bitmap_block
+/((struct super_block *)arg0)->s_dev == BX_TEST_DEV ||
+ ((struct super_block *)arg0)->s_dev == BX_SCRATCH_DEV/
+{
+    @wbb = count();
+    if (arg2 == 0) {
+        @wbb_no_owner = count();
+    } else {
+        if (((struct inode *)arg2)->i_state & 0x0100) {
+            @wbb_owner_freeing = count();
+        } else {
+            @wbb_attached = count();
+        }
+    }
+}
+
+kprobe:beamfs_free_data_blocks { @free_data_blocks_calls = count(); }
+kprobe:beamfs_put_super        { @put_super_calls = count(); }
+kprobe:beamfs_sync_fs          { @sync_fs_calls = count(); }
+
+END
+{
+    printf("\nallocs + frees should equal wbb\n");
+}
