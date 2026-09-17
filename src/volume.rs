@@ -804,6 +804,33 @@ pub fn report_to(r: &VolumeReport, dir: Option<&Path>) {
     println!();
 }
 
+
+/// Inspect a zstd-compressed image without keeping it uncompressed.
+///
+/// The frozen volumes are stored compressed -- a gigabyte of mostly
+/// zeroes is a couple of megabytes -- and decompressing every one to
+/// look at it would fill the disk a campaign is running on.
+pub fn inspect_compressed(path: &Path) -> std::io::Result<VolumeReport> {
+    let tmp = std::env::temp_dir().join(format!(
+        "beamfs-inspect-{}.img",
+        std::process::id()
+    ));
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "zstd -dcf {} > {}",
+            path.display(),
+            tmp.display()
+        ))
+        .status()?;
+    if !status.success() {
+        return Err(std::io::Error::other("could not decompress the image"));
+    }
+    let r = inspect(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,30 +872,4 @@ mod tests {
         let raw = vec![0u8; BLOCK as usize];
         assert!(looks_unwritten(&raw, &geo()).is_none());
     }
-}
-
-/// Inspect a zstd-compressed image without keeping it uncompressed.
-///
-/// The frozen volumes are stored compressed -- a gigabyte of mostly
-/// zeroes is a couple of megabytes -- and decompressing every one to
-/// look at it would fill the disk a campaign is running on.
-pub fn inspect_compressed(path: &Path) -> std::io::Result<VolumeReport> {
-    let tmp = std::env::temp_dir().join(format!(
-        "beamfs-inspect-{}.img",
-        std::process::id()
-    ));
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "zstd -dcf {} > {}",
-            path.display(),
-            tmp.display()
-        ))
-        .status()?;
-    if !status.success() {
-        return Err(std::io::Error::other("could not decompress the image"));
-    }
-    let r = inspect(&tmp);
-    let _ = std::fs::remove_file(&tmp);
-    r
 }

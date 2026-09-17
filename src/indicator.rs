@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn the_thresholds_are_ordered() {
-        assert!(SLOW_AFTER < STALLED_AFTER);
+        const { assert!(SLOW_AFTER < STALLED_AFTER) };
     }
 
     #[test]

@@ -917,45 +917,6 @@ fn report(r: &Run) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn r(p: usize, f: usize, a: usize) -> Run {
-        Run { commit: "abc".into(), test: "generic/464".into(),
-              passed: p, failed: f, aborted: a, lost: vec![] }
-    }
-
-    #[test]
-    fn the_rate_ignores_aborted_trials() {
-        // Eight of ten ran and six passed: 75%, not 60%.
-        let x = r(6, 2, 2);
-        assert_eq!(x.trials(), 8);
-        assert!((x.rate() - 0.75).abs() < 0.001);
-    }
-
-    #[test]
-    fn a_run_with_nothing_that_ran_has_no_rate() {
-        assert_eq!(r(0, 0, 10).rate(), 0.0);
-    }
-
-    #[test]
-    fn a_run_round_trips_through_its_stored_line() {
-        let mut x = r(8, 2, 1);
-        x.lost = vec![28, 609];
-        let y = Run::parse(&x.line()).expect("parses");
-        assert_eq!(y.passed, 8);
-        assert_eq!(y.failed, 2);
-        assert_eq!(y.aborted, 1);
-        assert_eq!(y.lost, vec![28, 609]);
-        assert_eq!(y.commit, "abc");
-    }
-
-    #[test]
-    fn a_line_that_is_short_is_not_a_run() {
-        assert!(Run::parse("abc generic/464").is_none());
-    }
-}
 
 /// Run the same code several times over, and report the spread.
 ///
@@ -1797,4 +1758,44 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         None => println!("  the archive could not be written"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn r(p: usize, f: usize, a: usize) -> Run {
+        Run { commit: "abc".into(), test: "generic/464".into(),
+              passed: p, failed: f, aborted: a, lost: vec![] }
+    }
+
+    #[test]
+    fn the_rate_ignores_aborted_trials() {
+        // Eight of ten ran and six passed: 75%, not 60%.
+        let x = r(6, 2, 2);
+        assert_eq!(x.trials(), 8);
+        assert!((x.rate() - 0.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_run_with_nothing_that_ran_has_no_rate() {
+        assert_eq!(r(0, 0, 10).rate(), 0.0);
+    }
+
+    #[test]
+    fn a_run_round_trips_through_its_stored_line() {
+        let mut x = r(8, 2, 1);
+        x.lost = vec![28, 609];
+        let y = Run::parse(&x.line()).expect("parses");
+        assert_eq!(y.passed, 8);
+        assert_eq!(y.failed, 2);
+        assert_eq!(y.aborted, 1);
+        assert_eq!(y.lost, vec![28, 609]);
+        assert_eq!(y.commit, "abc");
+    }
+
+    #[test]
+    fn a_line_that_is_short_is_not_a_run() {
+        assert!(Run::parse("abc generic/464").is_none());
+    }
 }

@@ -33,6 +33,31 @@ fi
 [ "$RESUME" = "1" ] || : > $R
 touch $R
 
+# KCSAN is compiled in but not enabled at boot: CONFIG_KCSAN_EARLY_ENABLE
+# is off, because watching from the first instruction means the whole of
+# init runs at a fraction of speed before anything worth watching
+# happens. The file exists only on a kernel built with CONFIG_KCSAN, so
+# a kernel without it is unaffected and no switch has to be passed.
+if [ -e /sys/kernel/debug/kcsan ]; then
+	sudo sh -c 'echo on > /sys/kernel/debug/kcsan' 2>/dev/null
+fi
+
+# The kernel messages belonging to one test.
+#
+# Three places took "dmesg | tail -N", which is the last N lines of the
+# whole ring: the messages of the twenty tests before this one, and on a
+# kernel that reports data races, of every race since boot. The marker
+# written before each test is what separates them. Falls back to the
+# tail when the marker has already scrolled out of the ring.
+dmesg_for_test() {
+	_d=$(sudo dmesg | sed -n "/BEGIN generic\/$1\$/,\$p")
+	if [ -z "$_d" ]; then
+		sudo dmesg | tail -60
+	else
+		echo "$_d"
+	fi
+}
+
 sudo mkdir -p /mnt/test /mnt/scratch
 sudo tee /usr/xfstests/local.config >/dev/null <<CFG
 export FSTYP=beamfs
@@ -173,7 +198,7 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
       done
       echo ""
       echo "=== kernel messages ==="
-      sudo dmesg | tail -40
+      dmesg_for_test "$t"
       echo ""
       echo "=== mounts ==="
       mount | grep beamfs
@@ -250,7 +275,7 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
         echo "$FSCK"
         echo ""
         echo "=== kernel messages for this test ==="
-        sudo dmesg | sed -n "/BEGIN generic\/$t\$/,\$p" | head -60
+        dmesg_for_test "$t"
       } > "/tmp/xfs-failures/generic-$t.log" 2>&1
     else
       echo "generic/$t PASS ${EL}s" >> $R
@@ -270,7 +295,7 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
               "/usr/xfstests/results/generic/$t.out.bad" 2>/dev/null | head -60
       echo ""
       echo "=== kernel messages ==="
-      sudo dmesg | tail -30
+      dmesg_for_test "$t"
     } > "/tmp/xfs-failures/generic-$t.log" 2>&1
   fi
 done
