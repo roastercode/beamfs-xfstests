@@ -12,12 +12,23 @@
  * are allocated, which are sealed, and what is in the difference.
  */
 
+/*
+ * The node's own root is beamfs. Without a filter this script counts
+ * the rootfs's allocations alongside the test's: one run reported 2796
+ * allocations on a volume of 262144 blocks, 62 of the 64 blocks still
+ * live at the end belonging to inode 27192 of /dev/vda, and the
+ * conclusions drawn from it were about the wrong filesystem.
+ *
+ * BX_TEST_DEV and BX_SCRATCH_DEV are replaced by beamfs-xfstests with
+ * the dev_t of this node's two volumes.
+ */
 BEGIN { printf("allocated, placed, and never sealed\n"); }
 
 tracepoint:beamfs:beamfs_block_alloc
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
 {
     @allocs = count();
-    @live[args.blk] = args.ino;
+    @live[args.dev, args.blk] = args.ino;
 }
 
 /*
@@ -25,6 +36,8 @@ tracepoint:beamfs:beamfs_block_alloc
  * that is never sealed is one nothing ever wrote.
  */
 kprobe:beamfs_seal_data_block
+/((struct super_block *)arg0)->s_dev == BX_TEST_DEV ||
+ ((struct super_block *)arg0)->s_dev == BX_SCRATCH_DEV/
 {
     @seals = count();
 }
@@ -35,10 +48,11 @@ kretprobe:beamfs_seal_data_block
 }
 
 tracepoint:beamfs:beamfs_block_free
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
 {
     @frees = count();
-    if (@live[args.blk]) {
-        delete(@live[args.blk]);
+    if (@live[args.dev, args.blk]) {
+        delete(@live[args.dev, args.blk]);
     }
 }
 

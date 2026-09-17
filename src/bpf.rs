@@ -60,6 +60,27 @@ pub struct Running {
     pub name: String,
 }
 
+/// The dev_t of a block device, as the kernel numbers it.
+///
+/// Every beamfs tracepoint carries the volume it belongs to, because
+/// the node's own root is beamfs too: a probe with no filter counts
+/// the rootfs's allocations alongside the test's, and 2796 allocations
+/// on a volume of 262144 blocks were mostly inode 27192 of /dev/vda.
+///
+/// Read from the node rather than assumed: the harness names devices
+/// by short name and their numbers are the kernel's to choose.
+fn devnum(conn: &NodeConn, dev: &str) -> Result<u64, String> {
+    let out = conn
+        .run(&format!("stat -Lc '%t %T' /dev/{dev}"), Duration::from_secs(20))
+        .map_err(|e| format!("cannot stat /dev/{dev}: {e:?}"))?;
+    let mut f = out.split_whitespace();
+    let maj = u64::from_str_radix(f.next().unwrap_or(""), 16)
+        .map_err(|_| format!("/dev/{dev}: unreadable major in {out:?}"))?;
+    let min = u64::from_str_radix(f.next().unwrap_or(""), 16)
+        .map_err(|_| format!("/dev/{dev}: unreadable minor in {out:?}"))?;
+    Ok((maj << 20) | min)
+}
+
 /// Start @script on the node.
 ///
 /// The script is pushed to /tmp there and run with setsid so it
@@ -91,7 +112,30 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
     conn.run(&format!("sudo mkdir -p {dir} && sudo chmod 1777 {dir}"),
              Duration::from_secs(20))
         .map_err(|e| format!("{script}: cannot make {dir}: {e:?}"))?;
-    conn.push(&local.to_string_lossy(), &remote)
+    // The volumes this test uses, substituted into the script.
+    //
+    // A script filters with `/args.dev == BX_SCRATCH_DEV/`; the tokens
+    // are replaced here so the same file works on any node. A script
+    // that names neither is pushed unchanged and sees every beamfs
+    // mount, the node's root included.
+    let mut text = std::fs::read_to_string(&local)
+        .map_err(|e| format!("{script}: cannot be read: {e}"))?;
+    let sent = if text.contains("BX_TEST_DEV") || text.contains("BX_SCRATCH_DEV") {
+        let t = devnum(conn, &conn.node.test_dev)?;
+        let s = devnum(conn, &conn.node.scratch_dev)?;
+        text = text
+            .replace("BX_TEST_DEV", &t.to_string())
+            .replace("BX_SCRATCH_DEV", &s.to_string());
+        let tmp = std::env::temp_dir().join(format!("bx-{script}-{}.bt",
+                                                    std::process::id()));
+        std::fs::write(&tmp, &text)
+            .map_err(|e| format!("{script}: cannot be staged: {e}"))?;
+        tmp
+    } else {
+        local.clone()
+    };
+
+    conn.push(&sent.to_string_lossy(), &remote)
         .map_err(|e| format!("{script}: could not be copied to the node: {e:?}"))?;
 
     // Arrived, and the right size.
@@ -102,7 +146,7 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
         .run(&format!("stat -c %s {remote} 2>/dev/null || echo 0"),
              Duration::from_secs(20))
         .unwrap_or_default();
-    let want = std::fs::metadata(&local).map(|m| m.len()).unwrap_or(0);
+    let want = std::fs::metadata(&sent).map(|m| m.len()).unwrap_or(0);
     if there.trim().parse::<u64>().unwrap_or(0) != want {
         return Err(format!(
             "{script}: {} bytes here, {} on the node",
