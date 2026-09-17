@@ -434,15 +434,16 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
             // another path is how an afternoon goes; asking the
             // harness what its own _dump_fs_image does costs one
             // command and answers it.
-            "@dumped" => format!(
-                "sudo sh -c 'find /usr/xfstests/results /var/tmp /tmp \
-                 -maxdepth 3 -name \"*{}*\" \\( -name \"*.img*\" -o \
-                 -name \"*metadump*\" \\) -newermt \"-10 minutes\" \
-                 -ls 2>/dev/null; \
-                 echo \"--- what check does with DUMP_CORRUPT_FS ---\"; \
-                 grep -n -A 12 \"DUMP_CORRUPT_FS\" \
-                 /usr/xfstests/common/rc 2>/dev/null | head -40'",
-                case.test.replace('/', "-")),
+            // Named for $seqres, which is results/<group>/<number>:
+            // the file is "013.vdb.check.img.zst", with neither the
+            // group nor the word generic in it. A pattern built from
+            // the test name found nothing while the image sat there.
+            "@dumped" => "sudo sh -c 'find /usr/xfstests/results \
+                 -name \"*.check.img*\" -newermt \"-20 minutes\" -ls \
+                 2>/dev/null | head -5; \
+                 echo \"--- if that is empty, what check does with it ---\"; \
+                 grep -n -A 6 \"DUMP_CORRUPT_FS\" \
+                 /usr/xfstests/common/rc 2>/dev/null | head -20'".to_string(),
             "@mount" => "mount".to_string(),
             // Both devices: a test that fails on the test device and a
             // test that fails on the scratch one look the same from
