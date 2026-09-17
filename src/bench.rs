@@ -232,6 +232,12 @@ fn prepare(c: &NodeConn, mkfs_opts: &str) -> Result<String, String> {
          done; \
          mkdir -p /mnt/test /mnt/scratch; \
          rm -f /usr/xfstests/results/generic/*.full /usr/xfstests/results/generic/*.out.bad; \
+         rm -f /usr/xfstests/results/generic/*.img /usr/xfstests/results/generic/*.img.*; \
+         if grep -q DUMP_CORRUPT_FS /usr/xfstests/common/rc 2>/dev/null; then \
+           grep -q \"^export DUMP_CORRUPT_FS=\" /usr/xfstests/local.config || \
+             echo \"export DUMP_CORRUPT_FS=1\" >> /usr/xfstests/local.config; \
+           printf \"dumpfs=yes\\n\"; \
+         else printf \"dumpfs=no\\n\"; fi; \
          sed -i \"s|^export MKFS_OPTIONS=.*|export MKFS_OPTIONS=\\\"-N 16384 {mkfs_opts}\\\"|\" /usr/xfstests/local.config; \
          mkfs.beamfs {mkfs_opts} /dev/vdb >/dev/null 2>&1; \
          mount -t beamfs /dev/vdb /mnt/test; \

@@ -399,6 +399,21 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
         // saying which. Naming them is the difference between a count
         // and a place to look.
         ("fsck.verbose", "@fsck".into()),
+        // Where check left the volume it declared inconsistent.
+        //
+        // _check_generic_filesystem remakes the TEST_DEV when its own
+        // check fails, so everything the harness reads afterwards --
+        // its fsck, its frozen image -- describes a volume nobody
+        // tested: two inodes against the sixteen hundred the test
+        // created. With DUMP_CORRUPT_FS set, check keeps an image of
+        // the filesystem as it found it, and that one is the state of
+        // the defect.
+        //
+        // The path and the size, not the image: this collection copies
+        // the output of a command into a file, and calling that file
+        // corrupt.img would be one more piece of evidence that is not
+        // what its name says.
+        ("dumped-by-check", "@dumped".into()),
         // Which tracepoints were on, so a trace that is empty can be
         // told from a trace that was never enabled.
         ("tracing.state", "@tracing".into()),
@@ -410,6 +425,12 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
     for (name, src) in files {
         let cmd = match src.as_str() {
             "@dmesg" => "sudo dmesg".to_string(),
+            // Whatever check left behind for this test, if anything.
+            "@dumped" => format!(
+                "sudo sh -c 'ls -l /usr/xfstests/results/{}*.img \
+                 /usr/xfstests/results/{}*.img.* 2>/dev/null || \
+                 echo \"check kept no image of the volume\"'",
+                case.test, case.test),
             "@mount" => "mount".to_string(),
             // Both devices: a test that fails on the test device and a
             // test that fails on the scratch one look the same from
