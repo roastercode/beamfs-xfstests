@@ -1219,8 +1219,24 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     // -n, so the node has to be prepared first. A freshly deployed image
     // has no /mnt/test and the enumeration comes back empty with a mount
     // error buried in output nobody reads.
-    if let Err(e) = prepare(&c, &cfg.mkfs_options) {
-        return Err(format!("cannot prepare the node: {e}"));
+    /*
+     * What the preparation found, said once.
+     *
+     * Its answer was thrown away here and the harness never printed
+     * whether check on this node knows DUMP_CORRUPT_FS -- so when the
+     * collection reported "check kept no image of the volume", there
+     * was no telling whether the variable was unknown or the image was
+     * somewhere else. A tool that knows and does not say costs a run
+     * every time the question comes up.
+     */
+    match prepare(&c, &cfg.mkfs_options) {
+        Ok(state) => {
+            let state = state.trim();
+            if !state.is_empty() {
+                println!("  node    : {state}");
+            }
+        }
+        Err(e) => return Err(format!("cannot prepare the node: {e}")),
     }
 
     let tests = enumerate_tests(&c, selection)?;
