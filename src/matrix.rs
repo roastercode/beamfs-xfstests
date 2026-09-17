@@ -211,7 +211,7 @@ pub fn run_cell(
         let r = load::run_loop(
             &c,
             l,
-            "/dev/vdc",
+            &format!("/dev/{}", node.scratch_dev),
             "/mnt/scratch",
             "-N 16384",
             n == 1,
@@ -292,12 +292,25 @@ pub fn run(
         println!("  clean under: {}", names(&clean));
         println!("  leaked under: {}", names(&leaked));
         println!("  -- the defect needs what separates the second list from the first");
-    } else if leaked.len() == cells.len() {
-        println!("  every condition leaked: none of them is the trigger");
     } else {
-        println!("  no condition leaked: the load alone does not reproduce it");
+        println!("  {}", verdict(cells.len(), leaked.len()));
     }
     Ok(cells)
+}
+
+/// What the matrix shows, once the mixed case has been handled.
+///
+/// Zero cells used to fall through to "every condition leaked", because
+/// zero equals zero: a run where every condition failed to start
+/// announced that none of them was the trigger, over nothing measured.
+pub fn verdict(total: usize, leaked: usize) -> &'static str {
+    if total == 0 {
+        "no condition ran: nothing was measured"
+    } else if leaked == 0 {
+        "no condition leaked: the load alone does not reproduce it"
+    } else {
+        "every condition leaked: none of them is the trigger"
+    }
 }
 
 fn names(cells: &[&Cell]) -> String {
@@ -329,6 +342,22 @@ mod tests {
     fn a_second_mount_condition_mounts_something() {
         assert!(Condition::SecondBeamfs.setup().contains("mount -t beamfs /dev/vdb"));
         assert!(Condition::SecondExt2.setup().contains("mount -t ext2 /dev/vdb"));
+    }
+
+    #[test]
+    fn nothing_measured_is_not_a_verdict() {
+        assert_eq!(verdict(0, 0), "no condition ran: nothing was measured");
+    }
+
+    #[test]
+    fn a_leak_in_every_cell_clears_all_of_them() {
+        assert_eq!(verdict(4, 4), "every condition leaked: none of them is the trigger");
+    }
+
+    #[test]
+    fn no_leak_anywhere_means_the_load_is_not_enough() {
+        assert_eq!(verdict(4, 0),
+                   "no condition leaked: the load alone does not reproduce it");
         assert!(!Condition::ScratchOnly.setup().contains("mount -t"));
     }
 

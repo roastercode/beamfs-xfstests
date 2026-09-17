@@ -58,7 +58,8 @@ pub struct Capture {
 }
 
 /// Drain the ring and bring it back, with the lost-block list.
-fn pull(c: &NodeConn, dir: &Path, lost: &[u64]) -> Result<usize, String> {
+fn pull(c: &NodeConn, dir: &Path, lost: &[u64], scratch: &str)
+    -> Result<usize, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
 
     let trace = c
@@ -73,7 +74,7 @@ fn pull(c: &NodeConn, dir: &Path, lost: &[u64]) -> Result<usize, String> {
     // The inode table, so the owning inodes can be read on disk later
     // without the node still being in that state.
     if let Ok(sb) = c.run(
-        "sudo dd if=/dev/vdc bs=4096 count=1 2>/dev/null | od -An -tu8 -j16 -N8",
+        &format!("sudo dd if=/dev/{scratch} bs=4096 count=1 2>/dev/null | od -An -tu8 -j16 -N8"),
         Duration::from_secs(60),
     ) {
         let _ = std::fs::write(dir.join("inode_table_blk"), sb.trim());
@@ -263,6 +264,14 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
     // with what it lost itself.
     let mut known_lost: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut loops = 0u32;
+    // A loop that fails because the node is gone fails again for the
+    // same reason, and the budget is spent printing the same line: six
+    // identical timeouts over half an hour, measuring nothing. Three in
+    // a row is a node that cannot be measured, and saying so is worth
+    // more than the remaining loops.
+    const GIVE_UP_AFTER: u32 = 3;
+    let mut failures = 0u32;
+    let scratch = format!("/dev/{}", node.scratch_dev);
     let stamp = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -339,7 +348,7 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
             }
         });
         let lost = match load::run_loop(
-            &c, &l, "/dev/vdc", "/mnt/scratch", "-N 16384",
+            &c, &l, &scratch, "/mnt/scratch", "-N 16384",
             loops % 12 == 1, Duration::from_secs(300),
         ) {
             Ok(r) => {
@@ -357,12 +366,20 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
                 let _ = h.join();
                 println!("\r  loop {loops:<4} failed after {}s: {e}                 ",
                          t0.elapsed().as_secs());
+                failures += 1;
+                if failures >= GIVE_UP_AFTER {
+                    return Err(format!(
+                        "{failures} loops in a row failed on {}, the last with: {e}",
+                        node.host
+                    ));
+                }
                 std::thread::sleep(Duration::from_secs(5));
                 continue;
             }
         };
         spin.store(false, std::sync::atomic::Ordering::Relaxed);
         let _ = h.join();
+        failures = 0;
         // fsck reports every block lost since the filesystem was made,
         // so on the second and later loops of a series it repeats what
         // earlier loops lost. Keep only what is new: a capture should
@@ -383,7 +400,7 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
                  lost.len(), t0.elapsed().as_secs());
         let seq = caught.len() as u32 + 1;
         let dir = root.join(format!("{stamp}-{seq:03}"));
-        match pull(&c, &dir, &lost) {
+        match pull(&c, &dir, &lost, &node.scratch_dev) {
             Ok(events) => {
                 println!(
                     "  leak {seq}: {} blocks at loop {loops}, {events} events -> {}",
