@@ -253,6 +253,13 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str)
          {mkfs} /dev/vdb >/dev/null 2>&1; \
          mount -t {fstyp} /dev/vdb /mnt/test; \
          if [ -e /sys/kernel/debug/kcsan ]; then echo on > /sys/kernel/debug/kcsan; fi; \
+         if [ -d /sys/kernel/debug/tracing/events/beamfs ]; then \
+           echo 60000 > /sys/kernel/debug/tracing/buffer_size_kb; \
+           echo 1 > /sys/kernel/debug/tracing/events/beamfs/enable; \
+           : > /sys/kernel/debug/tracing/trace; \
+           echo 1 > /sys/kernel/debug/tracing/tracing_on; \
+           printf \"tracing=on\\n\"; \
+         else printf \"tracing=absent\\n\"; fi; \
          dmesg -C; \
          printf \"kcsan=%s\\n\" \"$(cat /sys/kernel/debug/kcsan 2>/dev/null | head -1)\"; \
          printf \"mounts=%s\\n\" \"$(mount | grep -cE \" /mnt/test | /mnt/scratch \")\"'"
