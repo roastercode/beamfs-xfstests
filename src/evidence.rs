@@ -208,13 +208,22 @@ pub fn restore(cfg: &Config, node: &Node, test: &str) {
 /// complaints, and the checker's named blocks. Everything else is in
 /// the files.
 /// The largest inode count a checker reported in @text.
+///
+/// Two phrasings, because the two checkers do not print the same one.
+/// Run verbosely the checker says "N inode(s) walked"; run by xfstests
+/// through fsck(8) it prints only its findings and the closing line,
+/// "block ownership OK (N inode(s))". Looking for the first alone made
+/// this say nothing on exactly the run it was written for.
 fn inodes_walked(text: &str) -> Option<u64> {
-    text.match_indices("inode(s) walked")
-        .filter_map(|(i, _)| {
-            text[..i]
-                .rsplit(|c: char| !c.is_ascii_digit())
-                .find(|w| !w.is_empty())
-                .and_then(|w| w.parse::<u64>().ok())
+    ["inode(s) walked", "inode(s))"]
+        .iter()
+        .flat_map(|pat| {
+            text.match_indices(pat).filter_map(|(i, _)| {
+                text[..i]
+                    .rsplit(|c: char| !c.is_ascii_digit())
+                    .find(|w| !w.is_empty())
+                    .and_then(|w| w.parse::<u64>().ok())
+            })
         })
         .max()
 }
@@ -900,6 +909,17 @@ mod remade_tests {
         let full = "pass 3: inode table OK (12 inode(s) walked)";
         let fsck = "pass 3: inode table OK (2 inode(s) walked)";
         assert_eq!(remade_after(full, fsck), None);
+    }
+
+    /// The phrasing xfstests gets, which the first version missed.
+    #[test]
+    fn the_closing_line_counts_too() {
+        let full = "fsck.beamfs: pass 6: directories, links and block \
+                    ownership OK (86 inode(s))";
+        let fsck = "fsck.beamfs: pass 3: inode table OK (2 inode(s) walked)\n\
+                    fsck.beamfs: pass 6: directories, links and block \
+                    ownership OK (2 inode(s))";
+        assert_eq!(remade_after(full, fsck), Some((86, 2)));
     }
 
     #[test]

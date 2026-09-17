@@ -38,7 +38,9 @@ tracepoint:beamfs:beamfs_block_free
  *
  * I_FREEING is (1U << 8) in include/linux/fs.h, read there rather
  * than remembered: 0x10 was wrong by a factor of sixteen and would
- * have matched I_DIRTY_SYNC instead. An owner in that state
+ * have matched I_DIRTY_SYNC instead. i_state is a struct in 7.3,
+ * not an integer, so the flags live in i_state.__state. An owner in
+ * that state
  * takes the same path as no owner at all: the buffer is dirtied and
  * attached to nothing.
  */
@@ -50,7 +52,7 @@ kprobe:beamfs_write_bitmap_block
     if (arg2 == 0) {
         @wbb_no_owner = count();
     } else {
-        if (((struct inode *)arg2)->i_state & 0x0100) {
+        if (((struct inode *)arg2)->i_state.__state & 0x0100) {
             @wbb_owner_freeing = count();
         } else {
             @wbb_attached = count();
@@ -58,9 +60,12 @@ kprobe:beamfs_write_bitmap_block
     }
 }
 
-kprobe:beamfs_free_data_blocks { @free_data_blocks_calls = count(); }
-kprobe:beamfs_put_super        { @put_super_calls = count(); }
-kprobe:beamfs_sync_fs          { @sync_fs_calls = count(); }
+/*
+ * beamfs_free_data_blocks, beamfs_put_super and beamfs_sync_fs are
+ * static and the compiler inlines them, so kprobe cannot attach and
+ * bpftrace refuses the whole script over it. Counting them needs a
+ * tracepoint in the kernel, not a probe here.
+ */
 
 END
 {
