@@ -60,7 +60,7 @@ pub struct Running {
     pub name: String,
 }
 
-/// The dev_t of a block device, as the kernel numbers it.
+/// The dev_t of this node's two volumes, as the kernel numbers them.
 ///
 /// Every beamfs tracepoint carries the volume it belongs to, because
 /// the node's own root is beamfs too: a probe with no filter counts
@@ -69,16 +69,37 @@ pub struct Running {
 ///
 /// Read from the node rather than assumed: the harness names devices
 /// by short name and their numbers are the kernel's to choose.
-fn devnum(conn: &NodeConn, dev: &str) -> Result<u64, String> {
-    let out = conn
-        .run(&format!("stat -Lc '%t %T' /dev/{dev}"), Duration::from_secs(20))
-        .map_err(|e| format!("cannot stat /dev/{dev}: {e:?}"))?;
-    let mut f = out.split_whitespace();
-    let maj = u64::from_str_radix(f.next().unwrap_or(""), 16)
-        .map_err(|_| format!("/dev/{dev}: unreadable major in {out:?}"))?;
-    let min = u64::from_str_radix(f.next().unwrap_or(""), 16)
-        .map_err(|_| format!("/dev/{dev}: unreadable minor in {out:?}"))?;
-    Ok((maj << 20) | min)
+///
+/// One call for both, and a second attempt: this runs while the node
+/// is preparing the volume for the test, which is the busiest it gets.
+/// Two separate round trips at twenty seconds each timed out there and
+/// the probe never attached, which cost a run.
+fn devnums(conn: &NodeConn, a: &str, b: &str) -> Result<(u64, u64), String> {
+    let cmd = format!("stat -Lc '%t %T' /dev/{a} /dev/{b}");
+    let mut last = String::new();
+
+    for attempt in 1..=2 {
+        match conn.run(&cmd, Duration::from_secs(45)) {
+            Ok(out) => {
+                let mut f = out.split_whitespace();
+                let mut next = || -> Result<u64, String> {
+                    let v = f.next().ok_or_else(|| format!("short answer: {out:?}"))?;
+                    u64::from_str_radix(v, 16)
+                        .map_err(|_| format!("not a device number: {v:?}"))
+                };
+                let (ma, mi) = (next()?, next()?);
+                let (mb, nb) = (next()?, next()?);
+                return Ok(((ma << 20) | mi, (mb << 20) | nb));
+            }
+            Err(e) => {
+                last = format!("{e:?}");
+                if attempt == 1 {
+                    std::thread::sleep(Duration::from_secs(5));
+                }
+            }
+        }
+    }
+    Err(format!("cannot read the device numbers of /dev/{a} and /dev/{b}: {last}"))
 }
 
 /// Start @script on the node.
@@ -121,8 +142,8 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
     let mut text = std::fs::read_to_string(&local)
         .map_err(|e| format!("{script}: cannot be read: {e}"))?;
     let sent = if text.contains("BX_TEST_DEV") || text.contains("BX_SCRATCH_DEV") {
-        let t = devnum(conn, &conn.node.test_dev)?;
-        let s = devnum(conn, &conn.node.scratch_dev)?;
+        let (t, s) = devnums(conn, &conn.node.test_dev,
+                             &conn.node.scratch_dev)?;
         text = text
             .replace("BX_TEST_DEV", &t.to_string())
             .replace("BX_SCRATCH_DEV", &s.to_string());
