@@ -53,6 +53,41 @@ pub fn available() -> Vec<String> {
     v
 }
 
+/// What one short command on the node is allowed.
+///
+/// Read while the node is preparing the volume for the test, which
+/// is the busiest it gets: two separate round trips of twenty
+/// seconds each timed out there and the probe never attached.
+const NODE_ASK_SECS: u64 = 45;
+
+/// How long bpftrace is given to compile and attach, in seconds.
+///
+/// One number, because two were kept apart and drifted: a shell loop
+/// polled for up to sixty seconds while the ssh call carrying it
+/// allowed forty-five, so the connection expired before the loop could
+/// finish and a probe still compiling was reported as a node that had
+/// timed out. Raising one of the two only moves that.
+///
+/// Sixty rather than fifteen: a script with kstack on three
+/// tracepoints took eighteen seconds, and one with six probes and two
+/// struct accesses more. The loop exits as soon as bpftrace says it
+/// has attached, so the ceiling costs nothing when the probe is quick.
+const ATTACH_SECS: u64 = 60;
+
+/// Half-second ticks the poll loop runs, derived from ATTACH_SECS.
+const fn attach_ticks() -> u64 {
+    ATTACH_SECS * 2
+}
+
+/// What the ssh call carrying that loop is allowed, derived from it.
+///
+/// The loop plus what the transport costs around it: the connection,
+/// the pkill, and bpftrace's own exit. It must exceed the loop or the
+/// loop's own verdict is never read.
+const fn attach_budget() -> Duration {
+    Duration::from_secs(ATTACH_SECS + 30)
+}
+
 /// A script attached to a node, running until it is stopped.
 pub struct Running {
     node: String,
@@ -79,7 +114,7 @@ fn devnums(conn: &NodeConn, a: &str, b: &str) -> Result<(u64, u64), String> {
     let mut last = String::new();
 
     for attempt in 1..=2 {
-        match conn.run(&cmd, Duration::from_secs(45)) {
+        match conn.run(&cmd, Duration::from_secs(NODE_ASK_SECS)) {
             Ok(out) => {
                 let mut f = out.split_whitespace();
                 let mut next = || -> Result<u64, String> {
@@ -174,6 +209,7 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
             want, there.trim()));
     }
 
+    let ticks = attach_ticks();
     let cmd = format!(
         // The redirection inside sudo, and no quotes on the pattern.
             //
@@ -210,7 +246,7 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
          * bpftrace prints "Attaching N probes" when it is ready, so:
          * poll for it and say what the file holds if it never comes.
          *
-         * A minute, not fifteen seconds: a script with kstack on three
+         * ATTACH_SECS, not fifteen seconds: a script with kstack on three
          * tracepoints took eighteen to compile and attach, and was
          * reported as failed while it ran for the next twenty-three
          * minutes. The loop exits as soon as it sees the word, so the
@@ -219,7 +255,7 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
         "sudo pkill -x bpftrace 2>/dev/null; sleep 1; \
          sudo sh -c 'rm -f {remote_out}; \
          setsid bpftrace {remote} > {remote_out} 2>&1 < /dev/null &' ; \
-         for i in $(seq 1 120); do \
+         for i in $(seq 1 {ticks}); do \
            if grep -q Attaching {remote_out} 2>/dev/null; then break; fi; \
            if ! pgrep -x bpftrace >/dev/null; then break; fi; \
            sleep 0.5; \
@@ -229,7 +265,7 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
          else echo BX_FAILED; \
               echo \"--- bpftrace said ---\"; cat {remote_out} 2>/dev/null; \
               echo \"--- running: $(pgrep -c bpftrace) ---\"; fi");
-    let out = conn.run(&cmd, Duration::from_secs(45))
+    let out = conn.run(&cmd, attach_budget())
         .map_err(|e| format!("start {script}: {e:?}"))?;
     if !out.contains("BX_ATTACHED") {
         /*
@@ -417,5 +453,35 @@ mod tests {
         assert_eq!(v, vec!["one".to_string()], "{v:?}");
         unsafe { std::env::remove_var("XFSTESTS_BPF_SCRIPTS"); }
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod attach_tests {
+    use super::*;
+
+    /// The ordering the two constants used to break by drifting apart.
+    #[test]
+    fn the_ssh_budget_outlasts_the_poll_loop() {
+        let loop_secs = attach_ticks() / 2;
+        assert!(
+            attach_budget().as_secs() > loop_secs,
+            "budget {}s does not outlast a loop of {}s",
+            attach_budget().as_secs(),
+            loop_secs
+        );
+    }
+
+    /// And by enough to read the loop's verdict, not just to reach it.
+    #[test]
+    fn the_margin_is_not_a_hair() {
+        let loop_secs = attach_ticks() / 2;
+        assert!(attach_budget().as_secs() >= loop_secs + 15);
+    }
+
+    /// The loop is expressed in half-second ticks.
+    #[test]
+    fn ticks_are_half_seconds() {
+        assert_eq!(attach_ticks(), ATTACH_SECS * 2);
     }
 }
