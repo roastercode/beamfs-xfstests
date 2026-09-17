@@ -355,6 +355,18 @@ The lab, as
 .IR name:host:test_dev:scratch_dev ,
 comma separated. Required.
 .TP
+.B XFSTESTS_FSTYP
+The filesystem to run against. beamfs unless set.
+.IP
+The point of being able to change it is differential. This
+station has no ECC memory -- dmidecode reports "Error Correction
+Type: None" and EDAC reports "No ECC support" -- so a bit
+flipped in host memory is silent, and a run that reports no
+kernel error proves nothing on its own. The same load, in the
+same VM, on the same devices, against a filesystem known to be
+sound is what separates a machine that corrupts from a
+filesystem that corrupts.
+.TP
 .B XFSTESTS_MKFS_OPTIONS
 Passed to mkfs.beamfs when a node is prepared.
 .TP

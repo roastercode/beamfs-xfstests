@@ -208,7 +208,17 @@ fn commit() -> String {
 /// Every abort seen so far came from one of two things: the test volume
 /// mounted more than once, or results from a previous run still on
 /// disk. Both are cleared here rather than being diagnosed again.
-fn prepare(c: &NodeConn, mkfs_opts: &str) -> Result<String, String> {
+fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str)
+    -> Result<String, String> {
+    /*
+     * mkfs.ext2 needs -q -F to run unattended on a device that already
+     * holds a filesystem; mkfs.beamfs needs neither and does not know
+     * them. -N 16384 is understood by both.
+     */
+    let mkfs = match fstyp {
+        "beamfs" => format!("mkfs.beamfs {mkfs_opts}"),
+        other => format!("mkfs.{other} -q -F {mkfs_opts}"),
+    };
     let cmd = format!(
         // check and fsstress, not only xfs_io.
         //
@@ -239,8 +249,9 @@ fn prepare(c: &NodeConn, mkfs_opts: &str) -> Result<String, String> {
            printf \"dumpfs=yes\\n\"; \
          else printf \"dumpfs=no\\n\"; fi; \
          sed -i \"s|^export MKFS_OPTIONS=.*|export MKFS_OPTIONS=\\\"-N 16384 {mkfs_opts}\\\"|\" /usr/xfstests/local.config; \
-         mkfs.beamfs {mkfs_opts} /dev/vdb >/dev/null 2>&1; \
-         mount -t beamfs /dev/vdb /mnt/test; \
+         sed -i \"s|^export FSTYP=.*|export FSTYP={fstyp}|\" /usr/xfstests/local.config; \
+         {mkfs} /dev/vdb >/dev/null 2>&1; \
+         mount -t {fstyp} /dev/vdb /mnt/test; \
          dmesg -C; \
          printf \"mounts=%s\\n\" \"$(mount | grep -cE \"vdb|vdc\")\"'"
     );
@@ -562,7 +573,7 @@ pub fn run(
         println!("  seed    : not applied -- a whole-suite run edits no test file");
     }
 
-    let state = prepare(&c, &cfg.mkfs_options).map_err(|e| format!("prepare: {e}"))?;
+    let state = prepare(&c, &cfg.mkfs_options, &cfg.fstyp).map_err(|e| format!("prepare: {e}"))?;
     println!("  node    : {}", state.trim());
     println!();
 
@@ -651,7 +662,7 @@ pub fn run(
             // An abort usually leaves the node in a state the next
             // trial hits too. Clear it rather than aborting nine more
             // times.
-            let _ = prepare(&c, &cfg.mkfs_options);
+            let _ = prepare(&c, &cfg.mkfs_options, &cfg.fstyp);
             continue;
         }
         // Every trial that ran, pass or fail, so the statistics module
@@ -1229,7 +1240,10 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
      * somewhere else. A tool that knows and does not say costs a run
      * every time the question comes up.
      */
-    match prepare(&c, &cfg.mkfs_options) {
+    if cfg.fstyp != "beamfs" {
+        println!("  against : {} -- not beamfs", cfg.fstyp);
+    }
+    match prepare(&c, &cfg.mkfs_options, &cfg.fstyp) {
         Ok(state) => {
             for line in state.lines().map(str::trim).filter(|l| !l.is_empty()) {
                 println!("  node    : {line}");
@@ -1327,7 +1341,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             &format!("{}@{}", cfg.user, node.host),
         );
 
-        if let Err(e) = prepare(&c, &cfg.mkfs_options) {
+        if let Err(e) = prepare(&c, &cfg.mkfs_options, &cfg.fstyp) {
             p.finish(&format!("cannot prepare the node: {e}"));
             aborted.push(test.clone());
             unreachable_run += 1;

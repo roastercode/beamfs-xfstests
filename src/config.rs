@@ -36,6 +36,17 @@ pub struct Config {
     /// that stops.
     pub per_test_timeout: Duration,
     pub mkfs_options: String,
+    /// Which filesystem the suite runs against.
+    ///
+    /// beamfs unless told otherwise. The point of being able to change
+    /// it is differential: this station has no ECC -- dmidecode says
+    /// "Error Correction Type: None", EDAC says "No ECC support" -- so
+    /// a bit flipped in host memory is silent, and a run that reports
+    /// no kernel error proves nothing on its own. The same load, the
+    /// same VM and the same devices against a filesystem known to be
+    /// sound is what separates "the machine corrupts" from "beamfs
+    /// corrupts".
+    pub fstyp: String,
     /// Resume rather than restart: tests already recorded are skipped.
     pub resume: bool,
 }
@@ -59,6 +70,7 @@ impl Default for Config {
             user: "hpcadmin".into(),
             per_test_timeout: Duration::from_secs(300),
             mkfs_options: "-N 16384".into(),
+            fstyp: "beamfs".into(),
             resume: true,
         }
     }
@@ -72,6 +84,11 @@ impl Config {
         if let Ok(v) = std::env::var("XFSTESTS_TIMEOUT") {
             if let Ok(s) = v.parse::<u64>() {
                 c.per_test_timeout = Duration::from_secs(s);
+            }
+        }
+        if let Ok(v) = std::env::var("XFSTESTS_FSTYP") {
+            if !v.trim().is_empty() {
+                c.fstyp = v.trim().to_string();
             }
         }
         if let Ok(v) = std::env::var("XFSTESTS_MKFS_OPTIONS") {
@@ -123,6 +140,28 @@ mod tests {
         // campaigns are not worn down by test formatting.
         assert_eq!(c.nodes[0].scratch_dev, "vdc");
         assert!(c.nodes[1..].iter().all(|n| n.scratch_dev == "vdh"));
+    }
+
+    /// The differential the station needs: no ECC here, so a run that
+    /// reports no error proves nothing until the same load has been
+    /// put through a filesystem known to be sound.
+    #[test]
+    fn the_filesystem_under_test_can_be_changed() {
+        let c = Config::from_env();
+        assert_eq!(c.fstyp, "beamfs");
+
+        unsafe { std::env::set_var("XFSTESTS_FSTYP", "ext2") };
+        let c = Config::from_env();
+        unsafe { std::env::remove_var("XFSTESTS_FSTYP") };
+        assert_eq!(c.fstyp, "ext2");
+    }
+
+    #[test]
+    fn an_empty_value_leaves_the_default() {
+        unsafe { std::env::set_var("XFSTESTS_FSTYP", "  ") };
+        let c = Config::from_env();
+        unsafe { std::env::remove_var("XFSTESTS_FSTYP") };
+        assert_eq!(c.fstyp, "beamfs");
     }
 
     #[test]
