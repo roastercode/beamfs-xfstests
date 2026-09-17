@@ -1231,9 +1231,8 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
      */
     match prepare(&c, &cfg.mkfs_options) {
         Ok(state) => {
-            let state = state.trim();
-            if !state.is_empty() {
-                println!("  node    : {state}");
+            for line in state.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                println!("  node    : {line}");
             }
         }
         Err(e) => return Err(format!("cannot prepare the node: {e}")),

@@ -426,11 +426,23 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
         let cmd = match src.as_str() {
             "@dmesg" => "sudo dmesg".to_string(),
             // Whatever check left behind for this test, if anything.
+            // Where check leaves it, and what it does with the
+            // variable when it does not leave one.
+            //
+            // DUMP_CORRUPT_FS is set and known to this xfstests, and
+            // no image appeared where the results live. Guessing at
+            // another path is how an afternoon goes; asking the
+            // harness what its own _dump_fs_image does costs one
+            // command and answers it.
             "@dumped" => format!(
-                "sudo sh -c 'ls -l /usr/xfstests/results/{}*.img \
-                 /usr/xfstests/results/{}*.img.* 2>/dev/null || \
-                 echo \"check kept no image of the volume\"'",
-                case.test, case.test),
+                "sudo sh -c 'find /usr/xfstests/results /var/tmp /tmp \
+                 -maxdepth 3 -name \"*{}*\" \\( -name \"*.img*\" -o \
+                 -name \"*metadump*\" \\) -newermt \"-10 minutes\" \
+                 -ls 2>/dev/null; \
+                 echo \"--- what check does with DUMP_CORRUPT_FS ---\"; \
+                 grep -n -A 12 \"DUMP_CORRUPT_FS\" \
+                 /usr/xfstests/common/rc 2>/dev/null | head -40'",
+                case.test.replace('/', "-")),
             "@mount" => "mount".to_string(),
             // Both devices: a test that fails on the test device and a
             // test that fails on the scratch one look the same from
