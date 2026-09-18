@@ -116,7 +116,7 @@ fn main() -> std::process::ExitCode {
         Some("analyse" | "analyze") => do_analyse(args.get(2)),
         Some("matrix") => do_matrix(&cfg, args.get(2), args.get(3)),
         Some("bench") => do_bench(&cfg, args.get(2), args.get(3)),
-        Some("sweep") => do_sweep(&cfg, args.get(2)),
+        Some("sweep") => do_sweep(&cfg, &args[2..]),
         Some("deploy") => do_deploy(&cfg, args.get(2)),
         Some("scenario") => {
             let Some(node) = cfg.nodes.first() else {
@@ -1130,14 +1130,27 @@ fn do_deploy(cfg: &Config, which: Option<&String>) -> std::process::ExitCode {
     }
 }
 
-fn do_sweep(cfg: &Config, selection: Option<&String>) -> std::process::ExitCode {
+fn do_sweep(cfg: &Config, selection: &[String]) -> std::process::ExitCode {
     let Some(node) = cfg.nodes.first() else {
         eprintln!("no nodes configured");
         return std::process::ExitCode::FAILURE;
     };
-    let sel = match selection.map(|s| s.as_str()) {
-        Some("all") | Some("") | None => "",
-        Some(x) => x,
+    // Every argument, not just the first.
+    //
+    // This read args.get(2) and dropped the rest in silence. On
+    // 2026-09-18 `sweep generic/075 generic/083 generic/241
+    // generic/589` ran generic/075 alone and announced "tests : 1 to
+    // run" -- which reads, in a terminal, exactly like a selection
+    // that was honoured, and three of the four failures under
+    // investigation went unmeasured.
+    //
+    // ./check takes a space-separated list and enumerate_tests passes
+    // the selection through untouched, so joining the arguments is the
+    // whole fix.
+    let joined = selection.join(" ");
+    let sel = match joined.trim() {
+        "all" | "" => "",
+        x => x,
     };
     match bench::sweep(cfg, node, sel) {
         Ok(()) => std::process::ExitCode::SUCCESS,
