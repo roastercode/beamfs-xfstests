@@ -107,7 +107,7 @@ fn main() -> std::process::ExitCode {
     );
 
     let code = match args.get(1).map(String::as_str) {
-        Some("report") => report(&cfg),
+        Some("report") => report(&cfg, args.get(2)),
         Some("probe") => do_probe(&cfg, args.get(2), args.get(3)),
         Some("history") => show_history(),
         Some("compare") => compare_runs(args.get(2), args.get(3)),
@@ -724,7 +724,7 @@ fn run(cfg: &Config) -> std::process::ExitCode {
         }
     }
     println!();
-    report(cfg)
+    report(cfg, None)
 }
 
 /// A sortable tag for this run: comparisons rely on lexical order.
@@ -867,11 +867,31 @@ fn stop(cfg: &Config) -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-fn report(cfg: &Config) -> std::process::ExitCode {
+fn report(cfg: &Config, tag: Option<&String>) -> std::process::ExitCode {
     let mut all: Vec<TestResult> = Vec::new();
-    for n in &cfg.nodes {
-        let c = NodeConn::new(n, cfg);
-        all.extend(c.results().unwrap_or_default());
+    // Named, a run is read back from history; unnamed, report asks the
+    // nodes what they still hold. A tag that matches no saved run is an
+    // error and not an empty report: an empty report reads like a run
+    // that found nothing, which is the one thing it never means. That
+    // reading cost an hour -- "report <tag>" printed 0 of 737 and the
+    // tag was simply ignored.
+    if let Some(t) = tag {
+        let h = History::new(&History::default_root());
+        match h.load(t) {
+            Some(rs) => all.extend(rs),
+            None => {
+                println!();
+                println!("  no saved run named {t}");
+                println!("  beamfs-xfstests history lists the saved runs");
+                println!();
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    } else {
+        for n in &cfg.nodes {
+            let c = NodeConn::new(n, cfg);
+            all.extend(c.results().unwrap_or_default());
+        }
     }
     all.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -880,7 +900,10 @@ fn report(cfg: &Config) -> std::process::ExitCode {
         s.add(r);
     }
 
-    println!("  === RESULT ===");
+    match tag {
+        Some(t) => println!("  === RESULT ({t}) ==="),
+        None => println!("  === RESULT ==="),
+    }
     println!("    attempted   {:>4} of {SUITE_SIZE}", s.attempted());
     println!("    passed      {:>4}", s.pass);
     println!("    failed      {:>4}", s.fail);
