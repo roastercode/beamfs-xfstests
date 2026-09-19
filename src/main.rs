@@ -139,7 +139,10 @@ fn main() -> std::process::ExitCode {
         Some("probe") => do_probe(&cfg, args.get(2), args.get(3)),
         Some("history") => show_history(),
         Some("compare") => compare_runs(args.get(2), args.get(3)),
-        Some("stop") => stop(&cfg),
+        Some("stop") => {
+            let hard = args.iter().any(|a| a == "--hard");
+            stop(&cfg, hard)
+        }
         Some("trace") => do_trace(&cfg, args.get(2), args.get(3)),
         Some("analyse" | "analyze") => do_analyse(args.get(2)),
         Some("matrix") => do_matrix(&cfg, args.get(2), args.get(3)),
@@ -215,7 +218,9 @@ fn usage() -> std::process::ExitCode {
          deploy   put the newest image and this repo's tools on a node,\n\
                   and prove they arrived\n\
                   deploy [node]       (default: the first configured)\n\
-         stop     kill the shards and release the mounts\n\
+         stop     kill the shards and release the mounts, and check\n\
+                  that they are gone\n\
+                  stop --hard         restart a node that will not let go\n\
          \n\
          options:\n\
            --no-bell               finish without ringing\n\
@@ -888,15 +893,71 @@ fn compare_runs(a: Option<&String>, b: Option<&String>) -> std::process::ExitCod
     }
 }
 
-fn stop(cfg: &Config) -> std::process::ExitCode {
+/// Stop the work on every node, and prove it stopped.
+///
+/// This printed "stopped" and returned. On 2026-09-19 it left a check
+/// running for twelve minutes, a bpftrace attached and a zstd
+/// compressing a volume image -- every pattern it used matched its own
+/// ssh command line, so the first pkill killed the shell running them
+/// and none of the rest ever ran. The next sweep was refused the node,
+/// which is how it was noticed at all.
+///
+/// So: kill, wait, look. What survives a SIGKILL is in uninterruptible
+/// sleep and will not die until its I/O finishes; `hard` restarts the
+/// domain instead of waiting for it.
+fn stop(cfg: &Config, hard: bool) -> std::process::ExitCode {
     println!();
+    let mut stubborn = 0usize;
+
     for n in &cfg.nodes {
         let c = NodeConn::new(n, cfg);
         c.stop();
-        println!("  {:<10} stopped", n.name);
+
+        // Up to fifteen seconds for the D-state work to finish and the
+        // kill to take effect.
+        let mut left = c.leftover_work();
+        for _ in 0..5 {
+            if left.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            c.stop();
+            left = c.leftover_work();
+        }
+
+        if left.is_empty() {
+            println!("  {:<10} stopped, nothing left running", n.name);
+            continue;
+        }
+
+        println!("  {:<10} still running after the kill:", n.name);
+        for l in &left {
+            println!("               {l}");
+        }
+
+        if !hard {
+            stubborn += 1;
+            println!("               these are in uninterruptible sleep;");
+            println!("               beamfs-xfstests stop --hard restarts the domain");
+            continue;
+        }
+
+        let r = Recovery::new(cfg);
+        let domain = r.domain_for(&n.name);
+        println!("               restarting {domain}");
+        let mut jr = Journal::create(&std::env::temp_dir());
+        let outcome = r.recover(&c, &domain, 2, &mut jr);
+        println!("               {}", outcome.as_str());
+        if !outcome.usable() {
+            stubborn += 1;
+        }
     }
     println!();
-    std::process::ExitCode::SUCCESS
+    if stubborn > 0 {
+        std::process::ExitCode::FAILURE
+    } else {
+        std::process::ExitCode::SUCCESS
+    }
 }
 
 fn report(cfg: &Config, tag: Option<&String>) -> std::process::ExitCode {

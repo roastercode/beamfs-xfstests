@@ -616,14 +616,74 @@ impl<'a> NodeConn<'a> {
     }
 
     /// Kill the shard and release the mounts.
+    ///
+    /// Everything the trial started, not only the test script.
+    ///
+    /// check is launched as `timeout -k 5 1870 ./check generic/083`,
+    /// a relative path, so the '/usr/xfstests/check' pattern never
+    /// matched it and the parent outlived every stop. The capture
+    /// phase outlives it too: dd copies a gigabyte of volume, zstd
+    /// compresses it, bpftrace sits attached -- on 2026-09-19 a stop
+    /// reported success while zstd ran on for another three minutes
+    /// and the next run was refused the node it had just been told
+    /// was free.
     pub fn stop(&self) {
+        /*
+         * Bracketed patterns, or the shell kills itself first.
+         *
+         * pkill -f matches against every process's whole command
+         * line, and the ssh shell running these very commands carries
+         * all of them in its own. The first pkill therefore found
+         * itself and died, none of the later ones ever ran, and stop
+         * reported success while the node stayed busy -- measured on
+         * 2026-09-19: zstd still compressing a volume image six
+         * minutes after a stop the harness called done, and the next
+         * run refused the node it had just been told was free.
+         *
+         * "[x]fs-runner.sh" matches xfs-runner.sh and not the literal
+         * text of this line. The trick is old and it is the only one
+         * that works without knowing the shell's own pid.
+         */
         let _ = self.run(
-            "sudo pkill -9 -f xfs-runner.sh 2>/dev/null; \
-             sudo pkill -9 -f 'tests/generic' 2>/dev/null; \
-             sudo pkill -9 -f '/usr/xfstests/check' 2>/dev/null; \
+            "sudo pkill -9 -A -f '[x]fs-runner.sh' 2>/dev/null; \
+             sudo pkill -9 -A -f '[t]ests/generic' 2>/dev/null; \
+             sudo pkill -9 -A -f '[/]usr/xfstests/check' 2>/dev/null; \
+             sudo pkill -9 -A -f '[c]heck generic/' 2>/dev/null; \
+             sudo pkill -9 -A -f '[c]heck.img' 2>/dev/null; \
+             sudo pkill -9 -A -x bpftrace 2>/dev/null; \
+             sudo pkill -9 -A -x zstd 2>/dev/null; \
+             sudo pkill -9 -A -x fsstress 2>/dev/null; \
+             sudo pkill -9 -A -x fsx 2>/dev/null; \
              sleep 1; sudo umount -l /mnt/test /mnt/scratch 2>/dev/null; true",
             Duration::from_secs(30),
         );
+    }
+
+    /// What a trial left running, if anything.
+    ///
+    /// stop printed "stopped" whatever happened, so a node it had not
+    /// freed looked exactly like one it had -- and the next run was
+    /// refused by the claim guard with no explanation the caller could
+    /// act on. This is what stop checks before it says it is done.
+    ///
+    /// Bracketed patterns here too: the grep would otherwise find the
+    /// ssh command carrying it.
+    #[must_use]
+    pub fn leftover_work(&self) -> Vec<String> {
+        let out = self.run(
+            "ps -eo pid,etime,stat,args --no-headers | \
+             grep -E '[c]heck generic/|[t]ests/generic|[z]std |[b]pftrace |[f]sstress|[f]sx |[x]fs-runner' \
+             || true",
+            Duration::from_secs(20),
+        );
+        out.map(|s| {
+            s.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
     }
 }
 

@@ -251,7 +251,30 @@ impl<'a> Recovery<'a> {
         if conn.run("true", Duration::from_secs(12)).is_err() {
             return false;
         }
-        conn.blocked_tasks() <= 4
+        if conn.blocked_tasks() > 4 {
+            return false;
+        }
+
+        // And nothing from the campaign may still be alive.
+        //
+        // D-state is not the only way a node stays unusable. On
+        // 2026-09-19 a zstd compressing a 256 MB result file survived
+        // SIGKILL, stayed in R, and burned a full core in kernel
+        // context for thirteen minutes: no blocked task, ssh perfectly
+        // responsive, and this function called the node repaired. The
+        // restart it needed was never reached, because the sysrq step
+        // returned first.
+        //
+        // The process was in the unlink of the file it had just
+        // compressed -- freeing the blocks of a large file costs
+        // minutes of CPU, and the signal is only handled once that
+        // work ends. Surviving the kill is therefore the symptom to
+        // test for, not a side effect to ignore.
+        let left = conn.leftover_work();
+        if !left.is_empty() {
+            return false;
+        }
+        true
     }
 
     /// Poke sysrq through the hypervisor.
