@@ -151,7 +151,7 @@ impl<'a> Probe<'a> {
         let launch = format!(
             "chmod +x /tmp/probe.sh && setsid /tmp/probe.sh {test} {} {} {} \
              < /dev/null > /tmp/probe.out 2>&1 & sleep 2; \
-             pgrep -f probe.sh > /dev/null && echo running || echo failed",
+             pgrep -f '[p]robe.sh' > /dev/null && echo running || echo failed",
             node.test_dev, node.scratch_dev, limit.as_secs()
         );
         // The launch command ends in a sleep, so it can outlive a
@@ -167,7 +167,7 @@ impl<'a> Probe<'a> {
             Err(e) => {
                 jr.command(node_name, &launch, &e.to_string(), false);
                 let up = conn
-                    .run("pgrep -f probe.sh > /dev/null && echo yes || echo no",
+                    .run("pgrep -f '[p]robe.sh' > /dev/null && echo yes || echo no",
                          Duration::from_secs(20))
                     .map(|o| o.contains("yes"))
                     .unwrap_or(false);
@@ -195,7 +195,7 @@ impl<'a> Probe<'a> {
                 &format!(
                     "s=$(grep -c '=== sample' {dir}/samples.txt 2>/dev/null || echo 0); \
                      z=$(stat -c%s {dir}/samples.txt 2>/dev/null || echo 0); \
-                     p=$(pgrep -c -f probe.sh 2>/dev/null || echo 0); \
+                     p=$(pgrep -c -f '[p]robe.sh' 2>/dev/null || echo 0); \
                      d=$(ps -eo state | grep -c '^D'); \
                      w=$(grep ' {} ' /proc/diskstats | awk '{{print $8}}'); \
                      echo \"ALIVE $s $z $p $d ${{w:-0}}\"",
@@ -217,6 +217,17 @@ impl<'a> Probe<'a> {
                     let _ = std::io::stdout().flush();
                     jr.line(&format!("t={}s {}", el.as_secs(), o.trim()));
 
+                    /*
+                     * The only way this loop ends on its own.
+                     *
+                     * The pattern used to be 'probe.sh', unbracketed,
+                     * so pgrep found the ssh shell carrying it and p
+                     * was never 0: every probe ran to its deadline,
+                     * and a probe of a node that had already been
+                     * emptied by stop sat for eleven minutes with
+                     * nothing to watch. Bracketed, p counts the probe
+                     * and nothing else.
+                     */
                     if g(3) == "0" && el > Duration::from_secs(30) {
                         end = ProbeEnd::Completed;
                         break;

@@ -323,7 +323,7 @@ fn run(cfg: &Config) -> std::process::ExitCode {
             "chmod +x /tmp/xfs-runner.sh && \
              setsid /tmp/xfs-runner.sh {} {} {idx} {nshard} {} '{}' {} \
              < /dev/null > /tmp/xfs-shard.log 2>&1 & \
-             sleep 1; pgrep -f xfs-runner.sh >/dev/null && echo started || echo failed",
+             sleep 1; pgrep -f '[x]fs-runner.sh' >/dev/null && echo started || echo failed",
             n.test_dev, n.scratch_dev,
             cfg.per_test_timeout.as_secs(), cfg.mkfs_options,
             u8::from(cfg.resume),
@@ -341,7 +341,7 @@ fn run(cfg: &Config) -> std::process::ExitCode {
             Err(e) => {
                 jr.command(&n.name, &cmd, &e.to_string(), false);
                 let up = c
-                    .run("pgrep -f xfs-runner.sh > /dev/null && echo yes || echo no",
+                    .run("pgrep -f '[x]fs-runner.sh' > /dev/null && echo yes || echo no",
                          Duration::from_secs(20))
                     .map(|o| o.contains("yes"))
                     .unwrap_or(false);
@@ -893,6 +893,51 @@ fn compare_runs(a: Option<&String>, b: Option<&String>) -> std::process::ExitCod
     }
 }
 
+/// Other beamfs-xfstests processes on this machine.
+///
+/// stop frees the nodes and returns, which leaves the run that was
+/// using them alive in whatever terminal launched it: it goes on
+/// polling a node that has nothing left to report until its timeout
+/// expires. On 2026-09-19 a probe sat for eleven minutes past a stop
+/// that had already emptied the node, and the terminal stayed busy
+/// throughout.
+///
+/// Read from /proc rather than pkill: the pattern would match the
+/// shell carrying it, and this process must not kill itself.
+fn local_runs() -> Vec<(u32, String)> {
+    let me = std::process::id();
+    let mut out = Vec::new();
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for ent in dir.flatten() {
+        let name = ent.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Ok(pid) = name.parse::<u32>() else { continue };
+        if pid == me {
+            continue;
+        }
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .unwrap_or_default();
+        if comm.trim() != "beamfs-xfstests" {
+            continue;
+        }
+        let args = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+            .unwrap_or_default()
+            .replace('\0', " ")
+            .trim()
+            .to_string();
+        out.push((pid, args));
+    }
+    out
+}
+
+fn signal(pid: u32, sig: &str) {
+    let _ = std::process::Command::new("kill")
+        .args([sig, &pid.to_string()])
+        .output();
+}
+
 /// Stop the work on every node, and prove it stopped.
 ///
 /// This printed "stopped" and returned. On 2026-09-19 it left a check
@@ -952,6 +997,39 @@ fn stop(cfg: &Config, hard: bool) -> std::process::ExitCode {
             stubborn += 1;
         }
     }
+
+    // The nodes are free; whatever was driving them is not.
+    let mut local = local_runs();
+    if !local.is_empty() {
+        println!();
+        for (pid, args) in &local {
+            println!("  local run {pid}: {args}");
+        }
+        for (pid, _) in &local {
+            signal(*pid, "-TERM");
+        }
+        for _ in 0..5 {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            local = local_runs();
+            if local.is_empty() {
+                break;
+            }
+        }
+        for (pid, _) in &local {
+            signal(*pid, "-KILL");
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        local = local_runs();
+        if local.is_empty() {
+            println!("  local runs stopped");
+        } else {
+            for (pid, _) in &local {
+                println!("  local run {pid} survived SIGKILL");
+            }
+            stubborn += local.len();
+        }
+    }
+
     println!();
     if stubborn > 0 {
         std::process::ExitCode::FAILURE

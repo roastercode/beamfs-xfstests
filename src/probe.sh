@@ -75,7 +75,8 @@ while kill -0 $CP 2>/dev/null; do
       sudo cat "/proc/$p/stack" 2>/dev/null | sed 's/^/    /'
     done
     echo "--- test process ---"
-    for p in $(pgrep -f "tests/$T" 2>/dev/null); do
+    # Bracketed: the pgrep command line carries the pattern itself.
+    for p in $(pgrep -f "[t]ests/$T" 2>/dev/null); do
       echo "  pid $p wchan=$(cat /proc/$p/wchan 2>/dev/null)"
       sed 's/^/    /' "/proc/$p/io" 2>/dev/null
     done
