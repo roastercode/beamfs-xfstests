@@ -450,7 +450,21 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
     // "aborting" is xfstests refusing to start, not a filesystem
     // verdict. Counting it as a failure is how a stale mount became an
     // afternoon of chasing a defect that was not there.
-    let aborted = out.contains("aborting");
+    // xfstests refusing to start is not the filesystem failing, and
+    // counting it as one produces a verdict about nothing. "aborting"
+    // alone missed the cases that actually happen: on 2026-09-19 a
+    // control run on ext2 could not mkfs its scratch device -- the
+    // previous series had left it held -- and the run was recorded as
+    // a failure, which then implicated the station in the contrast.
+    const REFUSALS: [&str; 6] = [
+        "aborting",
+        "failed to mkfs",
+        "Interrupted!",
+        "apparently in use by the system",
+        "is mounted but not a type",
+        "Passed all 0 tests",
+    ];
+    let aborted = REFUSALS.iter().any(|m| out.contains(m));
     /*
      * The shell reports its own kill, not the test's.
      *
@@ -980,8 +994,16 @@ pub fn contrast(rows: &[Contrast]) -> String {
     if others.is_empty() {
         return "no control filesystem in this run: nothing to contrast".into();
     }
-    let b_bad = b.failed + b.aborted > 0;
-    let o_bad = others.iter().any(|r| r.failed + r.aborted > 0);
+    // An aborted series measured nothing, so it cannot implicate
+    // anything. Saying so beats a verdict drawn from two runs that
+    // never reached their own checks.
+    if b.aborted > 0 || others.iter().any(|r| r.aborted > 0) {
+        return "a series was aborted before it measured anything: \
+                nothing is implicated, and the run has to be repeated"
+            .into();
+    }
+    let b_bad = b.failed > 0;
+    let o_bad = others.iter().any(|r| r.failed > 0);
     match (b_bad, o_bad) {
         (true, true) => "both beamfs and the control failed: the station is implicated \
                          before the filesystem is"
@@ -2080,11 +2102,14 @@ mod tests {
         assert!(v.contains("station is implicated"), "{v}");
     }
 
-    /// An aborted trial counts as a failure for this purpose.
+    /// An aborted trial is not a failure. This test asserted the
+    /// opposite when it was written, which is how a control run whose
+    /// ext2 arm never started produced a verdict implicating the
+    /// station. The rule it encoded was the defect.
     #[test]
-    fn an_abort_counts_as_a_failure() {
+    fn an_abort_is_not_a_failure() {
         let v = contrast(&[row("beamfs", 0, 1), row("ext2", 0, 0)]);
-        assert!(v.contains("beamfs failed where the control did not"), "{v}");
+        assert!(v.contains("nothing is implicated"), "{v}");
     }
 
     /// Without a control there is nothing to contrast.
@@ -2099,6 +2124,15 @@ mod tests {
     fn neither_failing_separates_nothing() {
         let v = contrast(&[row("beamfs", 0, 0), row("ext2", 0, 0)]);
         assert!(v.contains("separates nothing"), "{v}");
+    }
+
+
+    /// A series that never ran implicates nothing, least of all the
+    /// station.
+    #[test]
+    fn an_aborted_series_implicates_nothing() {
+        let v = contrast(&[row("beamfs", 1, 0), row("ext2", 0, 1)]);
+        assert!(v.contains("nothing is implicated"), "{v}");
     }
 
 }
