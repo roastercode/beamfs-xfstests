@@ -21,8 +21,7 @@ use crate::node::NodeConn;
 
 /// Where the freshly built image is.
 fn newest_image() -> Option<PathBuf> {
-    let dir = PathBuf::from(std::env::var("HOME").ok()?)
-        .join("yocto/poky/build-qemux86/tmp/deploy/images/qemux86-64");
+    let dir = PathBuf::from(crate::lab::deploy_dir());
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for e in std::fs::read_dir(dir).ok()?.flatten() {
         let p = e.path();
@@ -156,7 +155,9 @@ fn md5(p: &Path) -> Option<String> {
 /// Returns when the node answers and its tools match, or an error
 /// naming the step that did not.
 pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
-    let image = newest_image().ok_or("no image under deploy/images/qemux86-64")?;
+    let image = newest_image().ok_or_else(|| {
+        format!("no .rootfs.beamfs under {}", crate::lab::deploy_dir())
+    })?;
     let age = std::fs::metadata(&image)
         .and_then(|m| m.modified())
         .ok()
@@ -165,6 +166,37 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
         .unwrap_or(0);
     println!("  image   : {} ({} min old)",
              image.file_name().unwrap_or_default().to_string_lossy(), age);
+
+    // What the chain held before this deploy. Between two campaigns
+    // beamfs-bench may have sealed an image of its own, and a BX run
+    // that silently overwrites it is how the two labs drifted onto
+    // different kernels for ten weeks.
+    if let Some(prev) = crate::chain::read() {
+        let now = crate::chain::sha256_file(&image).unwrap_or_default();
+        if !now.is_empty() && now != prev.image_sha256 {
+            let a = &prev.image_sha256[..16.min(prev.image_sha256.len())];
+            let b = &now[..16.min(now.len())];
+            println!("  chain   : replacing {a} ({}, sealed by {}) with {b}",
+                     prev.machine, prev.tool);
+        }
+    }
+
+    // Open the chain. BX deploys first, so it records which image the
+    // campaign is about to measure; beamfs-bench reads this back and
+    // refuses to run against a different one.
+    //
+    // Not fatal here: BX opens the chain rather than checking it, and
+    // a campaign that cannot write a file in ~/.local/share is still a
+    // campaign. It says so, which is the part that matters.
+    match crate::chain::write("beamfs-xfstests", &image) {
+        Ok(s) => {
+            let short = &s.image_sha256[..16.min(s.image_sha256.len())];
+            println!("  chain   : sealed {short} on {} (kernel {})",
+                     s.machine,
+                     if s.kernel_release.is_empty() { "unknown" } else { &s.kernel_release });
+        }
+        Err(e) => println!("  chain   : seal NOT written: {e}"),
+    }
 
     // Is the image newer than the code it is supposed to carry?
     //
@@ -371,8 +403,7 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
              &sym[..12.min(sym.len())]);
 
     {
-        let built = std::path::Path::new(
-            "/home/aurelien/yocto/poky/build-qemux86/tmp/deploy/images/qemux86-64/bzImage");
+        let built = std::path::Path::new(crate::lab::kernel_image());
         let age = std::fs::metadata(built)
             .and_then(|m| m.modified())
             .ok()

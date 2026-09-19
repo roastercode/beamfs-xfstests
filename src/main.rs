@@ -17,6 +17,8 @@
 //! TCG, and the suite is around 737 tests.
 
 mod wedge;
+mod lab;
+mod chain;
 mod deploy;
 mod bisect;
 mod bpf;

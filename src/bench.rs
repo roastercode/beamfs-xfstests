@@ -269,7 +269,7 @@ fn claim_state(c: &NodeConn) -> (Option<(String, u64)>, bool) {
             tag = Some(v.trim().to_string());
         }
     }
-    (tag.zip(age).map(|(t, a)| (t, a)), work)
+    (tag.zip(age), work)
 }
 
 /// Put the node in a state xfstests will start from.
@@ -1394,9 +1394,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         // A mounted device gives a table of inodes half-updated and
         // every CRC in it wrong, which reads exactly like a filesystem
         // destroyed -- 306 of them on 2026-09-13, on a sound volume.
-        let built = std::fs::metadata(
-            std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
-                .join("yocto/poky/build-qemux86/tmp/deploy/images/qemux86-64/bzImage"))
+        let built = std::fs::metadata(std::path::Path::new(crate::lab::kernel_image()))
             .and_then(|m| m.modified())
             .ok();
 
