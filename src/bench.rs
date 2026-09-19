@@ -946,6 +946,109 @@ pub fn run(
 /// CONFIG_IKCONFIG and has no zgrep, so the config is not there to
 /// read. The symbols are, and a kernel with a sanitizer carries a few
 /// hundred of them; a handful is a kernel that merely knows the word.
+/// One line of a control run: what a filesystem did with the same test.
+pub struct Contrast {
+    pub fstyp: String,
+    pub passed: usize,
+    pub failed: usize,
+    pub aborted: usize,
+    /// Blocks the failing trials lost, summed.
+    pub lost: usize,
+    /// Wall clock for the whole series, seconds.
+    pub secs: u64,
+}
+
+/// What a control run is allowed to conclude.
+///
+/// The configuration's own note on `fstyp` says why this exists: this
+/// station has no ECC, so a run against beamfs that reports nothing
+/// proves nothing by itself. The same load on a filesystem known to be
+/// sound, on the same devices in the same VM, is what separates a
+/// machine that corrupts from a filesystem that does.
+///
+/// The verdict is deliberately weak. Two filesystems that both fail
+/// implicate the station; beamfs failing alone implicates beamfs; and
+/// a difference in duration alone implicates neither, because ext2
+/// writes no parity and is expected to be faster.
+#[must_use]
+pub fn contrast(rows: &[Contrast]) -> String {
+    let beamfs = rows.iter().find(|r| r.fstyp == "beamfs");
+    let others: Vec<&Contrast> = rows.iter().filter(|r| r.fstyp != "beamfs").collect();
+    let Some(b) = beamfs else {
+        return "no beamfs series in this run: nothing to contrast".into();
+    };
+    if others.is_empty() {
+        return "no control filesystem in this run: nothing to contrast".into();
+    }
+    let b_bad = b.failed + b.aborted > 0;
+    let o_bad = others.iter().any(|r| r.failed + r.aborted > 0);
+    match (b_bad, o_bad) {
+        (true, true) => "both beamfs and the control failed: the station is implicated \
+                         before the filesystem is"
+            .into(),
+        (true, false) => "beamfs failed where the control did not, on the same devices \
+                          and the same load"
+            .into(),
+        (false, true) => "the control failed where beamfs did not: check the control's \
+                          own configuration before reading anything into it"
+            .into(),
+        (false, false) => "neither failed: this test separates nothing here".into(),
+    }
+}
+
+/// Run the same test against several filesystems, one after another.
+pub fn control(
+    cfg: &Config,
+    node: &Node,
+    test: &str,
+    trials: u32,
+    fstyps: &[String],
+) -> Result<Vec<Contrast>, String> {
+    println!("  node    : {}", node.name);
+    println!("  test    : {test}");
+    println!("  against : {}", fstyps.join(", "));
+    println!("  {trials} trial(s) each, same devices, same VM, same kernel");
+    println!();
+
+    let mut rows = Vec::new();
+    for f in fstyps {
+        println!("  ======== {f} ========");
+        let mut c = cfg.clone();
+        f.clone_into(&mut c.fstyp);
+        let t0 = std::time::Instant::now();
+        let r = run(&c, node, test, trials)?;
+        rows.push(Contrast {
+            fstyp: f.clone(),
+            passed: r.passed,
+            failed: r.failed,
+            aborted: r.aborted,
+            lost: r.lost.iter().sum(),
+            secs: t0.elapsed().as_secs(),
+        });
+        println!();
+    }
+
+    println!("  === control run ===");
+    println!(
+        "    {:<10} {:>7} {:>7} {:>8} {:>8} {:>9}",
+        "fstyp", "passed", "failed", "aborted", "lost", "seconds"
+    );
+    for r in &rows {
+        println!(
+            "    {:<10} {:>7} {:>7} {:>8} {:>8} {:>9}",
+            r.fstyp, r.passed, r.failed, r.aborted, r.lost, r.secs
+        );
+    }
+    println!();
+    println!("  {}", contrast(&rows));
+    println!();
+    println!("  duration is not a verdict: a filesystem that writes no parity");
+    println!("  is expected to be faster, and the per-write figures printed");
+    println!("  above each series are where that difference is legible.");
+    println!();
+    Ok(rows)
+}
+
 pub fn carries_sanitizer(c: &NodeConn) -> bool {
     let out = c
         .run("sudo grep -ciE 'kasan|kcsan' /proc/kallsyms 2>/dev/null || echo 0",
@@ -1951,4 +2054,51 @@ mod tests {
     fn force_takes_the_node() {
         assert_eq!(claim_decision(Some(("x".into(), 10)), true, true), Claim::Take);
     }
+
+    fn row(f: &str, failed: usize, aborted: usize) -> Contrast {
+        Contrast {
+            fstyp: f.into(),
+            passed: 10 - failed,
+            failed,
+            aborted,
+            lost: failed * 40,
+            secs: 600,
+        }
+    }
+
+    /// beamfs alone failing is the case the control run exists for.
+    #[test]
+    fn beamfs_failing_alone_implicates_beamfs() {
+        let v = contrast(&[row("beamfs", 3, 0), row("ext2", 0, 0)]);
+        assert!(v.contains("beamfs failed where the control did not"), "{v}");
+    }
+
+    /// Both failing points at the machine first, not at the filesystem.
+    #[test]
+    fn both_failing_implicates_the_station() {
+        let v = contrast(&[row("beamfs", 3, 0), row("ext2", 2, 0)]);
+        assert!(v.contains("station is implicated"), "{v}");
+    }
+
+    /// An aborted trial counts as a failure for this purpose.
+    #[test]
+    fn an_abort_counts_as_a_failure() {
+        let v = contrast(&[row("beamfs", 0, 1), row("ext2", 0, 0)]);
+        assert!(v.contains("beamfs failed where the control did not"), "{v}");
+    }
+
+    /// Without a control there is nothing to contrast.
+    #[test]
+    fn one_filesystem_alone_concludes_nothing() {
+        let v = contrast(&[row("beamfs", 3, 0)]);
+        assert!(v.contains("no control filesystem"), "{v}");
+    }
+
+    /// A clean pass on both separates nothing either.
+    #[test]
+    fn neither_failing_separates_nothing() {
+        let v = contrast(&[row("beamfs", 0, 0), row("ext2", 0, 0)]);
+        assert!(v.contains("separates nothing"), "{v}");
+    }
+
 }

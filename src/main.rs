@@ -116,6 +116,7 @@ fn main() -> std::process::ExitCode {
         Some("analyse" | "analyze") => do_analyse(args.get(2)),
         Some("matrix") => do_matrix(&cfg, args.get(2), args.get(3)),
         Some("bench") => do_bench(&cfg, args.get(2), args.get(3)),
+        Some("control") => do_control(&cfg, args.get(2), args.get(3), args.get(4)),
         Some("sweep") => do_sweep(&cfg, &args[2..]),
         Some("deploy") => do_deploy(&cfg, args.get(2)),
         Some("scenario") => {
@@ -176,6 +177,9 @@ fn usage() -> std::process::ExitCode {
          matrix   vary one condition at a time and see which the leak needs\n\
          bench    measure a test, a group or the whole suite, and compare\n\
          baseline run the same code several times and report the spread\n\
+         control  run one test against beamfs and a sound filesystem,\n\
+         \x20        same devices, and say which is implicated\n\
+         \x20        control [test] [trials] [fstyp,fstyp]\n\
          sweep    run every test of a selection once, one verdict each\n\
                   sweep [selection]   (default: the whole suite)\n\
          trend    what a test has lost lately, or which tests lose most\n\
@@ -1074,6 +1078,31 @@ fn do_bench(cfg: &Config, test: Option<&String>, trials: Option<&String>) -> std
 /// `baseline [test] [trials] [rounds]` -- generic/464, ten trials,
 /// three rounds by default. Nothing changes between rounds, so the
 /// difference between them is what the measurement does on its own.
+/// Run one test against beamfs and against a filesystem known to be
+/// sound, on the same devices, and print both.
+fn do_control(cfg: &Config, test: Option<&String>, trials: Option<&String>,
+              fstyps: Option<&String>) -> std::process::ExitCode {
+    let Some(node) = cfg.nodes.first() else {
+        eprintln!("no nodes configured");
+        return std::process::ExitCode::FAILURE;
+    };
+    let t = test.map(|s| s.as_str()).unwrap_or("generic/083");
+    let n: u32 = trials.and_then(|v| v.parse().ok()).unwrap_or(1);
+    // beamfs first: the control is there to interpret it, and a run
+    // interrupted half way is more useful with the subject measured
+    // than with only the control.
+    let list: Vec<String> = fstyps
+        .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+        .unwrap_or_else(|| vec!["beamfs".into(), "ext2".into()]);
+    match bench::control(cfg, node, t, n, &list) {
+        Ok(_) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("control: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 fn do_baseline(cfg: &Config, test: Option<&String>, trials: Option<&String>,
                rounds: Option<&String>) -> std::process::ExitCode {
     let Some(node) = cfg.nodes.first() else {
