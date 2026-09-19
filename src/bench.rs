@@ -203,6 +203,75 @@ fn commit() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
+/// Whether the node may be taken over, given what is on it.
+///
+/// `prepare` kills every check and fsstress it finds, deliberately: a
+/// test declared unreachable leaves its processes behind and the next
+/// measurement inherits them. That is right for leftovers and wrong
+/// for a run somebody started on purpose -- on 2026-09-19 a control
+/// run on ext2 was launched against a node three quarters of an hour
+/// into a beamfs run, and killed it. Both were lost.
+///
+/// The two cases look identical from outside, so `prepare` leaves a
+/// marker while it owns the node and the next caller reads it. A
+/// marker younger than the deadline with work still running means a
+/// live run; anything else means leftovers.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Claim {
+    /// Nothing is running, or what is running is abandoned.
+    Take,
+    /// A run owns this node. Its tag and age in seconds.
+    Busy(String, u64),
+}
+
+/// A marker older than this is stale whatever it says: a run that died
+/// without clearing it must not lock the node out for good.
+const CLAIM_STALE_AFTER: u64 = 6 * 3600;
+
+/// The decision alone, so it can be tested without a node.
+#[must_use]
+pub fn claim_decision(
+    marker: Option<(String, u64)>,
+    work_running: bool,
+    force: bool,
+) -> Claim {
+    if force || !work_running {
+        return Claim::Take;
+    }
+    match marker {
+        Some((tag, age)) if age < CLAIM_STALE_AFTER => Claim::Busy(tag, age),
+        _ => Claim::Take,
+    }
+}
+
+/// Read the node's marker and what it is doing.
+fn claim_state(c: &NodeConn) -> (Option<(String, u64)>, bool) {
+    let out = c
+        .run(
+            "sh -c 'echo work=$(pgrep -cx check); \
+             if [ -r /tmp/beamfs-xfstests.owner ]; then \
+               echo age=$(( $(date +%s) - $(stat -c %Y /tmp/beamfs-xfstests.owner) )); \
+               echo tag=$(cat /tmp/beamfs-xfstests.owner); \
+             fi'",
+            Duration::from_secs(20),
+        )
+        .unwrap_or_default();
+    let mut work = false;
+    let mut age = None;
+    let mut tag = None;
+    for l in out.lines() {
+        let l = l.trim();
+        if let Some(v) = l.strip_prefix("work=") {
+            work = v.trim().parse::<u32>().unwrap_or(0) > 0;
+        } else if let Some(v) = l.strip_prefix("age=") {
+            age = v.trim().parse::<u64>().ok();
+        } else if let Some(v) = l.strip_prefix("tag=") {
+            tag = Some(v.trim().to_string());
+        }
+    }
+    (tag.zip(age).map(|(t, a)| (t, a)), work)
+}
+
 /// Put the node in a state xfstests will start from.
 ///
 /// Every abort seen so far came from one of two things: the test volume
@@ -210,6 +279,16 @@ fn commit() -> String {
 /// disk. Both are cleared here rather than being diagnosed again.
 fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str)
     -> Result<String, String> {
+    // Refuse a node another run owns, before anything is killed.
+    let force = std::env::var("XFSTESTS_FORCE").is_ok();
+    let (marker, work) = claim_state(c);
+    if let Claim::Busy(tag, age) = claim_decision(marker, work, force) {
+        return Err(format!(
+            "node is running {tag}, started {} min ago; \
+             set XFSTESTS_FORCE=1 to take it anyway",
+            age / 60
+        ));
+    }
     /*
      * mkfs.ext2 needs -q -F to run unattended on a device that already
      * holds a filesystem; mkfs.beamfs needs neither and does not know
@@ -230,7 +309,8 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str)
         // Killed by name and waited for: pkill returns before the
         // processes are gone, and a mount that is still held refuses to
         // go however many times it is asked.
-        "sudo sh -c 'pkill -9 check fsstress xfs_io fsx 2>/dev/null; \
+        "sudo sh -c 'printf \"{fstyp} {mkfs_opts}\" > /tmp/beamfs-xfstests.owner; \
+         pkill -9 check fsstress xfs_io fsx 2>/dev/null; \
          for i in 1 2 3 4 5; do \
            pgrep -x check >/dev/null 2>&1 || break; \
            sleep 1; \
@@ -1838,5 +1918,37 @@ mod tests {
     #[test]
     fn a_line_that_is_short_is_not_a_run() {
         assert!(Run::parse("abc generic/464").is_none());
+    }
+
+    /// A live run is not leftovers, and is not taken over.
+    #[test]
+    fn a_node_running_under_a_fresh_marker_is_busy() {
+        let d = claim_decision(Some(("beamfs generic/083".into(), 2700)), true, false);
+        assert_eq!(d, Claim::Busy("beamfs generic/083".into(), 2700));
+    }
+
+    /// Processes with no marker are what prepare was written to clear.
+    #[test]
+    fn work_without_a_marker_is_leftovers() {
+        assert_eq!(claim_decision(None, true, false), Claim::Take);
+    }
+
+    /// A marker left by a run that died must not lock the node for good.
+    #[test]
+    fn a_stale_marker_does_not_hold_the_node() {
+        let d = claim_decision(Some(("beamfs generic/083".into(), 7 * 3600)), true, false);
+        assert_eq!(d, Claim::Take);
+    }
+
+    /// An idle node is free whatever its marker says.
+    #[test]
+    fn an_idle_node_is_free() {
+        assert_eq!(claim_decision(Some(("x".into(), 10)), false, false), Claim::Take);
+    }
+
+    /// The override is an override.
+    #[test]
+    fn force_takes_the_node() {
+        assert_eq!(claim_decision(Some(("x".into(), 10)), true, true), Claim::Take);
     }
 }
