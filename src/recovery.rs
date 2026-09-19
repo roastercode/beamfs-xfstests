@@ -191,7 +191,7 @@ impl<'a> Recovery<'a> {
 
             let last = tail.lines().last().unwrap_or("").trim();
             let shown: String = last.chars().take(58).collect();
-            print!("\r      boot {:3}s  {shown:<58}", i * 5);
+            println!("      boot {:3}s  {shown:<58}", i * 5);
             let _ = std::io::stdout().flush();
 
             if len == last_len {
@@ -208,7 +208,7 @@ impl<'a> Recovery<'a> {
             }
 
             if self.responsive(conn) {
-                print!("\r{:100}\r", " ");
+                
                 println!("      back after {}s", i * 5);
                 jr.line(&format!("{name}: back after {}s", i * 5));
                 return RecoveryOutcome::Restarted;
@@ -218,7 +218,7 @@ impl<'a> Recovery<'a> {
             // it is stuck. Saying so beats waiting out the remaining
             // three minutes for the same answer.
             if quiet >= 12 && i > 8 {
-                print!("\r{:100}\r", " ");
+                
                 println!("      console silent for 60s, boot is stuck");
                 jr.line(&format!("{name}: console went silent during boot"));
                 break;
@@ -272,6 +272,40 @@ impl<'a> Recovery<'a> {
         // test for, not a side effect to ignore.
         let left = conn.leftover_work();
         if !left.is_empty() {
+            return false;
+        }
+
+        // And the root filesystem must still be writable.
+        //
+        // Step 2 of the recovery is sysrq u, an emergency remount
+        // read-only. It releases tasks waiting on writeback, which is
+        // what it is for, and it leaves the node unable to run a
+        // single test: xfstests writes its results, its .out.bad and
+        // its check.log to the root filesystem, so every test after
+        // that fails on an output mismatch that is really a failed
+        // write.
+        //
+        // Measured on 2026-09-19: a probe of generic/083 came back
+        // FAIL in ten seconds with "cannot remove ...: Read-only file
+        // system" on every line, on a node this function had just
+        // called repaired. A node that has been remounted read-only
+        // needs the restart, and saying so here is what reaches it.
+        let rw = conn
+            .run("findmnt -n -o OPTIONS / 2>/dev/null || cat /proc/mounts",
+                 Duration::from_secs(15))
+            .map(|o| {
+                let first = o.lines().next().unwrap_or("");
+                first.starts_with("rw,") || first == "rw"
+                    || o.lines().any(|l| {
+                        let mut f = l.split_whitespace();
+                        f.next().is_some()
+                            && f.next() == Some("/")
+                            && f.next().is_some()
+                            && f.next().is_some_and(|o| o.starts_with("rw"))
+                    })
+            })
+            .unwrap_or(false);
+        if !rw {
             return false;
         }
         true

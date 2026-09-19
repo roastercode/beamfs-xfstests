@@ -222,6 +222,8 @@ mod tests {
 
     #[test]
     fn a_seal_written_is_the_seal_read_back() {
+        let _g = crate::env_lock();
+
         let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let img = std::env::temp_dir().join("beamfs-chain-test-image.bin");
@@ -264,6 +266,8 @@ mod tests {
 
     #[test]
     fn each_architecture_has_its_own_seal() {
+        let _g = crate::env_lock();
+
         // Two chains run independently. With one shared file, an x86
         // deploy would overwrite the arm64 seal and the next arm64
         // bench would refuse the image it was right to use.
@@ -278,6 +282,8 @@ mod tests {
 
     #[test]
     fn an_explicit_path_still_wins() {
+        let _g = crate::env_lock();
+
         let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe { std::env::set_var("BEAMFS_CHAIN_SEAL", "/tmp/ailleurs.json") };
         assert_eq!(seal_path(), std::path::PathBuf::from("/tmp/ailleurs.json"));

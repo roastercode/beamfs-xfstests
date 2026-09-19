@@ -458,6 +458,8 @@ mod tests {
     /// discover that.
     #[test]
     fn available_lists_stems() {
+        let _g = crate::env_lock();
+
         let d = std::env::temp_dir().join(format!("bxb3-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("one.bt"), "BEGIN{}").unwrap();

@@ -351,7 +351,7 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
                 } else {
                     String::new()
                 };
-                print!("\r  loop {n:<4} {mark} {total:>3}s  {step:<9}{note}          ");
+                println!("  loop {n:<4} {mark} {total:>3}s  {step:<9}{note}          ");
                 let _ = std::io::Write::flush(&mut std::io::stdout());
                 i += 1;
                 std::thread::sleep(Duration::from_millis(if held >= 30 {
@@ -367,10 +367,10 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
         ) {
             Ok(r) => {
                 if r.formatted {
-                    println!("\r  loop {loops:<4} (fresh filesystem)                    ");
+                    println!("  loop {loops:<4} (fresh filesystem)                    ");
                 }
                 if r.dangling > 0 {
-                    println!("\r  loop {loops:<4} {} referenced-but-free (opposite symptom)   ",
+                    println!("  loop {loops:<4} {} referenced-but-free (opposite symptom)   ",
                              r.dangling);
                 }
                 r.lost
@@ -378,7 +378,7 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
             Err(e) => {
                 spin.store(false, std::sync::atomic::Ordering::Relaxed);
                 let _ = h.join();
-                println!("\r  loop {loops:<4} failed after {}s: {e}                 ",
+                println!("  loop {loops:<4} failed after {}s: {e}                 ",
                          t0.elapsed().as_secs());
                 failures += 1;
                 if failures >= GIVE_UP_AFTER {
@@ -406,11 +406,11 @@ pub fn campaign(cfg: &Config, node: &Node, hours: f64, max: u32) -> Result<Vec<C
         let lost = fresh_lost;
 
         if lost.is_empty() {
-            println!("\r  loop {loops:<4} clean   {}s                              ",
+            println!("  loop {loops:<4} clean   {}s                              ",
                      t0.elapsed().as_secs());
             continue;
         }
-        println!("\r  loop {loops:<4} {} BLOCKS LOST   {}s                         ",
+        println!("  loop {loops:<4} {} BLOCKS LOST   {}s                         ",
                  lost.len(), t0.elapsed().as_secs());
         let seq = caught.len() as u32 + 1;
         let dir = root.join(format!("{stamp}-{seq:03}"));

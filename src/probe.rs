@@ -28,8 +28,16 @@ use std::path::{Path, PathBuf};
 /// cursor mid-line. A println! after it starts where the cursor sits
 /// and the output walks diagonally down the terminal, which is what
 /// every run of this looked like.
+/// Erase the status line without wrapping.
+///
+/// This padded to 100 columns and returned. On a terminal narrower
+/// than that the padding wrapped, so the carriage return came back to
+/// the start of the second line and every message after it began one
+/// column further right -- a staircase down the screen for the length
+/// of a run. \x1b[2K erases the line the cursor is on, whatever its
+/// width, and moves nothing.
 fn clear_line() {
-    print!("\r{:100}\r", " ");
+    
     let _ = std::io::stdout().flush();
 }
 
@@ -122,6 +130,37 @@ impl<'a> Probe<'a> {
             say!("  console unavailable; guest-side data only");
         }
 
+        // The script named by XFSTESTS_BPF, attached for the length
+        // of the test.
+        //
+        // probe ignored the variable entirely: it is honoured by the
+        // campaign path and nowhere else, so every probe run asking
+        // for a script got the seven ordinary artefacts and no
+        // capture, with nothing saying the script had not started.
+        //
+        // Before the test starts, not after. Attached after the
+        // launch call -- which ends in a sleep and can outlive its
+        // own deadline -- the probe went on at the sixtieth second
+        // of a test that ended at the sixty-third, and reported 0
+        // updates and 0 verifies where bpftrace by hand counts
+        // 11047 and 84948 in twenty seconds. A capture of the last
+        // three seconds of a test reads exactly like a probe that
+        // does not work.
+        let bprobe = match std::env::var("XFSTESTS_BPF") {
+            Ok(name) if !name.is_empty() => match crate::bpf::start(&conn, &name) {
+                Ok(r) => {
+                    say!("  {} attached on {}", r.name, r.node());
+                    Some(r)
+                }
+                Err(e) => {
+                    say!("  {name} did not start: {e}");
+                    jr.line(&format!("bpf {name} did not start: {e}"));
+                    None
+                }
+            },
+            _ => None,
+        };
+
         // Deploy and launch, detached from the ssh session so the
         // connection can close while the script keeps running.
         let script = include_str!("probe.sh");
@@ -179,6 +218,7 @@ impl<'a> Probe<'a> {
             }
         }
 
+
         let start = Instant::now();
         let dir = format!("/tmp/probe-{safe}");
         let mut spin = 0u64;
@@ -209,8 +249,7 @@ impl<'a> Probe<'a> {
                     misses = 0;
                     let f: Vec<&str> = o.split_whitespace().collect();
                     let g = |i: usize| f.get(i).copied().unwrap_or("?");
-                    print!(
-                        "\r  {} {:5}s  {:>4} samples {:>9} bytes  writes={:<10} D={:<3}",
+                    println!("  {} {:5}s  {:>4} samples {:>9} bytes  writes={:<10} D={:<3}",
                         ['|', '/', '-', '\\'][(spin % 4) as usize],
                         el.as_secs(), g(1), g(2), g(5), g(4)
                     );
@@ -237,7 +276,7 @@ impl<'a> Probe<'a> {
                     // Three consecutive misses, because one ssh can fail
                     // for reasons that are not the node dying.
                     misses += 1;
-                    print!("\r  ? {:5}s  node not answering ({misses}/3)          ",
+                    println!("  ? {:5}s  node not answering ({misses}/3)          ",
                            el.as_secs());
                     let _ = std::io::stdout().flush();
                     if misses >= 3 {
@@ -256,6 +295,24 @@ impl<'a> Probe<'a> {
             std::thread::sleep(Duration::from_secs(10));
         }
         clear_line();
+
+        // The probe first, so what it kept is the test and not the
+        // test plus the checker that runs after it.
+        if let Some(r) = bprobe {
+            match r.stop_into(&conn, &self.out) {
+                Some((p, sz)) => {
+                    say!("  kept {} ({} KiB)",
+                         p.file_name().unwrap_or_default().to_string_lossy(),
+                         sz / 1024);
+                    jr.line(&format!("bpf capture: {} ({sz} bytes)", p.display()));
+                    crate::bpf::speak(&p);
+                }
+                None => {
+                    say!("  the probe brought nothing back");
+                    jr.line("bpf capture: nothing came back");
+                }
+            }
+        }
 
         // Whatever the outcome, take what exists rather than waiting for
         // an archive a dead node will never produce.

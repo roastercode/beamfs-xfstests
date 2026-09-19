@@ -100,7 +100,7 @@ impl Progress {
                     String::new()
                 };
 
-                print!("\r  {shown:<34} {mark} {total:>3}s  {step:<9}{note}          ");
+                println!("  {shown:<34} {mark} {total:>3}s  {step:<9}{note}          ");
                 let _ = std::io::stdout().flush();
                 i += 1;
                 // Slower when a step is dragging: a fast spinner next to
@@ -123,7 +123,7 @@ impl Progress {
             let _ = h.join();
         }
         println!(
-            "\r  {:<34} {verdict}   {}s                              ",
+            "  {:<34} {verdict}   {}s                              ",
             self.label,
             self.started.elapsed().as_secs()
         );

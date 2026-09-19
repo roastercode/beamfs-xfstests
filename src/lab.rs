@@ -118,8 +118,6 @@ mod tests {
     /// threads, so two tests setting the same variable read each
     /// other's value. Every test that touches the environment takes
     /// this first.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn clear() {
         for v in [
             "XFSTESTS_POKY_DIR",
@@ -133,7 +131,7 @@ mod tests {
 
     #[test]
     fn the_defaults_are_the_old_literals() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = crate::env_lock();
         clear();
         let home = std::env::var("HOME").unwrap_or_default();
         assert_eq!(calc_build_dir_name(), "build-qemux86");
@@ -151,7 +149,7 @@ mod tests {
 
     #[test]
     fn arm64_gets_image_not_bzimage() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = crate::env_lock();
         clear();
         unsafe { std::env::set_var("XFSTESTS_MACHINE", "qemuarm64") };
         unsafe { std::env::set_var("XFSTESTS_BUILD_DIR", "build-qemu-arm64") };
@@ -164,7 +162,7 @@ mod tests {
     fn the_machine_alone_selects_a_chain() {
         // Setting the machine without the build directory used to give
         // a path that does not exist. One variable now names a chain.
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = crate::env_lock();
         clear();
         unsafe { std::env::set_var("XFSTESTS_MACHINE", "qemuarm64") };
         assert_eq!(calc_build_dir_name(), "build-qemu-arm64");
@@ -176,7 +174,7 @@ mod tests {
 
     #[test]
     fn an_explicit_build_dir_still_wins() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = crate::env_lock();
         clear();
         unsafe { std::env::set_var("XFSTESTS_MACHINE", "qemuarm64") };
         unsafe { std::env::set_var("XFSTESTS_BUILD_DIR", "build-ailleurs") };
@@ -186,7 +184,7 @@ mod tests {
 
     #[test]
     fn an_empty_variable_is_not_an_override() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = crate::env_lock();
         clear();
         unsafe { std::env::set_var("XFSTESTS_MACHINE", "   ") };
         assert_eq!(calc_machine(), "qemux86-64");

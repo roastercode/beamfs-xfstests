@@ -147,6 +147,8 @@ mod tests {
     /// put through a filesystem known to be sound.
     #[test]
     fn the_filesystem_under_test_can_be_changed() {
+        let _g = crate::env_lock();
+
         let c = Config::from_env();
         assert_eq!(c.fstyp, "beamfs");
 
@@ -158,6 +160,8 @@ mod tests {
 
     #[test]
     fn an_empty_value_leaves_the_default() {
+        let _g = crate::env_lock();
+
         unsafe { std::env::set_var("XFSTESTS_FSTYP", "  ") };
         let c = Config::from_env();
         unsafe { std::env::remove_var("XFSTESTS_FSTYP") };
@@ -166,6 +170,8 @@ mod tests {
 
     #[test]
     fn a_node_spec_parses_into_the_right_fields() {
+        let _g = crate::env_lock();
+
         std::env::set_var("XFSTESTS_NODES", "c1:10.0.0.1:vdb:vdh,c2:10.0.0.2");
         let c = Config::from_env();
         std::env::remove_var("XFSTESTS_NODES");

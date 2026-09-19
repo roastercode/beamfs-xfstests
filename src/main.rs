@@ -69,6 +69,21 @@ const POLL: Duration = Duration::from_secs(60);
 /// the slowest measured test (583s) cannot trip it.
 const STALL_LIMIT: u32 = 20;
 
+/// One lock for every test that writes to the process environment.
+///
+/// set_var changes the whole process, not the test that calls it. Eight
+/// tests across five modules do it, cargo runs them on as many threads
+/// as the machine has, and one of them read XFSTESTS_FSTYP as "ext2"
+/// while another was halfway through setting it: cargo test failed
+/// about one run in three, always on a different test, with nothing
+/// wrong in the code it was testing. A suite that fails at random is a
+/// suite nobody can use to decide anything.
+#[cfg(test)]
+pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn main() -> std::process::ExitCode {
     // Which chain this run belongs to, before anything reads a path.
     //
@@ -807,7 +822,7 @@ fn do_probe(cfg: &Config, test: Option<&String>, node: Option<&String>)
 
     // The status line is written with \r and no newline; anything
     // printed after it without clearing walks across the terminal.
-    print!("\r{:100}\r", " ");
+    
     println!("  outcome : {end:?}");
 
     // A lost node is left recovered, not left dead. The next command

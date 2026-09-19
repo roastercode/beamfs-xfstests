@@ -67,8 +67,7 @@ impl Progress {
             }
         }
 
-        print!(
-            "\r  [{bar}]{pct:3}% {spin} {mins:4}min {done:3}/{total} \
+        println!("  [{bar}]{pct:3}% {spin} {mins:4}min {done:3}/{total} \
              OK={pass:<3} KO={fail:<3} NR={notrun:<3} HG={hang:<2} MF={mountfail:<2}{nodes}",
             total = self.total,
         );
@@ -77,7 +76,7 @@ impl Progress {
 
     /// Clear the line so whatever prints next starts clean.
     pub fn clear(&self) {
-        print!("\r{:width$}\r", " ", width = 130);
+        
         let _ = std::io::stdout().flush();
     }
 
