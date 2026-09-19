@@ -119,13 +119,23 @@ awk "{{print \"vfs.dentries=\" \$1}}" /proc/sys/fs/dentry-state
 # --- block layer, per device ---
 for d in {scratch} {test}; do
   n=$(basename $d)
-  set -- $(awk -v D="$n" "\$3==D {{print \$4, \$6, \$8, \$10, \$12, \$14}}" /proc/diskstats)
+  # Fields 4..14 of /proc/diskstats, by number because their names are
+  # not in the file: 4 reads, 6 sectors read, 8 writes, 10 sectors
+  # written, 11 ms spent writing, 12 requests in flight, 13 ms with at
+  # least one in flight, 14 weighted ms = the integral of the queue
+  # depth over time. 11 and 13 are what turn counters into a latency
+  # and an occupancy; 14 was previously collected under the name
+  # io_ticks, which is field 13, so every reading of it was a
+  # different quantity from the one its name claimed.
+  set -- $(awk -v D="$n" "\$3==D {{print \$4, \$6, \$8, \$10, \$11, \$12, \$13, \$14}}" /proc/diskstats)
   echo "blk.$n.rd_ios=${{1:-0}}"
   echo "blk.$n.rd_sectors=${{2:-0}}"
   echo "blk.$n.wr_ios=${{3:-0}}"
   echo "blk.$n.wr_sectors=${{4:-0}}"
-  echo "blk.$n.in_flight=${{5:-0}}"
-  echo "blk.$n.io_ticks=${{6:-0}}"
+  echo "blk.$n.wr_ticks=${{5:-0}}"
+  echo "blk.$n.in_flight=${{6:-0}}"
+  echo "blk.$n.io_ticks=${{7:-0}}"
+  echo "blk.$n.weighted_ms=${{8:-0}}"
   [ -r /sys/block/$n/queue/nr_requests ] && echo "blk.$n.nr_requests=$(cat /sys/block/$n/queue/nr_requests)"
   [ -r /sys/block/$n/queue/scheduler ] && echo "s:blk.$n.scheduler=$(sed "s/.*\[//;s/\].*//" /sys/block/$n/queue/scheduler)"
   [ -r /sys/block/$n/queue/write_cache ] && echo "s:blk.$n.write_cache=$(cat /sys/block/$n/queue/write_cache)"
@@ -320,6 +330,62 @@ pub fn discriminate(records: &[Record]) -> Vec<(String, f64, i64, i64)> {
     out
 }
 
+/// What the block layer did during a trial, in the terms that mean
+/// something.
+///
+/// The counters are cumulative, so only their difference over the
+/// trial says anything, and `during` already holds that difference.
+/// Three derived numbers answer three separate questions:
+///
+///   - latency: ms spent writing divided by writes. How long one write
+///     took, which is a property of the storage under the guest.
+///   - occupancy: ms with at least one request in flight over the
+///     trial's wall clock. Whether the device was ever idle.
+///   - depth: weighted ms over the trial's wall clock, the integral of
+///     the queue length over time. A value pinned at 1.0 with high
+///     occupancy means every write waited for the one before it --
+///     nothing the filesystem submits is ever in flight together, and
+///     the throughput ceiling that follows is arithmetic, not luck.
+///
+/// Measured on generic/083 against beamfs: depth 0.96 to 1.02 across
+/// four windows, occupancy 83 to 85 per cent, 72 to 142 ms per write.
+/// Whether that ceiling belongs to the filesystem or to the host is
+/// what a control run on another filesystem settles; this only makes
+/// the question askable without rediscovering the field numbers.
+pub fn io_summary(r: &Record) -> Vec<(String, f64, f64, f64, f64)> {
+    let mut out = Vec::new();
+    let ms = (r.secs as f64) * 1000.0;
+    if ms <= 0.0 {
+        return out;
+    }
+    let devs: Vec<String> = r
+        .during
+        .v
+        .keys()
+        .filter_map(|k| {
+            k.strip_prefix("blk.")
+                .and_then(|r| r.strip_suffix(".wr_ios"))
+                .map(std::string::ToString::to_string)
+        })
+        .collect();
+    for d in devs {
+        let get = |f: &str| r.during.get(&format!("blk.{d}.{f}")).unwrap_or(0) as f64;
+        let wio = get("wr_ios");
+        if wio <= 0.0 {
+            continue;
+        }
+        // Every read of `get` happens before `d` moves into the tuple:
+        // the closure borrows `d` to build the key, so the borrow has
+        // to end first.
+        let latency = get("wr_ticks") / wio;
+        let occupancy = get("io_ticks") * 100.0 / ms;
+        let depth = get("weighted_ms") / ms;
+        let rate = get("wr_sectors") / 2.0 * 1000.0 / ms;
+        out.push((d, latency, occupancy, depth, rate));
+    }
+    out
+}
+
 /// Print what separated the failures, and what it does not mean.
 pub fn report(records: &[Record]) {
     let fails = records.iter().filter(|r| !r.passed).count();
@@ -383,6 +449,31 @@ pub fn report(records: &[Record]) {
         }
     }
     if records.iter().any(|r| !r.passed) {
+        println!();
+    }
+
+    // The block layer, per trial, in derived terms. Counters alone do
+    // not show a queue that never holds more than one request.
+    let mut any = false;
+    for r in records {
+        for (dev, lat, occ, depth, kbs) in io_summary(r) {
+            if !any {
+                println!("  what the block layer did:");
+                println!(
+                    "    {:<6} {:<8} {:>9} {:>10} {:>9} {:>10}",
+                    "trial", "device", "ms/write", "busy %", "depth", "kB/s"
+                );
+                any = true;
+            }
+            println!(
+                "    {:<6} {:<8} {lat:>9.2} {occ:>10.0} {depth:>9.2} {kbs:>10.0}",
+                r.n, dev
+            );
+        }
+    }
+    if any {
+        println!("  depth is the mean number of requests in flight: at 1.00 with");
+        println!("  a busy device, every write waited for the one before it.");
         println!();
     }
 
@@ -469,4 +560,55 @@ mod tests {
         ];
         assert!(discriminate(&rs).is_empty());
     }
+
+    /// A device that never held more than one request has depth 1.
+    ///
+    /// The numbers are the ones measured on generic/083: 259 writes in
+    /// thirty seconds, 30 600 ms spent writing, 25 000 ms with a
+    /// request in flight, 30 500 weighted ms. Latency comes out near
+    /// 118 ms, occupancy near 83 per cent, depth near 1.0 -- and a
+    /// depth of one with a busy device is the whole finding.
+    #[test]
+    fn a_serialised_device_has_a_queue_depth_of_one() {
+        let r = rec(
+            1,
+            true,
+            &[
+                ("blk.vdc.wr_ios", 259),
+                ("blk.vdc.wr_sectors", 3300),
+                ("blk.vdc.wr_ticks", 30600),
+                ("blk.vdc.io_ticks", 25000),
+                ("blk.vdc.weighted_ms", 30500),
+            ],
+        );
+        let mut r = r;
+        r.secs = 30;
+        let s = io_summary(&r);
+        assert_eq!(s.len(), 1);
+        let (dev, latency, occupancy, depth, _rate) = &s[0];
+        assert_eq!(dev, "vdc");
+        assert!((latency - 118.1).abs() < 0.5, "latency was {latency}");
+        assert!((occupancy - 83.3).abs() < 0.5, "occupancy was {occupancy}");
+        assert!((depth - 1.016).abs() < 0.01, "depth was {depth}");
+    }
+
+    /// A trial with no writes to a device says nothing about it rather
+    /// than dividing by zero.
+    #[test]
+    fn a_device_with_no_writes_is_left_out() {
+        let mut r = rec(1, true, &[("blk.vdb.wr_ios", 0), ("blk.vdb.wr_ticks", 0)]);
+        r.secs = 30;
+        assert!(io_summary(&r).is_empty());
+    }
+
+    /// A trial of zero seconds has no rate to report.
+    #[test]
+    fn a_trial_of_no_duration_yields_nothing() {
+        let mut r = rec(1, true, &[("blk.vdc.wr_ios", 100), ("blk.vdc.wr_ticks", 100)]);
+        // rec() gives a trial a duration; a rate per second needs one
+        // that is zero, which is what this is about.
+        r.secs = 0;
+        assert!(io_summary(&r).is_empty());
+    }
+
 }
