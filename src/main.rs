@@ -70,6 +70,28 @@ const POLL: Duration = Duration::from_secs(60);
 const STALL_LIMIT: u32 = 20;
 
 fn main() -> std::process::ExitCode {
+    // Which chain this run belongs to, before anything reads a path.
+    //
+    // The accessors in lab.rs memoise on first call, so the machine
+    // has to be settled here or a later --machine would be read after
+    // the paths it was meant to change. Two architectures are two
+    // chains, run together or one without the other; this is how one
+    // is named without exporting a variable for the whole shell.
+    {
+        let a: Vec<String> = std::env::args().collect();
+        let picked = a.iter().position(|x| x == "--machine")
+            .and_then(|i| a.get(i + 1).cloned())
+            .or_else(|| a.iter().find_map(|x| x.strip_prefix("--machine=").map(str::to_string)));
+        if let Some(m) = picked {
+            let m = m.trim();
+            if m.is_empty() {
+                eprintln!("--machine needs a value, for instance qemux86-64 or qemuarm64");
+                return std::process::ExitCode::FAILURE;
+            }
+            unsafe { std::env::set_var("XFSTESTS_MACHINE", m) };
+        }
+    }
+
     let cfg = Config::from_env();
     // --no-bell is taken out of the arguments before anything reads
     // them, so it works after any command without every command having
@@ -93,6 +115,10 @@ fn main() -> std::process::ExitCode {
 
     let quiet = args.iter().any(|a| a == "--no-bell");
     args.retain(|a| a != "--no-bell");
+    if let Some(i) = args.iter().position(|a| a == "--machine") {
+        args.drain(i..=(i + 1).min(args.len() - 1));
+    }
+    args.retain(|a| !a.starts_with("--machine="));
 
     // Which commands are worth waiting for.
     //
