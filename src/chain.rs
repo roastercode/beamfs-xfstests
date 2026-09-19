@@ -28,6 +28,11 @@ use std::process::Command;
 
 /// Where the seal lives. Outside both repos: it belongs to the lab,
 /// not to either tool, and it must survive a clean checkout of both.
+///
+/// One seal per machine. The two architectures are two chains, run
+/// independently or one without the other, and a single file would
+/// have each deploy overwrite the other's -- every bench run after an
+/// x86 campaign would then refuse the arm64 image it was right to use.
 #[must_use]
 pub fn seal_path() -> PathBuf {
     if let Ok(p) = std::env::var("BEAMFS_CHAIN_SEAL") {
@@ -36,7 +41,8 @@ pub fn seal_path() -> PathBuf {
         }
     }
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join(".local/share/beamfs-chain/seal.json")
+        .join(".local/share/beamfs-chain")
+        .join(format!("seal-{}.json", crate::lab::machine()))
 }
 
 /// What one link of the chain recorded.
@@ -254,6 +260,28 @@ mod tests {
         assert_ne!(sha256_file(&a), sha256_file(&b));
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    fn each_architecture_has_its_own_seal() {
+        // Two chains run independently. With one shared file, an x86
+        // deploy would overwrite the arm64 seal and the next arm64
+        // bench would refuse the image it was right to use.
+        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        unsafe { std::env::remove_var("BEAMFS_CHAIN_SEAL") };
+        let p = seal_path();
+        let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        assert!(name.starts_with("seal-"), "{name}");
+        assert!(name.ends_with(".json"), "{name}");
+        assert!(name.contains(crate::lab::machine()), "{name}");
+    }
+
+    #[test]
+    fn an_explicit_path_still_wins() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        unsafe { std::env::set_var("BEAMFS_CHAIN_SEAL", "/tmp/ailleurs.json") };
+        assert_eq!(seal_path(), std::path::PathBuf::from("/tmp/ailleurs.json"));
+        unsafe { std::env::remove_var("BEAMFS_CHAIN_SEAL") };
     }
 
     #[test]

@@ -51,8 +51,25 @@ fn calc_poky_dir() -> String {
 }
 
 /// The build directory name, not its path.
+///
+/// Derived from the machine unless said otherwise. The two are a pair
+/// and setting one without the other yields a path that does not
+/// exist -- which is a poor way to learn that a campaign is aimed at
+/// the wrong architecture. One variable selects a chain.
 fn calc_build_dir_name() -> String {
-    from_env("XFSTESTS_BUILD_DIR", "build-qemux86")
+    if let Ok(v) = std::env::var("XFSTESTS_BUILD_DIR") {
+        let v = v.trim();
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    match calc_machine().as_str() {
+        "qemuarm64" => "build-qemu-arm64".to_string(),
+        "qemux86-64" => "build-qemux86".to_string(),
+        // An unknown machine gets the Yocto convention rather than a
+        // guess: bitbake's own layout is build-<machine>.
+        m => format!("build-{m}"),
+    }
 }
 
 /// The Yocto MACHINE the build targets.
@@ -140,6 +157,30 @@ mod tests {
         unsafe { std::env::set_var("XFSTESTS_BUILD_DIR", "build-qemu-arm64") };
         assert!(calc_kernel_image().ends_with("/Image"));
         assert!(calc_deploy_dir().ends_with("/images/qemuarm64"));
+        clear();
+    }
+
+    #[test]
+    fn the_machine_alone_selects_a_chain() {
+        // Setting the machine without the build directory used to give
+        // a path that does not exist. One variable now names a chain.
+        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear();
+        unsafe { std::env::set_var("XFSTESTS_MACHINE", "qemuarm64") };
+        assert_eq!(calc_build_dir_name(), "build-qemu-arm64");
+        assert!(calc_deploy_dir().ends_with("build-qemu-arm64/tmp/deploy/images/qemuarm64"));
+        assert!(calc_kernel_image().ends_with("/Image"));
+        clear();
+        assert_eq!(calc_build_dir_name(), "build-qemux86");
+    }
+
+    #[test]
+    fn an_explicit_build_dir_still_wins() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear();
+        unsafe { std::env::set_var("XFSTESTS_MACHINE", "qemuarm64") };
+        unsafe { std::env::set_var("XFSTESTS_BUILD_DIR", "build-ailleurs") };
+        assert_eq!(calc_build_dir_name(), "build-ailleurs");
         clear();
     }
 
