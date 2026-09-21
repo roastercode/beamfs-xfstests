@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: GPL-2.0-only
-.TH BEAMFS-XFSTESTS 1 "2026-09-09" "beamfs-xfstests" "beamfs development tools"
+.TH BEAMFS-XFSTESTS 1 "2026-09-20" "beamfs-xfstests" "beamfs development tools"
 
 .TP
 .B sweep \fR[\fIselection\fR]
@@ -109,8 +109,42 @@ it had. Work is split across nodes, because a test that takes ten
 seconds on hardware takes two to three minutes under emulation.
 
 .SH COMMANDS
+.sp
+Since 1.2.0
+.B deploy
+refuses a node that is running a test, as
+.B bench
+and
+.B sweep
+always have. It reboots the node, and a deploy run to look at the
+display once rebooted one twelve minutes into a thirty-minute test.
+.B XFSTESTS_FORCE=1
+takes it anyway.
 .TP
 .B run
+Shard the suite across the configured nodes and follow it.
+
+Before any test runs, four things are established, each because its
+absence cost a campaign.
+
+A lock in /tmp names the process that owns the lab. Two orchestrators on
+one node share a scratch device and a results file: the second wipes
+what the first proved and both run tests against the same disk.
+
+The chain step refuses to start when the repository and the Yocto layer
+disagree, or when an image newer than the deployed one sits in the build
+directory. The kernel compiles the layer's copy, so a fix committed and
+not mirrored is simply not in the build \(em and every commit, diff and
+addr2line says it is.
+
+The prepare step stops whatever the last campaign left, clears the
+verdict file and the kernel ring when the run starts fresh, and waits
+for writeback to drain, before preflight judges the node. Preflight only
+looks; it used to look at a node still holding the previous run.
+
+Preflight then checks that the tools answering on the node are the ones
+this repository built, that nothing is mounted on the devices, and that
+the kernel is this build.
 Run the suite. The default when no command is given. Results are
 appended to the history as each test finishes, so an interrupted run
 loses nothing, and a second invocation resumes rather than starting
@@ -370,6 +404,25 @@ filesystem that corrupts.
 .B XFSTESTS_MKFS_OPTIONS
 Passed to mkfs.beamfs when a node is prepared.
 .TP
+.B XFSTESTS_CONFIG
+Where the settings file lives. Defaults to
+.IR ~/.config/beamfs-xfstests/config .
+One
+.I key = value
+per line, # for comments, keys being the variable names without the
+prefix and lowercased: nodes, machine, image, poky_dir, timeout,
+mkfs_options. Read before the environment and never overriding it, so a
+variable set on the command line stays the operator speaking about one
+run.
+.TP
+.B XFSTESTS_KEEP_IMAGE
+Set to keep a compressed copy of the volume when a check fails
+(DUMP_CORRUPT_FS). Off by default: the harness dd's the whole device and
+runs it through zstd, which on the x86 node is a gigabyte. generic/013
+took 56 seconds without it and 1875 with, the difference being
+compression alone, and the budget it blew was read as a filesystem that
+hangs.
+.TP
 .B XFSTESTS_TIMEOUT
 Seconds a single test may take before it is killed.
 .TP
@@ -388,6 +441,73 @@ work and comparing them compared the wrong thing.
 Set to 1 to collect blktrace and the kernel function profile around each
 trial. Off by default: both move the timing of a race, and a measurement
 that changes what it measures is worth nothing.
+.sp
+Until 0.7.0 this governed only whether the trace was collected:
+the node armed every beamfs tracepoint regardless, so a run made
+with tracing off still paid for it, and generic/013 was timed at
+950 seconds on a node that was tracing throughout. It now decides
+whether the node traces at all, and the preparation step prints
+the state it actually read back from the node.
+.SS Evidence
+Each failing trial keeps a directory of pieces: what the checker
+said, what the kernel said, the shell trace, the volume itself.
+.sp
+Until 1.5.0 repeated lines were collapsed before writing, so what
+was kept was already a summary.
+.BR generic/476 's
+fsck.verbose came out eleven lines long, everything the checker
+said about the scratch device reduced to one line and a count, and
+a defect appearing a thousand times a run could not be investigated
+from what remained. Pieces are now stored as they were said, and
+collapsed only when a case is read out loud.
+.SS Display
+Output is one block rewritten in place, as tall as there is news,
+with a spinner that turns while the node is alive. A line is left
+behind only once it is permanent: a verdict, a stage that ended, an
+error. Everything else is replaced by what comes after it.
+.sp
+Until 1.1.0 two threads wrote to the screen at once, the indicator
+drawing a spinner with a bare carriage return while the main thread
+printed over it, so a verdict could read
+.BR "volume kept: 6 MiB compressed82s  check" .
+One writer now owns the screen. The model lives in the
+.B liveblock
+crate and is shared with the build scripts.
+.sp
+Redirected to a file, the transient block is not written at all and
+only the permanent lines are kept, so a log reads as a sequence of
+events rather than a field of escape sequences.
+.TP
+.B XFSTESTS_PROFILE
+Set to 1 to arm the kernel function profiler and keep its counts
+with every case, as
+.B function.profile
+in the evidence directory. Independent of
+.BR XFSTESTS_TRACE :
+one answers where the time goes, the other what the disk did, and
+asking the first should not cost the second. Before 0.9.0 the
+profiler ran only under full tracing and nothing was ever kept, so
+every question about a duration was answered by guessing.
+.TP
+.B XFSTESTS_SCRUB_MS
+Milliseconds the scrubber waits between blocks. 0 parks the
+scrubber; empty, the default, leaves the node as it is.
+.sp
+Written both to
+.B /sys/module/beamfs/parameters/scrub_interval_ms
+and to every mounted volume. The first is what matters: xfstests
+makes and mounts its own scratch device after the preparation step,
+so a per-volume setting never reaches the volume actually under
+test. 1.4.0 sets the parameter, which the mounts still to come
+inherit; before it, a run asking for no scrubbing got none on the
+root filesystem and the test device, and the usual pace on the
+scratch device that carried the test.
+.sp
+The root filesystem of the lab node is itself beamfs, so a scrubber
+has been sweeping it at ten blocks a second under every measurement
+taken so far, each block costing seventeen Reed-Solomon decodes, and
+the pace halves again on every correction. Added in 0.8.0 to make
+that a condition rather than a constant.
 .TP
 .B XFSTESTS_TRACE_NS
 Set to 1 for nanosecond timestamps in the shell trace, through

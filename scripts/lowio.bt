@@ -36,7 +36,7 @@ tracepoint:block:block_rq_issue
 }
 
 /* What the filesystem said the block was. */
-kretprobe:beamfs_inline_lookup_or_alloc_phys { @lookups = count(); }
+kretprobe:beamfs_inline_lookup_or_alloc_phys_new { @lookups = count(); }
 
 tracepoint:beamfs:beamfs_block_alloc { @allocs = count(); }
 

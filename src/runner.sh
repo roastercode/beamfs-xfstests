@@ -4,7 +4,7 @@
 # One shard of the suite, one test per invocation.
 #
 # Deployed to each node and run there. Writes a line per test to
-# /tmp/xfs-results.txt as it goes, so a run that is interrupted keeps
+# /var/lib/beamfs-xfstests/results.txt as it goes, so a run that is interrupted keeps
 # everything it had done and the next one resumes from it.
 #
 # $1 TEST_DEV  $2 SCRATCH_DEV  $3 shard index  $4 shard count
@@ -19,7 +19,13 @@ LIMIT=${5:-300}; MKFS_OPTS=${6:--N 16384}; RESUME=${7:-1}
 # at 1133s; 1800s leaves margin without masking a hang.
 LONG_TESTS="522"
 LONG_LIMIT=1800
-R=/tmp/xfs-results.txt
+# Not /tmp: it is a tmpfs here (/var/volatile), so a recovery
+# that restarts the domain wipes every verdict the campaign had
+# and the resumed shard starts the suite again from test one.
+# Two hours of a run were repeated that way, twice over.
+sudo mkdir -p /var/lib/beamfs-xfstests
+sudo chown "$(id -u):$(id -g)" /var/lib/beamfs-xfstests
+R=/var/lib/beamfs-xfstests/results.txt
 
 # The node's own record, running beside the shard for the whole
 # campaign. Every diagnosis this week started with a node that had
@@ -50,7 +56,15 @@ fi
 # written before each test is what separates them. Falls back to the
 # tail when the marker has already scrolled out of the ring.
 dmesg_for_test() {
-	_d=$(sudo dmesg | sed -n "/BEGIN generic\/$1\$/,\$p")
+	# The LAST marker, not the first.
+	#
+	# sed from the first match takes everything after it, and the ring
+	# holds the markers of every earlier campaign as well: each test was
+	# credited with the kernel messages of every test that came after
+	# it. Whole runs came back with the same "incidents=12" on every
+	# test and not one of those failures was real.
+	_d=$(sudo dmesg | awk -v m="BEGIN generic/$1" \
+		'index($0, m) { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }')
 	if [ -z "$_d" ]; then
 		sudo dmesg | tail -60
 	else
@@ -67,6 +81,16 @@ export SCRATCH_DEV=/dev/$SCRATCH_DEV
 export SCRATCH_MNT=/mnt/scratch
 export MKFS_OPTIONS="$MKFS_OPTS"
 export MOUNT_OPTIONS=""
+# No image of the volume on every failure.
+#
+# DUMP_CORRUPT_FS makes the harness copy the whole device and
+# compress it when a check fails. On this node that is a
+# gigabyte through zstd: generic/013 took 56 seconds this
+# morning and 1875 this afternoon, all of it compression, and
+# the budget it blew was read as a filesystem that hangs.
+# The volume is kept by trace and by bench when they are asked
+# for it; a sweep wants the verdict.
+export DUMP_CORRUPT_FS=0
 CFG
 
 # The harness dispatches on FSTYP through a long list of case statements
@@ -249,7 +273,8 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
     # A test can pass while the kernel logs a BUG, a WARNING or an
     # uncorrectable block. The harness does not look, so the run reports
     # a green test over a filesystem that just corrupted something.
-    INC=$(sudo dmesg | sed -n "/BEGIN generic\/$t\$/,\$p" \
+    # Same trap as dmesg_for_test: from the LAST marker.
+    INC=$(dmesg_for_test "$t" \
           | grep -ciE "BUG:|WARNING:|Oops|call trace|uncorrectable|corrupt" 2>/dev/null)
     INC=${INC:-0}
 

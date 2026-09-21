@@ -3,7 +3,7 @@
  * What the inode holds when the allocation path decides.
  *
  * Three memsets land on blocks that have taken pointers, at three
- * offsets in beamfs_inline_lookup_or_alloc_phys -- one per level of
+ * offsets in beamfs_inline_lookup_or_alloc_phys_new -- one per level of
  * the tree. All three are guarded by "the pointer is zero", all three
  * callers hold i_alloc_mutex, and the blocks belong to five different
  * inodes.
@@ -21,7 +21,7 @@ tracepoint:beamfs:beamfs_slot_store
     @filled[args.parent] = 1;
 }
 
-kprobe:beamfs_inline_lookup_or_alloc_phys
+kprobe:beamfs_inline_lookup_or_alloc_phys_new
 {
     $i = (struct inode *)arg0;
     @ino[tid] = $i->i_ino;
@@ -43,6 +43,6 @@ kprobe:beamfs_tc_zeroed
     }
 }
 
-kretprobe:beamfs_inline_lookup_or_alloc_phys { delete(@ino[tid]); }
+kretprobe:beamfs_inline_lookup_or_alloc_phys_new { delete(@ino[tid]); }
 
 END { clear(@owner); clear(@filled); clear(@ino); printf("\n"); }

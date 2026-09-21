@@ -50,12 +50,23 @@ impl Case {
         self.trial
     }
 
+    /// Write a piece of evidence, whole.
+    ///
+    /// This used to collapse repeats before writing, which made the
+    /// files readable and the evidence useless: generic/476's
+    /// fsck.verbose came out eleven lines long, with everything the
+    /// checker said about the scratch device reduced to one line and a
+    /// count, so a defect that shows up a thousand times a run could
+    /// not be investigated from what was kept. Repeats are collapsed
+    /// when a case is read out loud, which is where the reading
+    /// happens; on disk a piece of evidence is what was said.
     fn put(&self, name: &str, body: &str) {
         let _ = std::fs::create_dir_all(&self.dir);
-        let _ = std::fs::write(self.dir.join(name), Self::collapse(body));
+        let _ = std::fs::write(self.dir.join(name), body);
     }
 
-    /// Keep the first of each kind of line and count the rest.
+    /// Keep the first of each kind of line and count the rest,
+    /// for showing a case. Never for storing one.
     ///
     /// generic/269's dmesg said the same thing 2305 times in 204 KiB,
     /// and the run before it kept a 704 KiB one. The sentence is worth
@@ -251,7 +262,7 @@ pub fn speak(case: &Case) {
     //
     // A ratelimited message repeats; the same sentence forty times is
     // one finding, and printing it forty times buries the other one.
-    let dmesg = read("dmesg");
+    let dmesg = Case::collapse(&read("dmesg"));
     // What treecheck caught in the act, kept apart from the rest.
     let mut caught: Vec<String> = Vec::new();
     let mut kernel: Vec<String> = Vec::new();
@@ -334,8 +345,8 @@ pub fn speak(case: &Case) {
     //
     // The inode counts tell them apart, so say so rather than print a
     // verdict that belongs to a fresh volume.
-    let fsck = read("fsck.verbose");
-    let full = read("full");
+    let fsck = Case::collapse(&read("fsck.verbose"));
+    let full = Case::collapse(&read("full"));
     if let Some((during, after)) = remade_after(&full, &fsck) {
         println!("    fsck.verbose describes a volume that was remade \
                   after the test: {after} inode(s) against {during} \
@@ -417,6 +428,7 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
         // Which tracepoints were on, so a trace that is empty can be
         // told from a trace that was never enabled.
         ("tracing.state", "@tracing".into()),
+        ("function.profile", "@profile".into()),
         ("interrupts", "/proc/interrupts".into()),
         ("locks", "/proc/locks".into()),
         ("buddyinfo", "/proc/buddyinfo".into()),
@@ -455,6 +467,8 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
                 "for d in /dev/{} /dev/{}; do echo \"--- $d ---\"; \
                  sudo fsck.beamfs -v $d 2>&1 | head -400; done",
                 node.test_dev, node.scratch_dev),
+            "@profile" => "sudo sh -c 'cat /sys/kernel/debug/tracing/trace_stat/function* 2>/dev/null \
+                | sort -k2 -rn | head -60' 2>/dev/null || true".to_string(),
             "@tracing" => "sudo sh -c 'for e in /sys/kernel/debug/tracing/events/beamfs/*/enable; \
                 do echo \"$(basename $(dirname $e)) $(cat $e)\"; done; \
                 echo \"tracing_on $(cat /sys/kernel/debug/tracing/tracing_on)\"' 2>/dev/null || true".to_string(),
@@ -885,6 +899,20 @@ mod collapse_tests {
         assert_ne!(
             Case::shape("[1.0] beamfs: block 1 has no parity"),
             Case::shape("[1.0] beamfs: block 1 beyond correction"));
+    }
+
+    #[test]
+    fn a_piece_of_evidence_is_stored_whole() {
+        let dir = std::env::temp_dir()
+            .join(format!("bx-evidence-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let case = Case { dir: dir.clone(), trial: 1, test: "generic/000".into() };
+        let body = "one\ntwo\ntwo\ntwo\nthree\n";
+        case.put("piece", body);
+        let back = std::fs::read_to_string(dir.join("piece")).unwrap();
+        assert_eq!(back, body, "evidence is kept as it was said");
+        assert!(!back.contains("... x"), "and never summarised on disk");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

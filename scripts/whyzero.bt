@@ -3,7 +3,7 @@
  * Why does the allocation path think the block is new?
  *
  * beamfs_tc_zeroed lands on blocks that have taken sixty-four pointers,
- * from beamfs_inline_lookup_or_alloc_phys on an ordinary write. Every
+ * from beamfs_inline_lookup_or_alloc_phys_new on an ordinary write. Every
  * memset there is guarded by a test that the pointer is zero, so either
  * the pointer really is zero in the inode at that instant, or the
  * memset is reached by a path that does not test it.
@@ -31,11 +31,11 @@ kprobe:beamfs_tc_zeroed
 }
 
 /* The decision itself: what the inode held on entry. */
-kprobe:beamfs_inline_lookup_or_alloc_phys
+kprobe:beamfs_inline_lookup_or_alloc_phys_new
 {
     @in[tid] = ((struct inode *)arg0)->i_ino;
 }
 
-kretprobe:beamfs_inline_lookup_or_alloc_phys { delete(@in[tid]); }
+kretprobe:beamfs_inline_lookup_or_alloc_phys_new { delete(@in[tid]); }
 
 END { clear(@live); clear(@in); printf("\n"); }

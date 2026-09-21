@@ -36,15 +36,9 @@ use std::path::{Path, PathBuf};
 /// column further right -- a staircase down the screen for the length
 /// of a run. \x1b[2K erases the line the cursor is on, whatever its
 /// width, and moves nothing.
-fn clear_line() {
-    
-    let _ = std::io::stdout().flush();
-}
+use crate::say;
+use crate::say::clear_line;
 
-/// Print a line, having first cleared whatever status was there.
-macro_rules! say {
-    ($($a:tt)*) => {{ clear_line(); println!($($a)*); }};
-}
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 

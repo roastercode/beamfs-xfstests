@@ -42,22 +42,53 @@ kprobe:mmb_sync    { @syncs = count(); }
  * @n is what the list held when the call started, so an inode with
  * nothing to lose is told from one that lost four.
  */
+/*
+ * The node's own root is beamfs too.
+ *
+ * Without this filter the script counts the rootfs's evictions,
+ * write_inodes and metadata buffers alongside the test's: a
+ * generic/083 run reported 2447 evictions and 174960 dirtied buffers
+ * with no way to tell which volume they belonged to, and the four
+ * paths it separated were separated across both. Every other script
+ * in this directory filters; this one did not.
+ */
 tracepoint:beamfs:beamfs_mmb
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
 {
-    @by_path[str(args.how)] = count();
-    @held[str(args.how)] = hist(args.n);
+    /*
+     * args.how, not str(args.how).
+     *
+     * The field is __string(how, how), which the kernel emits as
+     * __data_loc char[]: the record holds an offset and a length,
+     * not a pointer. str() on it returned the empty string, so every
+     * count landed under one nameless key -- @by_path[] 10139 and
+     * @held[] over all paths at once, which is exactly the
+     * distinction this script exists to make. bpftrace types a
+     * __data_loc field as a string already.
+     */
+    @by_path[args.how] = count();
+    @held[args.how] = hist(args.n);
     if (args.n > 0) {
-        @nonempty[str(args.how)] = count();
-        @buffers[str(args.how)] = sum(args.n);
+        @nonempty[args.how] = count();
+        @buffers[args.how] = sum(args.n);
     }
 }
 kprobe:mmb_invalidate
 {
+    /*
+     * Counted, not stacked.
+     *
+     * A kstack(6) here walks six frames on every invalidate, and
+     * mmb_invalidate is called once per eviction on a test that
+     * evicts twenty thousand inodes. On 2026-09-19 the node stopped
+     * answering ssh within its sixty-second budget while the script
+     * attached, and the run was lost before the test began.
+     *
+     * The tracepoint below already says which path an inode left by
+     * and how many buffers it held, which is the question.
+     */
     @invalidates = count();
     @invalidate_by[comm] = count();
-    /* The stack says whether this is eviction, unmount or something
-     * that should have synced first. */
-    @invalidate_stack[kstack(6)] = count();
 }
 
 /* ENOSPC on the allocation path: what the tree looks like when the
@@ -68,7 +99,7 @@ kretprobe:beamfs_alloc_block
     @alloc_failed = count();
 }
 
-kretprobe:beamfs_inline_lookup_or_alloc_phys
+kretprobe:beamfs_inline_lookup_or_alloc_phys_new
 /(int64)retval == -28/
 {
     @lookup_enospc = count();

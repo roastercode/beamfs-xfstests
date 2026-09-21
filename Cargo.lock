@@ -4,4 +4,13 @@ version = 4
 
 [[package]]
 name = "beamfs-xfstests"
-version = "0.5.1"
+version = "1.5.0"
+dependencies = [
+ "liveblock",
+]
+
+[[package]]
+name = "liveblock"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32f8f92618f9631a01afa6cd758ce9983d7789c374540942f8874984f8c615ef"

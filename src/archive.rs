@@ -105,7 +105,29 @@ impl Archive {
             .unwrap_or(false);
 
         if dirty {
-            format!("{sha}-dirty")
+            /*
+             * The changes, not the fact that there are changes.
+             *
+             * "-dirty" is the same string for every edit, so every
+             * working-tree revision of a day shares one shelf and the
+             * first verdict recorded for a test keeps the slot: one
+             * generic/013 at 8s, one at 52s and one at 1875s, all under
+             * one name, and only the first survives. A shelf is
+             * supposed to mean "this code produced these verdicts".
+             *
+             * The digest is of the diff itself, so a shelf changes
+             * exactly when the code does.
+             */
+            let digest = Command::new("sh")
+                .arg("-c")
+                .arg(format!("git -C {} diff HEAD | sha256sum", repo.display()))
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout)
+                     .chars().take(8).collect::<String>())
+                .unwrap_or_else(|| "unknown".into());
+            format!("{sha}-dirty-{digest}")
         } else {
             sha
         }

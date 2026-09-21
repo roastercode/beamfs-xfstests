@@ -16,6 +16,8 @@
 //! takes ten seconds on real hardware takes two to three minutes under
 //! TCG, and the suite is around 737 tests.
 
+mod nodelock;
+mod say;
 mod wedge;
 mod lab;
 mod chain;
@@ -46,6 +48,7 @@ mod node;
 mod nodestate;
 mod probe;
 mod recovery;
+mod clean;
 mod progress;
 mod result;
 
@@ -85,6 +88,10 @@ pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn main() -> std::process::ExitCode {
+    // Settings from a file before anything reads the environment,
+    // so a campaign is a command and not a paragraph of exports.
+    clean::load_config_file();
+
     // Which chain this run belongs to, before anything reads a path.
     //
     // The accessors in lab.rs memoise on first call, so the machine
@@ -149,6 +156,20 @@ fn main() -> std::process::ExitCode {
              | "--help" | "-h" | "stop")
     );
 
+    /*
+     * Asking for help never acts, whatever its position.
+     *
+     * --help was matched on args[1] only, so a subcommand took
+     * it for its own argument: 'probe --help' probed a node
+     * called --help, found none, fell back to the default one,
+     * booted it and ran its recovery; 'stop --help' killed a
+     * live campaign. A tool that acts when asked what it does
+     * cannot be explored safely.
+     */
+    if args.iter().skip(1).any(|a| a == "--help" || a == "-h") {
+        return usage();
+    }
+
     let code = match args.get(1).map(String::as_str) {
         Some("report") => report(&cfg, args.get(2)),
         Some("probe") => do_probe(&cfg, args.get(2), args.get(3)),
@@ -190,6 +211,8 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::SUCCESS;
         }
         Some("baseline") => do_baseline(&cfg, args.get(2), args.get(3), args.get(4)),
+        /* The usage text lists run as a command, so it is one. */
+        Some("run") => run(&cfg),
         Some("--help" | "-h") => usage(),
         // A typo must not start a campaign. "analyses" for "analyse"
         // fell through to run, which tried the aarch64 cluster -- powered
@@ -255,12 +278,120 @@ fn usage() -> std::process::ExitCode {
 }
 
 fn run(cfg: &Config) -> std::process::ExitCode {
+    /*
+     * One campaign at a time.
+     *
+     * Two orchestrators on one node share a scratch device and
+     * a results file: the second wipes what the first proved
+     * and both run tests against the same disk. Two hours of a
+     * run were lost that way, and neither set of verdicts
+     * meant anything afterwards.
+     *
+     * The lock holds a pid. A stale one -- the process is gone
+     * -- is taken over rather than obeyed, so a crash does not
+     * leave the tool refusing to start.
+     */
+    {
+        let lock = std::path::Path::new("/tmp/beamfs-xfstests-campaign.lock");
+        if let Ok(s) = std::fs::read_to_string(lock) {
+            if let Ok(pid) = s.trim().parse::<u32>() {
+                if pid != std::process::id()
+                    && std::path::Path::new(&format!("/proc/{pid}")).exists()
+                {
+                    eprintln!("\n  a campaign is already running here (pid {pid})");
+                    eprintln!("  stop it first, or remove {} if it is stale\n",
+                              lock.display());
+                    return std::process::ExitCode::FAILURE;
+                }
+            }
+        }
+        let _ = std::fs::write(lock, std::process::id().to_string());
+    }
+
     // Opened before anything is touched, so a run that dies during
     // preflight still says why. Thirty-minute runs leaving eight-line
     // logs is the specific thing this is here to stop.
     let mut jr = Journal::create(&std::env::temp_dir());
     println!();
     println!("  journal : {}", jr.path().display());
+    /*
+     * Bring each node to a known state before judging it.
+     *
+     * preflight only looks. It ran before anything was
+     * stopped, so a node still holding a shard from the last
+     * campaign was measured in that state -- and once a
+     * blocked task makes a node unusable, a run refuses to
+     * start over a condition a stop would have cleared.
+     *
+     * Everything here was being typed by hand before each
+     * campaign, which is the definition of a missing step.
+     */
+    /*
+     * Is the code about to be measured the code in the
+     * repository, and is the image on the node the newest one
+     * built? Neither was checked, and both have been false.
+     *
+     * A refusal, not a warning: a warning at the top of a
+     * seven-hour run is read by nobody, and what it produces
+     * cannot be told afterwards from a result that counts.
+     */
+    println!();
+    println!("  === CHAIN ===");
+    {
+        let mut wrong = clean::sources_in_sync();
+        if let Some(w) = clean::image_is_current() {
+            wrong.push(w);
+        }
+        if wrong.is_empty() {
+            println!("    sources and deployed image agree");
+        } else {
+            for w in &wrong {
+                println!("    {w}");
+            }
+            if std::env::var("BEAMFS_CHAIN_IGNORE").is_ok() {
+                println!("    BEAMFS_CHAIN_IGNORE set: running anyway");
+                jr.section("CHAIN BROKEN, run continued on request");
+            } else {
+                eprintln!();
+                eprintln!("  this run would not measure what it claims to");
+                eprintln!("  rsync the layer, or rebuild and deploy, then start again");
+                eprintln!();
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    }
+
+    println!();
+    println!("  === PREPARE ===");
+    for n in &cfg.nodes {
+        let c = NodeConn::new(n, cfg);
+        c.stop();
+        // A fresh campaign starts from nothing: old verdicts
+        // would be resumed into, old failure logs read as this
+        // run's, and the kernel ring still holds the markers of
+        // the previous campaign -- which is how every test came
+        // back with the same incident count.
+        if !cfg.resume {
+            let _ = c.run(
+                "sudo rm -f /var/lib/beamfs-xfstests/results.txt; \
+                 sudo rm -rf /tmp/xfs-failures; sudo dmesg -C",
+                Duration::from_secs(30));
+        }
+        // Writeback left by the kill drains in seconds. Refusing
+        // immediately on a non-zero count would reject a node
+        // that is simply finishing what it was told to abandon.
+        let mut waited = 0u64;
+        let mut blocked = c.blocked_tasks();
+        while blocked > 0 && waited < 60 {
+            std::thread::sleep(Duration::from_secs(5));
+            waited += 5;
+            blocked = c.blocked_tasks();
+        }
+        println!("    {:<10} shard stopped, {} blocked after {}s{}",
+                 n.name, blocked, waited,
+                 if cfg.resume { "" } else { ", verdicts cleared" });
+    }
+
     println!();
     println!("  === PREFLIGHT ===");
 
@@ -273,6 +404,32 @@ fn run(cfg: &Config) -> std::process::ExitCode {
         match c.preflight() {
             Ok(info) => {
                 let bad = info.contains("MISSING") || info.contains("=NO");
+                // A node with tasks in uninterruptible sleep is not ready.
+                //
+                // The first tests of a campaign then run against a device
+                // something else still holds, and their verdicts say more
+                // about the previous run than about this code. stop() has
+                // reported a clean node with blocked=1 right after.
+                let bad = bad || !info.contains("blocked=0");
+                // And the rest of what the run is about to assert: the
+                // tools answering are the ones built here, nothing is
+                // mounted on the devices, and the kernel is this build.
+                // bench has asked this since a checker dated 2011
+                // reported 306 inodes beyond correction on a sound
+                // volume; run never did.
+                let local = vec![(
+                    "fsck.beamfs".to_string(),
+                    format!("{}/git/beamfs/tools/fsck.beamfs/fsck.beamfs",
+                            std::env::var("HOME").unwrap_or_default()),
+                )];
+                let built = std::fs::metadata(
+                    std::path::Path::new(crate::lab::kernel_image()))
+                    .and_then(|m| m.modified()).ok();
+                let wrong = c.ready_to_measure(&local, built);
+                let bad = bad || !wrong.is_empty();
+                for w in &wrong {
+                    println!("    {:<10} {w}", n.name);
+                }
                 println!("    {:<10} {}{}", n.name, info.trim(),
                          if bad { "   <-- unusable" } else { "" });
                 jr.command(&n.name, "preflight", &info, !bad);
@@ -324,7 +481,7 @@ fn run(cfg: &Config) -> std::process::ExitCode {
         //
         // Recovery restarts a shard after a kill it believes worked. It
         // does not always: a campaign ended up with three runners on one
-        // node, all writing the same /tmp/xfs-results.txt and all
+        // node, all writing the same /var/lib/beamfs-xfstests/results.txt and all
         // running tests against the same scratch device. The counters
         // disagreed with each other and with the node, and no result
         // from that run means anything.
@@ -399,6 +556,16 @@ fn run(cfg: &Config) -> std::process::ExitCode {
     let mut written_off: BTreeMap<String, bool> = BTreeMap::new();
     // Failure logs already pulled, so each is fetched once.
     let mut have_log: BTreeMap<String, bool> = BTreeMap::new();
+
+    // Every verdict on its own line, as it lands.
+    //
+    // A bar redrawn in place says how many tests are done and
+    // not which ones: a run that reported four failures showed
+    // none of their names, and the only way to learn them was
+    // to read the node's result file by hand. The bar stays as
+    // a periodic summary; this is the record.
+    let mut annonces: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
 
     // One file per verdict, written as it lands.
     //
@@ -598,6 +765,13 @@ fn run(cfg: &Config) -> std::process::ExitCode {
                 }
             }
 
+            for r in rs.iter() {
+                if annonces.insert(format!("{}:{}", n.name, r.name)) {
+                    println!("  {:>3}/{}  {:<14} {:<9} {:>5}s  {:<8} {}",
+                             annonces.len(), SUITE_SIZE, r.name,
+                             r.outcome.as_str(), r.seconds, r.node, r.reason);
+                }
+            }
             per_node.push((n.name.clone(), cur, blocked));
             all.extend(rs);
         }
@@ -610,7 +784,7 @@ fn run(cfg: &Config) -> std::process::ExitCode {
         // it lives on a machine that may not survive the night.
         for n in &ready {
             let c = NodeConn::new(n, cfg);
-            if let Ok(body) = c.run("cat /tmp/xfs-results.txt 2>/dev/null",
+            if let Ok(body) = c.run("cat /var/lib/beamfs-xfstests/results.txt 2>/dev/null",
                                     Duration::from_secs(30)) {
                 if !body.trim().is_empty() {
                     let p = jr.artifacts().join(format!("results-{}.txt", n.name));
@@ -705,7 +879,7 @@ fn run(cfg: &Config) -> std::process::ExitCode {
         // are redeployed.
         for n in &ready {
             let c = NodeConn::new(n, cfg);
-            if let Ok(body) = c.run("cat /tmp/xfs-results.txt 2>/dev/null",
+            if let Ok(body) = c.run("cat /var/lib/beamfs-xfstests/results.txt 2>/dev/null",
                                     Duration::from_secs(60)) {
                 let _ = std::fs::write(stage.join(format!("results-{}.txt", n.name)),
                                        body);
@@ -1152,6 +1326,19 @@ fn do_trace(cfg: &Config, hours: Option<&String>, max: Option<&String>) -> std::
         eprintln!("no nodes configured");
         return std::process::ExitCode::FAILURE;
     };
+    // Held for as long as this command runs, so a deploy from another
+    // terminal cannot reboot the node underneath it. Named for the
+    // subcommand, so the refusal says what has the node.
+    let _held = match nodelock::acquire(
+        &node.name,
+        &std::env::args().nth(1).unwrap_or_else(|| "a run".into()),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("beamfs-xfstests: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
 
     println!("  node    : {}", node.name);
     println!("  budget  : {h} h, up to {m} captures");
@@ -1217,6 +1404,19 @@ fn do_matrix(cfg: &Config, which: Option<&String>, loops: Option<&String>) -> st
         eprintln!("no nodes configured");
         return std::process::ExitCode::FAILURE;
     };
+    // Held for as long as this command runs, so a deploy from another
+    // terminal cannot reboot the node underneath it. Named for the
+    // subcommand, so the refusal says what has the node.
+    let _held = match nodelock::acquire(
+        &node.name,
+        &std::env::args().nth(1).unwrap_or_else(|| "a run".into()),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("beamfs-xfstests: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
     let n: u32 = loops.and_then(|v| v.parse().ok()).unwrap_or(12);
     println!("  node    : {}", node.name);
     match matrix::run(cfg, node, which.map(|s| s.as_str()), n) {
@@ -1237,6 +1437,19 @@ fn do_bench(cfg: &Config, test: Option<&String>, trials: Option<&String>) -> std
     let Some(node) = cfg.nodes.first() else {
         eprintln!("no nodes configured");
         return std::process::ExitCode::FAILURE;
+    };
+    // Held for as long as this command runs, so a deploy from another
+    // terminal cannot reboot the node underneath it. Named for the
+    // subcommand, so the refusal says what has the node.
+    let _held = match nodelock::acquire(
+        &node.name,
+        &std::env::args().nth(1).unwrap_or_else(|| "a run".into()),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("beamfs-xfstests: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
     };
     // Anything ./check accepts: "generic/464", "generic/464 generic/589",
     // "-g auto", or "all" for the whole suite.
@@ -1268,6 +1481,19 @@ fn do_control(cfg: &Config, test: Option<&String>, trials: Option<&String>,
         eprintln!("no nodes configured");
         return std::process::ExitCode::FAILURE;
     };
+    // Held for as long as this command runs, so a deploy from another
+    // terminal cannot reboot the node underneath it. Named for the
+    // subcommand, so the refusal says what has the node.
+    let _held = match nodelock::acquire(
+        &node.name,
+        &std::env::args().nth(1).unwrap_or_else(|| "a run".into()),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("beamfs-xfstests: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
     let t = test.map(|s| s.as_str()).unwrap_or("generic/083");
     let n: u32 = trials.and_then(|v| v.parse().ok()).unwrap_or(1);
     // beamfs first: the control is there to interpret it, and a run
@@ -1290,6 +1516,19 @@ fn do_baseline(cfg: &Config, test: Option<&String>, trials: Option<&String>,
     let Some(node) = cfg.nodes.first() else {
         eprintln!("no nodes configured");
         return std::process::ExitCode::FAILURE;
+    };
+    // Held for as long as this command runs, so a deploy from another
+    // terminal cannot reboot the node underneath it. Named for the
+    // subcommand, so the refusal says what has the node.
+    let _held = match nodelock::acquire(
+        &node.name,
+        &std::env::args().nth(1).unwrap_or_else(|| "a run".into()),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("beamfs-xfstests: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
     };
     let t = test.map(|s| s.as_str()).unwrap_or("generic/464");
     let n: u32 = trials.and_then(|v| v.parse().ok()).unwrap_or(10);
@@ -1325,6 +1564,11 @@ fn do_deploy(cfg: &Config, which: Option<&String>) -> std::process::ExitCode {
         eprintln!("beamfs-xfstests: no such node");
         return std::process::ExitCode::FAILURE;
     };
+    // Never reboot a node someone is measuring on.
+    if let Err(e) = bench::refuse_if_busy(cfg, node) {
+        eprintln!("beamfs-xfstests: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
     // The domain is named for the node, as recovery names it.
     let domain = format!("beamfs-{}", node.name);
     match deploy::deploy(cfg, node, &domain) {
@@ -1345,6 +1589,19 @@ fn do_sweep(cfg: &Config, selection: &[String]) -> std::process::ExitCode {
     let Some(node) = cfg.nodes.first() else {
         eprintln!("no nodes configured");
         return std::process::ExitCode::FAILURE;
+    };
+    // Held for as long as this command runs, so a deploy from another
+    // terminal cannot reboot the node underneath it. Named for the
+    // subcommand, so the refusal says what has the node.
+    let _held = match nodelock::acquire(
+        &node.name,
+        &std::env::args().nth(1).unwrap_or_else(|| "a run".into()),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("beamfs-xfstests: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
     };
     // Every argument, not just the first.
     //

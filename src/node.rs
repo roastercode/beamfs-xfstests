@@ -485,7 +485,7 @@ impl<'a> NodeConn<'a> {
     /// poll interval is a minute, and a partial read of a line being
     /// written is dropped by the parser anyway.
     pub fn results(&self) -> Result<Vec<TestResult>, NodeError> {
-        let raw = self.run("cat /tmp/xfs-results.txt 2>/dev/null", Duration::from_secs(20))?;
+        let raw = self.run("cat /var/lib/beamfs-xfstests/results.txt 2>/dev/null", Duration::from_secs(20))?;
         Ok(raw
             .lines()
             .filter(|l| !l.starts_with("DONE"))
@@ -502,8 +502,8 @@ impl<'a> NodeConn<'a> {
     /// three shards that had actually finished sat idle.
     pub fn shard_state(&self) -> ShardState {
         match self.run(
-            "if grep -q '^STUCK' /tmp/xfs-results.txt 2>/dev/null; then echo stuck; \
-             elif grep -q '^DONE' /tmp/xfs-results.txt 2>/dev/null; then echo done; \
+            "if grep -q '^STUCK' /var/lib/beamfs-xfstests/results.txt 2>/dev/null; then echo stuck; \
+             elif grep -q '^DONE' /var/lib/beamfs-xfstests/results.txt 2>/dev/null; then echo done; \
              else echo running; fi",
             Duration::from_secs(15),
         ) {

@@ -24,6 +24,8 @@
 //! trials distinguish 30% from 80%, not 70% from 80%. The verdict says
 //! so rather than inviting a conclusion the sample cannot carry.
 
+use crate::say;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -272,14 +274,80 @@ fn claim_state(c: &NodeConn) -> (Option<(String, u64)>, bool) {
     (tag.zip(age), work)
 }
 
+/// The scrubber's pace, in milliseconds per block, for every beamfs
+/// volume the node has mounted -- the root filesystem included, which
+/// is itself beamfs here and was sweeping ten blocks a second under
+/// every measurement ever taken. Empty leaves the node as it is.
+pub fn scrub_pace() -> String {
+    std::env::var("XFSTESTS_SCRUB_MS").unwrap_or_default()
+}
+
+/// Whether the kernel function profiler should run.
+///
+/// Separate from XFSTESTS_TRACE: the profiler answers "where does the
+/// time go", blktrace answers "what did the disk do", and asking the
+/// first should not cost the second. Nothing kept a profile before
+/// this, so every question about duration was answered by guessing.
+pub fn profiling_wanted() -> bool {
+    std::env::var("XFSTESTS_PROFILE").is_ok_and(|v| v == "1")
+}
+
+/// Refuse to disturb a node another run is using.
+///
+/// `prepare` has always done this; `deploy` did not, and a deploy run
+/// to look at the display rebooted the node under a bench that was
+/// twelve minutes into a thirty-minute test. The check belongs to
+/// anything that touches a node, not to one command.
+pub fn refuse_if_busy(cfg: &Config, node: &Node) -> Result<(), String> {
+    if std::env::var("XFSTESTS_FORCE").is_ok() {
+        return Ok(());
+    }
+    // The local fact first: it survives the node being rebooted, which
+    // is exactly the case the remote marker cannot report.
+    if let Some((pid, what)) = crate::nodelock::holder(&node.name) {
+        return Err(format!(
+            "{} is held by pid {pid} ({what}); \
+             set XFSTESTS_FORCE=1 to take it anyway",
+            node.name
+        ));
+    }
+    let c = NodeConn::new(node, cfg);
+    let (marker, work) = claim_state(&c);
+    match claim_decision(marker, work, false) {
+        Claim::Busy(tag, age) => Err(format!(
+            "node is running {tag}, started {} min ago; \
+             set XFSTESTS_FORCE=1 to take it anyway",
+            age / 60
+        )),
+        Claim::Take => Ok(()),
+    }
+}
+
+/// Whether the node should trace at all.
+///
+/// One reading, used both to arm the node and to decide whether the
+/// trace is collected. They used to disagree: the node traced always,
+/// the collection was optional, and every duration bench ever printed
+/// carried a cost nobody had asked for.
+pub fn tracing_wanted() -> bool {
+    std::env::var("XFSTESTS_TRACE").is_ok_and(|v| v == "1")
+}
+
 /// Put the node in a state xfstests will start from.
 ///
 /// Every abort seen so far came from one of two things: the test volume
 /// mounted more than once, or results from a previous run still on
 /// disk. Both are cleared here rather than being diagnosed again.
-fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str)
+/// `tracing` decides whether the node traces at all, not merely
+/// whether the trace is collected. This used to turn every beamfs
+/// event on here whatever the caller wanted, so a measurement taken
+/// with tracing supposedly off carried its cost anyway -- and
+/// generic/013 was timed at 950 seconds that way.
+fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str, tracing: bool)
     -> Result<String, String> {
     // Refuse a node another run owns, before anything is killed.
+    let scrub_ms = scrub_pace();
+    let trc = if tracing { 1 } else { 0 };
     let force = std::env::var("XFSTESTS_FORCE").is_ok();
     let (marker, work) = claim_state(c);
     if let Claim::Busy(tag, age) = claim_decision(marker, work, force) {
@@ -298,6 +366,23 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str)
         "beamfs" => format!("mkfs.beamfs {mkfs_opts}"),
         other => format!("mkfs.{other} -q -F {mkfs_opts}"),
     };
+    /*
+     * A copy of the volume on failure, only when it is asked for.
+     *
+     * DUMP_CORRUPT_FS makes the harness dd the whole device and run it
+     * through zstd every time a check fails. On this node that is a
+     * gigabyte: generic/013 took 56 seconds in the morning and 1875 in
+     * the afternoon, the difference being compression alone, and the
+     * budget it blew was read as a filesystem that hangs. Three of the
+     * four "timeouts" in the last campaign were this.
+     *
+     * The image is worth having when a specific failure is being
+     * examined, which is what trace and probe are for. A sweep wants
+     * verdicts, and a sweep over the known failures would have spent
+     * three and a half hours compressing.
+     */
+    let dumpfs = if std::env::var("XFSTESTS_KEEP_IMAGE").is_ok() { 1 } else { 0 };
+
     let cmd = format!(
         // check and fsstress, not only xfs_io.
         //
@@ -323,22 +408,31 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str)
          mkdir -p /mnt/test /mnt/scratch; \
          rm -f /usr/xfstests/results/generic/*.full /usr/xfstests/results/generic/*.out.bad; \
          rm -f /usr/xfstests/results/generic/*.img /usr/xfstests/results/generic/*.img.*; \
-         if grep -q DUMP_CORRUPT_FS /usr/xfstests/common/rc 2>/dev/null; then \
-           grep -q \"^export DUMP_CORRUPT_FS=\" /usr/xfstests/local.config || \
-             echo \"export DUMP_CORRUPT_FS=1\" >> /usr/xfstests/local.config; \
-           printf \"dumpfs=yes\\n\"; \
-         else printf \"dumpfs=no\\n\"; fi; \
+         sed -i \"/^export DUMP_CORRUPT_FS=/d\" /usr/xfstests/local.config; \
+         echo \"export DUMP_CORRUPT_FS={dumpfs}\" >> /usr/xfstests/local.config; \
+         printf \"dumpfs={dumpfs}\\n\"; \
          sed -i \"s|^export MKFS_OPTIONS=.*|export MKFS_OPTIONS=\\\"{mkfs_opts}\\\"|\" /usr/xfstests/local.config; \
          sed -i \"s|^export FSTYP=.*|export FSTYP={fstyp}|\" /usr/xfstests/local.config; \
          {mkfs} /dev/vdb >/dev/null 2>&1; \
          mount -t {fstyp} /dev/vdb /mnt/test; \
          if [ -e /sys/kernel/debug/kcsan ]; then echo on > /sys/kernel/debug/kcsan; fi; \
+         if [ -n \"{scrub_ms}\" ]; then \
+           P=/sys/module/beamfs/parameters/scrub_interval_ms; \
+           [ -w $P ] && echo {scrub_ms} > $P; \
+           for f in /sys/fs/beamfs/*/interval; do \
+             [ -e \"$f\" ] && echo {scrub_ms} > \"$f\"; \
+           done; \
+         fi; \
+         printf \"scrub=param:%s \" \"$(cat /sys/module/beamfs/parameters/scrub_interval_ms 2>/dev/null || echo none)\"; \
+         for f in /sys/fs/beamfs/*/interval; do \
+           [ -e \"$f\" ] && printf \"%s:%s \" \"$(basename $(dirname $f))\" \"$(head -1 $f)\"; \
+         done; printf \"\\n\"; \
          if [ -d /sys/kernel/debug/tracing/events/beamfs ]; then \
            echo 60000 > /sys/kernel/debug/tracing/buffer_size_kb; \
-           echo 1 > /sys/kernel/debug/tracing/events/beamfs/enable; \
+           echo {trc} > /sys/kernel/debug/tracing/events/beamfs/enable; \
            : > /sys/kernel/debug/tracing/trace; \
-           echo 1 > /sys/kernel/debug/tracing/tracing_on; \
-           printf \"tracing=on\\n\"; \
+           echo {trc} > /sys/kernel/debug/tracing/tracing_on; \
+           printf \"tracing=%s\\n\" \"$(cat /sys/kernel/debug/tracing/tracing_on)\"; \
          else printf \"tracing=absent\\n\"; fi; \
          dmesg -C; \
          printf \"kcsan=%s\\n\" \"$(cat /sys/kernel/debug/kcsan 2>/dev/null | head -1)\"; \
@@ -562,7 +656,7 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
 
     if !failed_names.is_empty() {
         println!();
-        println!("    {} of {ran} failed: {}", failed_names.len(),
+        say!("    {} of {ran} failed: {}", failed_names.len(),
                  failed_names.join(" "));
     }
 
@@ -676,7 +770,7 @@ pub fn run(
         println!("  seed    : not applied -- a whole-suite run edits no test file");
     }
 
-    let state = prepare(&c, &cfg.mkfs_options, &cfg.fstyp).map_err(|e| format!("prepare: {e}"))?;
+    let state = prepare(&c, &cfg.mkfs_options, &cfg.fstyp, tracing_wanted()).map_err(|e| format!("prepare: {e}"))?;
     println!("  node    : {}", state.trim());
     println!();
 
@@ -692,15 +786,20 @@ pub fn run(
     // Tracing is off unless asked for: blktrace and the function
     // profiler cost enough to move the timing of a race, and a
     // measurement that changes what it measures is worth nothing.
-    let tracing = std::env::var("XFSTESTS_TRACE").is_ok_and(|v| v == "1");
+    let tracing = tracing_wanted();
+    let profiling = profiling_wanted();
     if tracing {
         for (what, ok, val) in trace_stack::check(cfg, node) {
             if !ok {
                 println!("  missing: {what} ({val})");
             }
         }
+    }
+    if tracing || profiling {
         if let Err(e) = mem_trace::arm(cfg, node) {
             println!("  function profile not armed: {e}");
+        } else {
+            println!("  profile : kernel function counts armed");
         }
     }
     let mut r = Run {
@@ -765,7 +864,7 @@ pub fn run(
             // An abort usually leaves the node in a state the next
             // trial hits too. Clear it rather than aborting nine more
             // times.
-            let _ = prepare(&c, &cfg.mkfs_options, &cfg.fstyp);
+            let _ = prepare(&c, &cfg.mkfs_options, &cfg.fstyp, tracing_wanted());
             continue;
         }
         // Every trial that ran, pass or fail, so the statistics module
@@ -790,7 +889,7 @@ pub fn run(
         if !t.trial.passed && !t.aborted {
             match evidence::freeze_volume(cfg, node, &case, &t.output) {
                 Ok(sz) => {
-                    println!(
+                    say!(
                         "    trial {} volume kept: {} MiB compressed",
                         case.trial(),
                         sz / 1048576
@@ -802,10 +901,10 @@ pub fn run(
                     // named and never written.
                     match volume::inspect_compressed(&case.dir.join("scratch.img.zst")) {
                         Ok(v) => volume::report_to(&v, Some(&case.dir)),
-                        Err(e) => println!("    volume not inspected: {e}"),
+                        Err(e) => say!("    volume not inspected: {e}"),
                     }
                 }
-                Err(e) => println!("    volume not kept: {e}"),
+                Err(e) => say!("    volume not kept: {e}"),
             }
         }
 
@@ -821,7 +920,7 @@ pub fn run(
             )
         });
         if !t.reason.is_empty() {
-            println!("    reason: {}", t.reason);
+            say!("    reason: {}", t.reason);
         }
         if let Some((t2, off)) = tr {
             match trace_stack::stop(&t2, cfg, node, off) {
@@ -942,7 +1041,7 @@ pub fn run(
         println!("  losses by size:");
         for (d, n) in &m {
             let lo = 10usize.pow(*d);
-            println!("    {lo}..{}: {n} trial(s)", lo * 10 - 1);
+            say!("    {lo}..{}: {n} trial(s)", lo * 10 - 1);
         }
         println!("  -- more than one order of magnitude: likely more than one mechanism");
         println!();
@@ -1051,12 +1150,12 @@ pub fn control(
     }
 
     println!("  === control run ===");
-    println!(
+    say!(
         "    {:<10} {:>7} {:>7} {:>8} {:>8} {:>9}",
         "fstyp", "passed", "failed", "aborted", "lost", "seconds"
     );
     for r in &rows {
-        println!(
+        say!(
             "    {:<10} {:>7} {:>7} {:>8} {:>8} {:>9}",
             r.fstyp, r.passed, r.failed, r.aborted, r.lost, r.secs
         );
@@ -1366,6 +1465,18 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     println!("  node    : {}", node.name);
     println!("  commit  : {}", commit());
 
+    /*
+     * Say each step before taking it.
+     *
+     * Between the commit line and the first test there are three
+     * things that each talk to the node and each take their time --
+     * checking the tools, preparing the volume, listing the
+     * selection -- and none of them said anything. A sweep that sits
+     * silent for three minutes is indistinguishable from one that has
+     * hung, and it was killed for that.
+     */
+    println!("  checking: the node's tools against this repository");
+
     // The node's tools, against the ones this repo builds.
     //
     // Every redeploy of the image puts its own mkfs.beamfs and
@@ -1451,7 +1562,9 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     if cfg.fstyp != "beamfs" {
         println!("  against : {} -- not beamfs", cfg.fstyp);
     }
-    match prepare(&c, &cfg.mkfs_options, &cfg.fstyp) {
+    println!("  preparing: stopping what is there, then mkfs and mount \
+(up to 3 min)");
+    match prepare(&c, &cfg.mkfs_options, &cfg.fstyp, tracing_wanted()) {
         Ok(state) => {
             for line in state.lines().map(str::trim).filter(|l| !l.is_empty()) {
                 println!("  node    : {line}");
@@ -1460,6 +1573,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         Err(e) => return Err(format!("cannot prepare the node: {e}")),
     }
 
+    println!("  listing : asking the harness what this selection covers");
     let tests = enumerate_tests(&c, selection)?;
     println!("  tests   : {} to run", tests.len());
     arm_stop();
@@ -1537,7 +1651,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             &format!("{}@{}", cfg.user, node.host),
         );
 
-        if let Err(e) = prepare(&c, &cfg.mkfs_options, &cfg.fstyp) {
+        if let Err(e) = prepare(&c, &cfg.mkfs_options, &cfg.fstyp, tracing_wanted()) {
             p.finish(&format!("cannot prepare the node: {e}"));
             aborted.push(test.clone());
             unreachable_run += 1;
@@ -1553,16 +1667,16 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             // still running and still has a console. By the third the
             // answer would be the same and the pty has moved on.
             if unreachable_run == 1 {
-                println!("    the node stopped answering -- asking it why");
+                say!("    the node stopped answering -- asking it why");
                 // Its own directory: no Case exists here, because a
                 // case is made when a test produces a verdict and this
                 // one never will.
                 let dir = root.join(format!(
                     "wedged-{}", test.replace('/', "-")));
                 match wedge::capture_wedged(WEDGE_VM, &dir) {
-                    Ok(n) => println!("    console kept: {} KiB in {}",
+                    Ok(n) => say!("    console kept: {} KiB in {}",
                                       n / 1024, dir.display()),
-                    Err(e) => println!("    nothing captured: {e}"),
+                    Err(e) => say!("    nothing captured: {e}"),
                 }
             }
             // And then bring it back.
@@ -1574,7 +1688,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             // restart the domain -- and two minutes of boot is nothing
             // against three hours of campaign.
             if unreachable_run == 1 {
-                println!("    bringing the node back");
+                say!("    bringing the node back");
                 let rec = Recovery::new(cfg);
                 let dom = rec.domain_for(&node.name);
                 let dir = root.join(format!("wedged-{}",
@@ -1595,9 +1709,9 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                     for l in &last_seen {
                         jr.line(l);
                     }
-                    println!("    before it stopped answering, during {last_test}:");
+                    say!("    before it stopped answering, during {last_test}:");
                     for l in last_seen.iter().rev().take(3).rev() {
-                        println!("      {l}");
+                        say!("      {l}");
                     }
                 } else {
                     jr.line("nothing was sampled before the refusal");
@@ -1605,7 +1719,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                 let outcome = rec.recover_into(&c, &dom, wedge_attempts,
                                                &mut jr, Some(&dir));
                 wedge_attempts += 1;
-                println!("    recovery: {}", outcome.as_str());
+                say!("    recovery: {}", outcome.as_str());
                 if outcome.usable() {
                     unreachable_run = 0;
 
@@ -1614,7 +1728,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                     // time costs another recovery and measures
                     // nothing; the rest of the list is worth more.
                     if refused_times >= 2 {
-                        println!("    {test} wedges this node -- set aside, moving on");
+                        say!("    {test} wedges this node -- set aside, moving on");
                         wedging.push(test.clone());
                         refused_test.clear();
                         refused_times = 0;
@@ -1667,7 +1781,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         let probe = match std::env::var("XFSTESTS_BPF") {
             Ok(name) if !name.is_empty() => match bpf::start(&c, &name) {
                 Ok(r) => {
-                    println!("    {} attached on {}", r.name, r.node());
+                    say!("    {} attached on {}", r.name, r.node());
                     Some(r)
                 }
                 Err(e) => {
@@ -1675,7 +1789,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                     // 2026-09-13 ptrval failed to attach, the line
                     // scrolled past, and the analysis that followed was
                     // read off the previous run's capture.
-                    println!("    {name} did not start: {e}");
+                    say!("    {name} did not start: {e}");
                     probe_failed = Some(format!("{name}: {e}"));
                     None
                 }
@@ -1725,7 +1839,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                 let lo = spread.iter().min().copied().unwrap_or(0);
                 let hi = spread.iter().max().copied().unwrap_or(0);
                 if lo != hi {
-                    println!("    previously: {} -- between {lo} and {hi}",
+                    say!("    previously: {} -- between {lo} and {hi}",
                              spread.iter().map(|n| n.to_string())
                                    .collect::<Vec<_>>().join(", "));
                 }
@@ -1754,13 +1868,13 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         if let Some(r) = probe {
             match r.stop_into(&c, &case.dir) {
                 Some((p, n)) => {
-                    println!("    kept {} ({} KiB)",
+                    say!("    kept {} ({} KiB)",
                              p.file_name().unwrap_or_default().to_string_lossy(),
                              n / 1024);
                     bpf::speak(&p);
                 }
                 None => {
-                    println!("    the probe brought nothing back");
+                    say!("    the probe brought nothing back");
                     probe_failed = Some("the probe brought nothing back".into());
                 }
             }
@@ -1772,7 +1886,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             last_test = test.clone();
         }
         if watch_wedged.load(std::sync::atomic::Ordering::Relaxed) {
-            println!("    the node stopped writing with tasks stuck -- \
+            say!("    the node stopped writing with tasks stuck -- \
                       this test is not finishing");
         }
 
@@ -1796,18 +1910,18 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         evidence::speak(&case);
         produced.push(case.dir.clone());
         if t.killed {
-            println!("    the budget ran out and the shell killed it: \
+            say!("    the budget ran out and the shell killed it: \
                       the volume below was being written when it stopped, \
                       so what the checker finds in it is the interruption");
         }
 
         if !t.trial.passed {
             if !t.reason.is_empty() {
-                println!("    reason: {}", t.reason);
+                say!("    reason: {}", t.reason);
             }
             match evidence::freeze_volume(cfg, node, &case, &t.output) {
                 Ok(sz) => {
-                    println!("    volume kept: {} MiB compressed", sz / 1048576);
+                    say!("    volume kept: {} MiB compressed", sz / 1048576);
                     if let Ok(v) =
                         volume::inspect_compressed(&case.dir.join("scratch.img.zst"))
                     {
@@ -1815,7 +1929,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                     }
                 }
                 Err(e) => {
-                    println!("    volume not kept: {e}");
+                    say!("    volume not kept: {e}");
                     // A failure whose volume could not be kept cannot
                     // be re-examined: whatever it found is gone with
                     // the next mkfs.
@@ -1850,9 +1964,9 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         println!("  failed:");
         for (t, lost) in &failed {
             if *lost > 0 {
-                println!("    {t}  ({lost} blocks lost)");
+                say!("    {t}  ({lost} blocks lost)");
             } else {
-                println!("    {t}");
+                say!("    {t}");
             }
         }
     }
@@ -1927,7 +2041,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         println!("  the apparatus failed {} time(s) during this run:",
                  apparatus.len());
         for a in &apparatus {
-            println!("    {a}");
+            say!("    {a}");
         }
         println!();
         println!("  numbers from a run with a broken apparatus are not");
@@ -1937,7 +2051,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         println!();
         println!("  stopped by the budget, not by a defect:");
         for t in &killed_tests {
-            println!("    {t}");
+            say!("    {t}");
         }
         println!("  what a checker finds in a volume stopped mid-write is");
         println!("  the interruption, not a finding.");
@@ -1946,14 +2060,14 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         println!();
         println!("  no probe capture for:");
         for t in &probe_missing {
-            println!("    {t}");
+            say!("    {t}");
         }
     }
     if !wedging.is_empty() {
         println!();
         println!("  set aside, each wedged the node twice:");
         for t in &wedging {
-            println!("    {t}");
+            say!("    {t}");
         }
     }
     println!("  evidence under {}", root.display());

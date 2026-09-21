@@ -22,7 +22,6 @@
 //! rather than spinning, because a spinning marker cannot be told from
 //! progress.
 
-use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -68,8 +67,9 @@ impl Progress {
         let shown = l.clone();
 
         let handle = std::thread::spawn(move || {
-            let frames = ['|', '/', '-', '\\'];
-            let mut i = 0usize;
+            let mut spin = liveblock::Spin::new();
+            let mut shown_step = String::new();
+            let mut shown_state = 3u8;
             let mut step = String::from("start");
             let mut step_since = Instant::now();
 
@@ -83,33 +83,62 @@ impl Progress {
                 let held = step_since.elapsed().as_secs();
                 let total = started.elapsed().as_secs();
 
-                let mark = if held >= STALLED_AFTER {
-                    if i % 4 < 2 {
-                        '#'
-                    } else {
-                        ' '
-                    }
-                } else {
-                    frames[i % 4]
-                };
-                let note = if held >= STALLED_AFTER {
-                    format!("  STALLED {held}s in {step}")
+                /*
+                 * One line when something changes, not four a second.
+                 *
+                 * This used to redraw a single line in place, and the
+                 * redrawing was removed when the output started being
+                 * pasted into reports -- without adding anything in
+                 * its stead, so one test produced five hundred lines
+                 * of spinner and a run was killed for being
+                 * unreadable.
+                 *
+                 * A line is worth printing when the step changes or
+                 * when its health changes. Between those, the spinner
+                 * below says the program is alive.
+                 */
+                let state = if held >= STALLED_AFTER {
+                    2u8
                 } else if held >= SLOW_AFTER {
-                    format!("  slow, {held}s in {step}")
+                    1u8
                 } else {
-                    String::new()
+                    0u8
                 };
+                /*
+                 * No line on a timer.
+                 *
+                 * The thirty-second line was there when nothing turned;
+                 * the spinner below says the program is alive now, so a
+                 * periodic line only repeats what is already on screen.
+                 * A step or a change of health is an event; elapsed
+                 * time is not.
+                 */
+                if step != shown_step || state != shown_state {
+                    let note = match state {
+                        2 => format!("   STALLED {held}s in {step}"),
+                        1 => format!("   slow, {held}s in {step}"),
+                        _ => String::new(),
+                    };
 
-                println!("  {shown:<34} {mark} {total:>3}s  {step:<9}{note}          ");
-                let _ = std::io::stdout().flush();
-                i += 1;
-                // Slower when a step is dragging: a fast spinner next to
-                // the word STALLED is a mixed message.
-                std::thread::sleep(Duration::from_millis(if held >= SLOW_AFTER {
-                    600
-                } else {
-                    250
-                }));
+                    crate::say::note(&format!(
+                        "  {shown:<34} {total:>4}s  {step:<10}{note}"));
+                    shown_step = step.clone();
+                    shown_state = state;
+                }
+
+                /*
+                 * The spinner turns in place, on the line below.
+                 *
+                 * Two separate jobs: the lines above are the record and
+                 * scroll, this says the program is alive between them.
+                 * Printing the spinner as its own line was five hundred
+                 * lines for one test; printing nothing at all left the
+                 * terminal frozen for thirty seconds at a time.
+                 */
+                crate::say::draw(&format!(
+                    "  {shown:<34} {} {total:>4}s  {step:<10}",
+                    spin.tick()));
+                std::thread::sleep(Duration::from_millis(250));
             }
         });
 
@@ -122,11 +151,11 @@ impl Progress {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
-        println!(
-            "  {:<34} {verdict}   {}s                              ",
+        crate::say::note(&format!(
+            "  {:<34} {verdict}   {}s",
             self.label,
             self.started.elapsed().as_secs()
-        );
+        ));
     }
 }
 

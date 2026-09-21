@@ -1,6 +1,6 @@
 [package]
 name = "beamfs-xfstests"
-version = "0.5.1"
+version = "1.5.0"
 edition = "2021"
 license = "GPL-2.0-only"
 authors = ["Aurelien Desbrieres <aurelien@hackers.camp>"]
@@ -12,3 +12,6 @@ path = "src/main.rs"
 
 [profile.release]
 overflow-checks = true
+
+[dependencies]
+liveblock = "0.1"

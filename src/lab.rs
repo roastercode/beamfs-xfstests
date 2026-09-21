@@ -81,7 +81,7 @@ fn calc_machine() -> String {
 /// renaming it would break every path the two harnesses already use.
 #[cfg_attr(not(test), allow(dead_code))]
 fn calc_image_name() -> String {
-    from_env("XFSTESTS_IMAGE", "hpc-arm64-research-beamfs")
+    from_env("XFSTESTS_IMAGE", "beamfs-research-image")
 }
 
 fn calc_build_dir() -> String {
@@ -136,7 +136,7 @@ mod tests {
         let home = std::env::var("HOME").unwrap_or_default();
         assert_eq!(calc_build_dir_name(), "build-qemux86");
         assert_eq!(calc_machine(), "qemux86-64");
-        assert_eq!(calc_image_name(), "hpc-arm64-research-beamfs");
+        assert_eq!(calc_image_name(), "beamfs-research-image");
         assert_eq!(
             calc_deploy_dir(),
             format!("{home}/yocto/poky/build-qemux86/tmp/deploy/images/qemux86-64")
