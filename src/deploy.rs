@@ -65,12 +65,25 @@ pub fn commits_after_image(image: &Path) -> Vec<String> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    for tree in ["git/beamfs", "git/yocto-beamfs"] {
+    // Only what the image is built from.
+    //
+    // The last commit of the tree is the wrong question: a commit to
+    // tools/ or to a document changes nothing bitbake would rebuild,
+    // and reporting it as an image out of date teaches the reader to
+    // pass XFSTESTS_FORCE without looking, which is how a guard stops
+    // guarding. bitbake agreed: nine thousand tasks, none rerun.
+    for (tree, paths) in [
+        ("git/beamfs", vec!["*.c", "*.h", "Kconfig", "Makefile"]),
+        ("git/yocto-beamfs", vec!["."]),
+    ] {
         let p = PathBuf::from(&home).join(tree);
-        let Ok(o) = Command::new("git")
-            .args(["-C", &p.to_string_lossy(), "log", "-1", "--format=%ct %h %s"])
-            .output()
-        else {
+        let mut args: Vec<String> = vec![
+            "-C".into(), p.to_string_lossy().into_owned(),
+            "log".into(), "-1".into(), "--format=%ct %h %s".into(),
+            "--".into(),
+        ];
+        args.extend(paths.into_iter().map(String::from));
+        let Ok(o) = Command::new("git").args(&args).output() else {
             continue;
         };
         if !o.status.success() {
