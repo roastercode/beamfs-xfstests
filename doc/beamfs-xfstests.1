@@ -62,6 +62,46 @@ below.
 Vary one condition at a time across a named set, so a difference can be
 attributed to the condition that changed.
 .TP
+.B sweep
+Run every test of a selection once, one verdict each.
+.sp
+A selection is written rather than looped over. Since 2.2.0 the
+forms are:
+.sp
+.RS
+.B generic/013
+one test;
+.B generic/001-014
+a range, the width of the digits kept;
+.B generic/074,075,083
+a list within one family;
+.B @leaks
+every test that has ever lost a block;
+.B @leaks:N
+those that lost one in their last N records;
+.B @seen
+every test the history has recorded.
+.RE
+.sp
+Several forms combine and each test runs once. The named sets come
+from this tool's own loss history, which the shell around it could
+only ever restate by hand and let go stale.
+.TP
+.B deploy
+Put the newest image and this repository's tools on a node, and
+prove they arrived.
+.sp
+Since 1.2.0
+.B deploy
+refuses a node that is running a test, as
+.B bench
+and
+.B sweep
+always have. It reboots the node, and a deploy run to look at the
+display once rebooted one twelve minutes into a thirty-minute test.
+.B XFSTESTS_FORCE=1
+takes it anyway.
+.TP
 .B stop
 Stop a running campaign and leave the nodes in a state the next one can
 start from.
@@ -109,17 +149,6 @@ it had. Work is split across nodes, because a test that takes ten
 seconds on hardware takes two to three minutes under emulation.
 
 .SH COMMANDS
-.sp
-Since 1.2.0
-.B deploy
-refuses a node that is running a test, as
-.B bench
-and
-.B sweep
-always have. It reboots the node, and a deploy run to look at the
-display once rebooted one twelve minutes into a thirty-minute test.
-.B XFSTESTS_FORCE=1
-takes it anyway.
 .TP
 .B run
 Shard the suite across the configured nodes and follow it.

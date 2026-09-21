@@ -16,6 +16,7 @@
 //! takes ten seconds on real hardware takes two to three minutes under
 //! TCG, and the suite is around 737 tests.
 
+mod select;
 mod checkpoint;
 mod nodelock;
 mod say;
@@ -256,10 +257,17 @@ fn usage() -> std::process::ExitCode {
          \x20        control [test] [trials] [fstyp,fstyp]\n\
          sweep    run every test of a selection once, one verdict each\n\
                   sweep [selection]   (default: the whole suite)\n\
+                  a selection is written, not looped over:\n\
+                    generic/013            one test\n\
+                    generic/001-014        a range\n\
+                    generic/074,075,083    a list\n\
+                    @leaks                 every test that ever leaked\n\
+                    @leaks:N               ... in its last N records\n\
+                    @seen                  every test the history knows\n\
          trend    what a test has lost lately, or which tests lose most\n\
                   trend [test]        (no test: the worst first)\n\
-         checkpoint  say whether this repository, the layer, the image and
-         the node still describe the same code
+         checkpoint say whether this repository, the layer, the image\n\
+                  and the node still describe the same code\n\
 deploy   put the newest image and this repo's tools on a node,\n\
                   and prove they arrived\n\
                   deploy [node]       (default: the first configured)\n\
@@ -1630,6 +1638,18 @@ fn do_sweep(cfg: &Config, selection: &[String]) -> std::process::ExitCode {
     // Held for as long as this command runs, so a deploy from another
     // terminal cannot reboot the node underneath it. Named for the
     // subcommand, so the refusal says what has the node.
+    // The selection, in the forms a person writes rather than the one
+    // the harness reads: ranges, lists, and the sets this tool knows
+    // from its own history.
+    let selection: Vec<String> = match select::expand(selection) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("beamfs-xfstests: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let selection = &selection[..];
+
     let _held = match nodelock::acquire(
         &node.name,
         &std::env::args().nth(1).unwrap_or_else(|| "a run".into()),
