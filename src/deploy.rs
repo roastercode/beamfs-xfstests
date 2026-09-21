@@ -50,7 +50,50 @@ fn newest_image() -> Option<PathBuf> {
 /// afternoon.
 ///
 /// Returns the files that differ.
-fn recipe_sources_current() -> Vec<String> {
+/// Commits that were made after the image was built.
+///
+/// A commit made after the last build is not in the image, and
+/// measuring against it is measuring the commit before -- which is how
+/// an afternoon went to a defect that had already been fixed.
+pub fn commits_after_image(image: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let built = std::fs::metadata(image)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    for tree in ["git/beamfs", "git/yocto-beamfs"] {
+        let p = PathBuf::from(&home).join(tree);
+        let Ok(o) = Command::new("git")
+            .args(["-C", &p.to_string_lossy(), "log", "-1", "--format=%ct %h %s"])
+            .output()
+        else {
+            continue;
+        };
+        if !o.status.success() {
+            continue;
+        }
+        let line = String::from_utf8_lossy(&o.stdout);
+        let mut f = line.trim().splitn(3, ' ');
+        let when: u64 = f.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        let short = f.next().unwrap_or("");
+        let subject = f.next().unwrap_or("");
+        if when > built {
+            out.push(format!(
+                "{} is {} min ahead of the image: {short} {}",
+                tree.rsplit('/').next().unwrap_or(tree),
+                (when - built) / 60,
+                &subject[..subject.len().min(46)]
+            ));
+        }
+    }
+    out
+}
+
+pub fn recipe_sources_current() -> Vec<String> {
     let Ok(home) = std::env::var("HOME") else { return Vec::new() };
     let repo = PathBuf::from(&home).join("git/beamfs/tools/fsck.beamfs");
     let files = PathBuf::from(&home)
@@ -204,48 +247,11 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
         Err(e) => println!("  chain   : seal NOT written: {e}"),
     }
 
-    // Is the image newer than the code it is supposed to carry?
-    //
-    // deploy said how old the image was and left the reader to do the
-    // arithmetic. A commit made after the last build is not in the
-    // image, and measuring against it is measuring the commit before
-    // -- which is how an afternoon went to a defect that had already
-    // been fixed.
-    {
-        let home = std::env::var("HOME").unwrap_or_default();
-        for tree in ["git/beamfs", "git/yocto-beamfs"] {
-            let p = PathBuf::from(&home).join(tree);
-            let out = Command::new("git")
-                .args(["-C", &p.to_string_lossy(), "log", "-1", "--format=%ct %h %s"])
-                .output();
-            let Ok(o) = out else { continue };
-            if !o.status.success() {
-                continue;
-            }
-            let line = String::from_utf8_lossy(&o.stdout);
-            let mut f = line.trim().splitn(3, ' ');
-            let when: u64 = f.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-            let short = f.next().unwrap_or("");
-            let subject = f.next().unwrap_or("");
-
-            let built = std::fs::metadata(&image)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-
-            if when > built {
-                println!();
-                println!("  {} has a commit the image does not carry:",
-                         tree.rsplit('/').next().unwrap_or(tree));
-                println!("    {short} {}", &subject[..subject.len().min(58)]);
-                println!("  the image was built {} minutes before it -- \
-                          run bitbake first",
-                         (when - built) / 60);
-                println!();
-            }
-        }
+    for line in commits_after_image(Path::new(&image)) {
+        println!();
+        println!("  {line}");
+        println!("  run bitbake first");
+        println!();
     }
 
     // The layer's copy of the checker, against this repo's.

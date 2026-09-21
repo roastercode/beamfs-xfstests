@@ -460,6 +460,25 @@ said about the scratch device reduced to one line and a count, and
 a defect appearing a thousand times a run could not be investigated
 from what remained. Pieces are now stored as they were said, and
 collapsed only when a case is read out loud.
+.TP
+.B checkpoint
+Say whether this repository, the layer, the image and the node still
+describe the same code, and stay silent about nothing.
+.sp
+The chain has five links -- repository to layer, layer to image,
+image to node, and the tools pushed alongside -- and every one of
+them has broken silently at least once, each time leaving a campaign
+measuring something other than what it named. The checks existed,
+written where each defect was found, scattered across three modules
+and run at different moments;
+.B bench
+ran none of them.
+.sp
+Since 2.0.0 they run together before anything is measured, and a
+broken link refuses the run.
+.B XFSTESTS_FORCE=1
+takes it anyway, which is right for a deliberate comparison against
+older code and wrong for everything else.
 .SS Display
 Output is one block rewritten in place, as tall as there is news,
 with a spinner that turns while the node is alive. A line is left

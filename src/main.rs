@@ -16,6 +16,7 @@
 //! takes ten seconds on real hardware takes two to three minutes under
 //! TCG, and the suite is around 737 tests.
 
+mod checkpoint;
 mod nodelock;
 mod say;
 mod wedge;
@@ -186,6 +187,10 @@ fn main() -> std::process::ExitCode {
         Some("control") => do_control(&cfg, args.get(2), args.get(3), args.get(4)),
         Some("sweep") => do_sweep(&cfg, &args[2..]),
         Some("deploy") => do_deploy(&cfg, args.get(2)),
+        Some("checkpoint") => {
+            checkpoint::report(&cfg, cfg.nodes.first());
+            std::process::ExitCode::SUCCESS
+        }
         Some("scenario") => {
             let Some(node) = cfg.nodes.first() else {
                 eprintln!("no nodes configured");
@@ -253,7 +258,9 @@ fn usage() -> std::process::ExitCode {
                   sweep [selection]   (default: the whole suite)\n\
          trend    what a test has lost lately, or which tests lose most\n\
                   trend [test]        (no test: the worst first)\n\
-         deploy   put the newest image and this repo's tools on a node,\n\
+         checkpoint  say whether this repository, the layer, the image and
+         the node still describe the same code
+deploy   put the newest image and this repo's tools on a node,\n\
                   and prove they arrived\n\
                   deploy [node]       (default: the first configured)\n\
          stop     kill the shards and release the mounts, and check\n\
@@ -1339,6 +1346,12 @@ fn do_trace(cfg: &Config, hours: Option<&String>, max: Option<&String>) -> std::
             return std::process::ExitCode::FAILURE;
         }
     };
+    // Nothing is measured until the chain from this repository to the
+    // node agrees with itself.
+    if let Err(e) = checkpoint::gate(cfg, node) {
+        eprintln!("beamfs-xfstests: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
 
     println!("  node    : {}", node.name);
     println!("  budget  : {h} h, up to {m} captures");
@@ -1417,6 +1430,12 @@ fn do_matrix(cfg: &Config, which: Option<&String>, loops: Option<&String>) -> st
             return std::process::ExitCode::FAILURE;
         }
     };
+    // Nothing is measured until the chain from this repository to the
+    // node agrees with itself.
+    if let Err(e) = checkpoint::gate(cfg, node) {
+        eprintln!("beamfs-xfstests: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
     let n: u32 = loops.and_then(|v| v.parse().ok()).unwrap_or(12);
     println!("  node    : {}", node.name);
     match matrix::run(cfg, node, which.map(|s| s.as_str()), n) {
@@ -1451,6 +1470,12 @@ fn do_bench(cfg: &Config, test: Option<&String>, trials: Option<&String>) -> std
             return std::process::ExitCode::FAILURE;
         }
     };
+    // Nothing is measured until the chain from this repository to the
+    // node agrees with itself.
+    if let Err(e) = checkpoint::gate(cfg, node) {
+        eprintln!("beamfs-xfstests: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
     // Anything ./check accepts: "generic/464", "generic/464 generic/589",
     // "-g auto", or "all" for the whole suite.
     let t = match test.map(|s| s.as_str()) {
@@ -1494,6 +1519,12 @@ fn do_control(cfg: &Config, test: Option<&String>, trials: Option<&String>,
             return std::process::ExitCode::FAILURE;
         }
     };
+    // Nothing is measured until the chain from this repository to the
+    // node agrees with itself.
+    if let Err(e) = checkpoint::gate(cfg, node) {
+        eprintln!("beamfs-xfstests: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
     let t = test.map(|s| s.as_str()).unwrap_or("generic/083");
     let n: u32 = trials.and_then(|v| v.parse().ok()).unwrap_or(1);
     // beamfs first: the control is there to interpret it, and a run
@@ -1530,6 +1561,12 @@ fn do_baseline(cfg: &Config, test: Option<&String>, trials: Option<&String>,
             return std::process::ExitCode::FAILURE;
         }
     };
+    // Nothing is measured until the chain from this repository to the
+    // node agrees with itself.
+    if let Err(e) = checkpoint::gate(cfg, node) {
+        eprintln!("beamfs-xfstests: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
     let t = test.map(|s| s.as_str()).unwrap_or("generic/464");
     let n: u32 = trials.and_then(|v| v.parse().ok()).unwrap_or(10);
     let k: u32 = rounds.and_then(|v| v.parse().ok()).unwrap_or(3);
@@ -1603,6 +1640,12 @@ fn do_sweep(cfg: &Config, selection: &[String]) -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
+    // Nothing is measured until the chain from this repository to the
+    // node agrees with itself.
+    if let Err(e) = checkpoint::gate(cfg, node) {
+        eprintln!("beamfs-xfstests: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
     // Every argument, not just the first.
     //
     // This read args.get(2) and dropped the rest in silence. On

@@ -171,7 +171,11 @@ pub fn sources_in_sync() -> Vec<String> {
 ///
 /// Returns the complaint, or None when the deployed image is current.
 #[must_use]
-pub fn image_is_current() -> Option<String> {
+/// The most recently built image, by modification time.
+///
+/// Symlinks are skipped: the stable name points at the newest build
+/// and would compare a file to itself under another name.
+pub fn newest_image() -> Option<PathBuf> {
     let dir = PathBuf::from(crate::lab::deploy_dir());
     let entries = std::fs::read_dir(&dir).ok()?;
 
@@ -190,8 +194,18 @@ pub fn image_is_current() -> Option<String> {
             newest = Some((t, e.path()));
         }
     }
+    newest.map(|(_, p)| p)
+}
 
-    let (_, path) = newest?;
+/// Whether the image now on the node is the newest one built.
+///
+/// This says nothing about the commits: an image can be the newest
+/// there is and still predate every fix made since. That question is
+/// `deploy::commits_after_image`, and calling this one by its name was
+/// how a checkpoint came to report that an image carried every commit
+/// twenty minutes after deploy had listed two it did not.
+pub fn image_is_current() -> Option<String> {
+    let path = newest_image()?;
     let now = crate::chain::sha256_file(&path)?;
     let seal = crate::chain::read()?;
 
