@@ -212,6 +212,45 @@ fn md5(p: &Path) -> Option<String> {
         .split_whitespace().next().map(str::to_string)
 }
 
+/// The file this domain actually boots from.
+///
+/// Hardcoded as /var/lib/libvirt/images/x86/<domain>.beamfs before, which
+/// is true only for as long as nobody moves the images. On 2026-09-21
+/// they were moved to a directory carrying chattr +C, because btrfs
+/// copy-on-write had fragmented the volumes into 180000 extents and was
+/// dominating every measurement taken on them. deploy then wrote the new
+/// rootfs to the old path, the domain booted from the new one, and it
+/// printed "the node is ready" -- which is the failure the comment below
+/// this call site already describes from a previous occurrence.
+///
+/// virsh knows. Asking costs one command and cannot drift.
+fn rootfs_path_for(domain: &str) -> Result<String, String> {
+    let out = Command::new("sudo")
+        .args(["virsh", "domblklist", domain])
+        .output()
+        .map_err(|e| format!("virsh domblklist: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("virsh domblklist {domain}: {}",
+                           String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    vda_from_domblklist(&String::from_utf8_lossy(&out.stdout))
+        .ok_or_else(|| format!("{domain} lists no vda"))
+}
+
+/// The source path of vda, out of what virsh domblklist prints.
+#[must_use]
+pub fn vda_from_domblklist(text: &str) -> Option<String> {
+    for l in text.lines() {
+        let mut f = l.split_whitespace();
+        let (Some(t), Some(src)) = (f.next(), f.next()) else { continue };
+        if t == "vda" && src.starts_with('/') {
+            return Some(src.to_string());
+        }
+    }
+    None
+}
+
+
 /// Replace the node's image, restart it, and push the tools.
 ///
 /// Returns when the node answers and its tools match, or an error
@@ -295,7 +334,7 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
     let _ = st;
     std::thread::sleep(Duration::from_secs(3));
 
-    let target = format!("/var/lib/libvirt/images/x86/{domain}.beamfs");
+    let target = rootfs_path_for(domain)?;
     let out = Command::new("sudo")
         .arg("cp").arg(&image).arg(&target)
         .output()
@@ -465,6 +504,23 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_root_device_is_read_out_of_virsh() {
+        let out = " Target   Source\n\
+                   ------------------------------------------\n\
+                   vda      /var/lib/libvirt/images/x86-nocow/beamfs-x86-01.beamfs\n\
+                   vdb      /var/lib/libvirt/images/x86-nocow/beamfs-x86-01-test.img\n";
+        assert_eq!(vda_from_domblklist(out).as_deref(),
+                   Some("/var/lib/libvirt/images/x86-nocow/beamfs-x86-01.beamfs"));
+    }
+
+    #[test]
+    fn a_domain_without_vda_is_not_guessed_at() {
+        let out = " Target   Source\n vdb      /tmp/x.img\n";
+        assert!(vda_from_domblklist(out).is_none(),
+                "a missing vda must fail loudly, not fall back to a guess");
+    }
+
     use super::*;
 
     /// The comparison that was missing when a two-day-old checker
