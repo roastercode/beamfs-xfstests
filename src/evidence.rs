@@ -460,19 +460,7 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
             // Both devices: a test that fails on the test device and a
             // test that fails on the scratch one look the same from
             // here, and the checker is cheap.
-            "@fsck" => format!(
-                // /dev/ prefixed here: the node carries the bare
-                // name, and fsck given "vdb" looks for a file called
-                // vdb in the working directory and finds none.
-                "for d in /dev/{} /dev/{}; do echo \"--- $d ---\"; \
-                 sudo fsck.beamfs -v $d > /tmp/ev-fsck.out 2>&1; \
-                 n=$(wc -l < /tmp/ev-fsck.out); \
-                 echo \"fsck wrote $n line(s)\"; \
-                 head -5000 /tmp/ev-fsck.out; \
-                 if [ \"$n\" -gt 5000 ]; then \
-                 echo \"... $((n - 5000)) further line(s) from fsck, not captured\"; fi; \
-                 done",
-                node.test_dev, node.scratch_dev),
+            "@fsck" => fsck_command(&node.test_dev, &node.scratch_dev),
             // A file of headers is not a profile. Twenty-three captures
             // carried eight lines of column titles and nothing else,
             // which reads as "measured and flat" rather than "never
@@ -849,6 +837,34 @@ pub fn prune(root: &Path, keep: usize) -> usize {
 }
 
 
+/// Check both devices, and say what the checker's output lost.
+///
+/// Piped through `head -400` before, with nothing saying so. On the six
+/// volumes of the 2026-09-21 sweep that had anything wrong with them,
+/// the cut fell inside pass 4 and passes 5 and 6 -- the RS journal and
+/// block ownership -- never appeared at all. The checker was read as
+/// one that abandons a device after four hundred complaints; it does no
+/// such thing, and nothing on those six journals is known to this day.
+///
+/// Both devices, because a failure on the test device and one on the
+/// scratch device look identical from here.
+#[must_use]
+pub fn fsck_command(test_dev: &str, scratch_dev: &str) -> String {
+    // /dev/ prefixed here: the node carries the bare name, and fsck
+    // given "vdb" looks for a file called vdb in the working directory
+    // and finds none.
+    format!(
+        "for d in /dev/{test_dev} /dev/{scratch_dev}; do \
+         echo \"--- $d ---\"; \
+         sudo fsck.beamfs -v $d > /tmp/ev-fsck.out 2>&1; \
+         n=$(wc -l < /tmp/ev-fsck.out); \
+         echo \"fsck wrote $n line(s)\"; \
+         head -5000 /tmp/ev-fsck.out; \
+         if [ \"$n\" -gt 5000 ]; then \
+         echo \"... $((n - 5000)) further line(s) from fsck, not captured\"; \
+         fi; done")
+}
+
 /// Read a file on the node, and say what was left out.
 ///
 /// The generic arm was a bare `cat`. One file took the whole capture
@@ -884,14 +900,13 @@ mod tests {
 
     #[test]
     fn the_fsck_command_counts_before_it_cuts() {
-        // The collector cut fsck at four hundred lines with no word of
-        // it, and passes five and six never appeared on the six
-        // volumes that needed them most.
-        let src = include_str!("evidence.rs");
-        assert!(!src.contains("fsck.beamfs -v $d 2>&1 | head -400"),
-                "the silent four-hundred-line cut is back");
-        assert!(src.contains("further line(s) from fsck, not captured"),
-                "fsck no longer says what it left out");
+        let c = fsck_command("vdb", "vdc");
+        assert!(c.contains("/dev/vdb"), "test device missing: {c}");
+        assert!(c.contains("/dev/vdc"), "scratch device missing: {c}");
+        assert!(c.contains("wc -l"), "nothing counts the lines: {c}");
+        assert!(c.contains("not captured"), "it would cut in silence: {c}");
+        // Generous enough that passes 5 and 6 survive on a bad volume.
+        assert!(c.contains("5000"), "not the intended cap: {c}");
     }
 
     use super::*;
