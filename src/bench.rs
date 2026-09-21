@@ -109,7 +109,11 @@ impl Run {
 
     fn parse(s: &str) -> Option<Run> {
         let f: Vec<&str> = s.split_whitespace().collect();
-        if f.len() < 5 {
+        // A line whose test field is empty shifts every column one
+        // rank left and still passes a length check: bench.log holds
+        // "unknown  0 1 0 0", read back as a run of test "0" with one
+        // pass. A test name carries a slash; nothing else here does.
+        if f.len() < 5 || !f[1].contains('/') {
             return None;
         }
         Some(Run {
@@ -858,7 +862,14 @@ pub fn run(
         let t = match one_trial(&c, test, Duration::from_secs(budget)) {
             Ok(t) => t,
             Err(e) => {
-                p.finish(&format!("error: {e}"));
+                // Counted, not dropped. A trial that fails in transport
+                // is neither a pass nor a failure, but it consumed one
+                // of the trials asked for; uncounted it turned ten into
+                // nine in silence, and the rate was then reported over
+                // nine. aborted is where a trial that produced no
+                // verdict already goes, and rate() excludes it.
+                r.aborted += 1;
+                p.finish(&format!("error: {e} -- not a verdict"));
                 continue;
             }
         };
@@ -1271,6 +1282,8 @@ pub fn baseline(
     println!();
 
     let mut b = Baseline { commit: commit(), series: Vec::new() };
+    // The runs themselves, kept to be written verbatim.
+    let mut runs: Vec<Run> = Vec::new();
     for k in 1..=rounds {
         println!("  --- series {k}/{rounds} ---");
         let r = run(cfg, node, test, trials)?;
@@ -1287,25 +1300,23 @@ pub fn baseline(
                 }))
                 .collect(),
         });
+        runs.push(r);
     }
     // Store it: every later comparison is judged against this spread,
     // so it has to outlive the session that measured it.
     let p = store().parent().map(|d| d.join(format!("baseline-{}.log", test.replace('/', "-"))));
     if let Some(p) = p {
-        let body: String = b
-            .series
-            .iter()
-            .map(|s| {
-                format!(
-                    "{} {} {} {} 0 {}\n",
-                    b.commit,
-                    test,
-                    s.passes(),
-                    s.n() - s.passes(),
-                    s.losses().iter().map(|l| l.to_string()).collect::<Vec<_>>().join(",")
-                )
-            })
-            .collect();
+        // Written from the runs, not from a Series rebuilt out of
+        // their counters. That rebuild dropped every loss of zero,
+        // sorted the rest out of trial order, wrote a literal 0 in the
+        // aborted column and stamped every series with the commit of
+        // the first. Run::line is what bench.log already stores, so the
+        // two files now say the same thing about the same campaign.
+        let mut body = String::new();
+        for r in &runs {
+            body.push_str(&r.line());
+            body.push('\n');
+        }
         if let Err(e) = std::fs::write(&p, body) {
             println!("  (baseline not stored: {e})");
         } else {
@@ -2159,6 +2170,30 @@ mod tests {
     #[test]
     fn a_line_that_is_short_is_not_a_run() {
         assert!(Run::parse("abc generic/464").is_none());
+    }
+
+    #[test]
+    fn a_loss_of_zero_survives_the_stored_line() {
+        // A campaign measured 30, 0, 40 and the stored file said
+        // 30, 40: the failing trial that lost nothing disappeared, and
+        // with it the fact that a failure need not leak.
+        let mut x = r(7, 3, 0);
+        x.lost = vec![30, 0, 40];
+        let y = Run::parse(&x.line()).expect("parses");
+        assert_eq!(y.lost, vec![30, 0, 40]);
+        assert_eq!(y.failed, 3);
+    }
+
+    #[test]
+    fn losses_keep_the_order_the_trials_ran_in() {
+        let mut x = r(8, 2, 0);
+        x.lost = vec![103, 24];
+        assert_eq!(Run::parse(&x.line()).expect("parses").lost, vec![103, 24]);
+    }
+
+    #[test]
+    fn a_line_with_no_test_named_is_not_a_run() {
+        assert!(Run::parse("unknown  0 1 0 0").is_none());
     }
 
     /// A live run is not leftovers, and is not taken over.

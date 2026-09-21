@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: GPL-2.0-only
-.TH BEAMFS-XFSTESTS 1 "2026-09-20" "beamfs-xfstests" "beamfs development tools"
+.TH BEAMFS-XFSTESTS 1 "2026-09-21" "beamfs-xfstests" "beamfs development tools"
 
 .TP
 .B sweep \fR[\fIselection\fR]
@@ -30,6 +30,25 @@ with nothing changed between them, and three patches were reverted that
 day on differences smaller than that. Defaults to generic/464, ten
 trials, three rounds; stores the spread so later comparisons are judged
 against it.
+.IP
+The spread is stored in
+.I ~/.local/share/beamfs\-xfstests/baseline\-<test>.log
+in the same five columns as
+.IR bench.log :
+commit, test, trials that passed, trials that failed, trials that
+returned no verdict, and then the blocks lost by each failing trial in
+the order the trials ran, zeros included.
+.IP
+Since 2.3.5 that line is written from the runs themselves. Before it,
+it was rebuilt from their counters, and the rebuild dropped every loss
+of zero, sorted what was left out of trial order, wrote a literal 0 in
+the column for trials with no verdict, and stamped every series with
+the commit of the first. A campaign measured as 30, 0, 40 was stored as
+30, 40, and the failing trial that leaked nothing was not in the file
+to be seen.
+.IP
+The file is rewritten whole by each campaign. Copy it before measuring
+again if the previous spread is to be compared against.
 .TP
 .B bench \fItest\fR [\fItrials\fR]
 Measure one test's pass rate over repeated trials and compare it to the
