@@ -1671,3 +1671,32 @@ fn do_sweep(cfg: &Config, selection: &[String]) -> std::process::ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod shell_tests {
+    /// The shell this tool carries is checked like the rest of it.
+    ///
+    /// clippy holds the Rust to zero warnings and -Werror holds the C,
+    /// and the shell -- which runs as root on the nodes -- had never
+    /// been looked at by anything. shellcheck was not even installed.
+    /// Errors fail the build here; the style notes do not, because a
+    /// wall of them would make the check be turned off within a week.
+    ///
+    /// Skipped where shellcheck is absent, so the suite still runs on
+    /// a machine that does not have it.
+    #[test]
+    fn the_shell_has_no_errors() {
+        let Ok(out) = std::process::Command::new("shellcheck")
+            .args(["-f", "gcc", "-S", "error", "src/runner.sh"])
+            .output()
+        else {
+            eprintln!("shellcheck absent: skipped");
+            return;
+        };
+        let found = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            found.trim().is_empty(),
+            "shellcheck reports errors in src/runner.sh:\n{found}"
+        );
+    }
+}
