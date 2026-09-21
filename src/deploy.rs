@@ -40,7 +40,7 @@ fn newest_image() -> Option<PathBuf> {
 ///
 /// fsck.beamfs lives twice: once under beamfs/tools/fsck.beamfs, which
 /// is what gets edited, and once under the layer's
-/// files/fsck-beamfs-0.1.0, which is what the image compiles. Nothing
+/// files/fsck-beamfs-<version>, which is what the image compiles. Nothing
 /// kept them together.
 ///
 /// On 2026-09-13 the image's copy was missing fsck_read.c and
@@ -53,8 +53,13 @@ fn newest_image() -> Option<PathBuf> {
 fn recipe_sources_current() -> Vec<String> {
     let Ok(home) = std::env::var("HOME") else { return Vec::new() };
     let repo = PathBuf::from(&home).join("git/beamfs/tools/fsck.beamfs");
-    let layer = PathBuf::from(&home)
-        .join("git/yocto-beamfs/recipes-kernel/beamfs/files/fsck-beamfs-0.1.0");
+    let files = PathBuf::from(&home)
+        .join("git/yocto-beamfs/recipes-kernel/beamfs/files");
+    // Found rather than named: the version used to be written into
+    // this path, so a checker fix stayed in the repository while the
+    // node went on running the previous one.
+    let layer = crate::clean::newest_dir(&files, "fsck-beamfs-")
+        .unwrap_or_else(|| files.join("fsck-beamfs-0.1.1"));
 
     diff_trees(&repo, &layer)
 }

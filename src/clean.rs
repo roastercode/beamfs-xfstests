@@ -55,6 +55,28 @@ pub fn layer_dir() -> PathBuf {
 ///
 /// Sorted by version number and not by name, so 0.1.10 comes after
 /// 0.1.9 rather than before it.
+pub fn newest_dir(files: &Path, prefix: &str) -> Option<PathBuf> {
+    let mut best: Option<(Vec<u64>, PathBuf)> = None;
+    for e in std::fs::read_dir(files).ok()?.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        let Some(v) = name.strip_prefix(prefix) else {
+            continue;
+        };
+        if !e.path().is_dir() {
+            continue;
+        }
+        let parts: Vec<u64> = v.split('.').filter_map(|x| x.parse().ok()).collect();
+        if parts.is_empty() {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(b, _)| parts > *b) {
+            best = Some((parts, e.path()));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
 fn newest_beamfs_dir(files: &Path) -> Option<PathBuf> {
     let mut best: Option<(Vec<u64>, PathBuf)> = None;
     for e in std::fs::read_dir(files).ok()?.flatten() {
