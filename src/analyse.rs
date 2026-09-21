@@ -85,18 +85,57 @@ pub struct Report {
     overwrites: usize,
 }
 
-/// Read `dir` -- trace.txt and lost.txt -- and work out the chain for
+
+/// The blocks a case lost, however the case recorded them.
+///
+/// `trace` writes lost.txt, one number a line. A sweep writes no such
+/// file: it keeps what the checker said, in fsck.verbose and in full,
+/// where each lost block has a line of its own. analyse refused every
+/// one of those cases for want of a file nothing had promised to write
+/// -- thirteen captures with a list of lost blocks and half a gigabyte
+/// of trace each, unreadable by the tool written to read them.
+fn lost_blocks(dir: &Path) -> Result<Vec<u64>, String> {
+    if let Ok(txt) = std::fs::read_to_string(dir.join("lost.txt")) {
+        return Ok(txt.lines().filter_map(|l| l.trim().parse().ok()).collect());
+    }
+
+    let mut out: Vec<u64> = Vec::new();
+    for name in ["fsck.verbose", "full"] {
+        let Ok(txt) = std::fs::read_to_string(dir.join(name)) else {
+            continue;
+        };
+        for line in txt.lines() {
+            // "pass 4: block 19708 marked used but unreferenced"
+            if !line.contains("marked used but unreferenced") {
+                continue;
+            }
+            let Some(i) = line.find("block ") else { continue };
+            let t = &line[i + 6..];
+            let end = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
+            if let Ok(b) = t[..end].parse::<u64>() {
+                out.push(b);
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    if out.is_empty() {
+        return Err(format!(
+            "{}: no lost.txt, and neither fsck.verbose nor full names a \
+             lost block -- this case recorded no leak to explain",
+            dir.display()
+        ));
+    }
+    Ok(out)
+}
+
+/// Read `dir` -- trace.txt, and whatever names the lost blocks --
+/// and work out the chain for
 /// each lost block.
 pub fn analyse(dir: &Path) -> Result<Report, String> {
     let trace = std::fs::read_to_string(dir.join("trace.txt"))
         .map_err(|e| format!("{}: {e}", dir.join("trace.txt").display()))?;
-    let lost_txt = std::fs::read_to_string(dir.join("lost.txt"))
-        .map_err(|e| format!("{}: {e}", dir.join("lost.txt").display()))?;
-
-    let wanted: Vec<u64> = lost_txt
-        .lines()
-        .filter_map(|l| l.trim().parse().ok())
-        .collect();
+    let wanted = lost_blocks(dir)?;
 
     let mut inodes: HashMap<u64, Inode> = HashMap::new();
     let mut owner: HashMap<u64, u64> = HashMap::new();
@@ -311,7 +350,7 @@ pub fn analyse_all(root: &Path, limit: usize) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", root.display()))?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.join("lost.txt").exists())
+        .filter(|p| p.join("trace.txt").exists())
         .collect();
     dirs.sort();
     dirs.reverse();

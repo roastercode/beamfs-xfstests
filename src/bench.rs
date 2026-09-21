@@ -430,6 +430,10 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str, tracing: bool)
          if [ -d /sys/kernel/debug/tracing/events/beamfs ]; then \
            echo 60000 > /sys/kernel/debug/tracing/buffer_size_kb; \
            echo {trc} > /sys/kernel/debug/tracing/events/beamfs/enable; \
+           for e in block_bio_queue block_rq_issue block_rq_complete; do \
+             [ -e /sys/kernel/debug/tracing/events/block/$e/enable ] && \
+               echo {trc} > /sys/kernel/debug/tracing/events/block/$e/enable; \
+           done; \
            : > /sys/kernel/debug/tracing/trace; \
            echo {trc} > /sys/kernel/debug/tracing/tracing_on; \
            printf \"tracing=%s\\n\" \"$(cat /sys/kernel/debug/tracing/tracing_on)\"; \

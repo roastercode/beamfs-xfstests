@@ -118,7 +118,8 @@ fn build_tools() -> Result<Vec<(String, PathBuf)>, String> {
                                .collect::<Vec<_>>().join(" | ")));
     }
 
-    let mkfs_src = home.join("git/yocto-beamfs/recipes-kernel/beamfs/files/beamfs-0.1.3");
+    // The same directory the kernel build compiles, found rather than named.
+    let mkfs_src = crate::clean::layer_dir();
     let mkfs_out = PathBuf::from("/tmp/mkfs.beamfs.static");
     let out = Command::new("cc")
         .args(["-O2", "-std=gnu11", "-static"])

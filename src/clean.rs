@@ -35,13 +35,46 @@ fn repo_dir() -> PathBuf {
 }
 
 /// The copy the kernel build actually compiles.
-fn layer_dir() -> PathBuf {
-    std::env::var("BEAMFS_LAYER_SRC")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(home())
-                .join("git/yocto-beamfs/recipes-kernel/beamfs/files/beamfs-0.1.3")
-        })
+///
+/// The version was written into this path, so every bump left the tool
+/// compiling from a directory that no longer existed -- 0.1.4 and 0.1.5
+/// both failed here, with a deploy reporting only that mkfs did not
+/// build. The layer holds one beamfs-<version> directory; find it
+/// rather than name it.
+pub fn layer_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("BEAMFS_LAYER_SRC") {
+        return PathBuf::from(p);
+    }
+    let files = PathBuf::from(home())
+        .join("git/yocto-beamfs/recipes-kernel/beamfs/files");
+    newest_beamfs_dir(&files)
+        .unwrap_or_else(|| files.join("beamfs-0.1.3"))
+}
+
+/// The highest-versioned beamfs-<version> directory under `files`.
+///
+/// Sorted by version number and not by name, so 0.1.10 comes after
+/// 0.1.9 rather than before it.
+fn newest_beamfs_dir(files: &Path) -> Option<PathBuf> {
+    let mut best: Option<(Vec<u64>, PathBuf)> = None;
+    for e in std::fs::read_dir(files).ok()?.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        let Some(v) = name.strip_prefix("beamfs-") else {
+            continue;
+        };
+        if !e.path().is_dir() {
+            continue;
+        }
+        let parts: Vec<u64> = v.split('.').filter_map(|x| x.parse().ok()).collect();
+        if parts.is_empty() {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(b, _)| parts > *b) {
+            best = Some((parts, e.path()));
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 fn same_bytes(a: &Path, b: &Path) -> bool {
