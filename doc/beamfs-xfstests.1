@@ -275,10 +275,6 @@ Each cell returns the node to the state its condition names rather than
 inheriting what the last one left, and reports what the setup actually
 achieved: a mount that failed silently would otherwise produce a result
 under conditions nobody chose and look exactly like one that worked.
-.TP
-.B stop
-Stop a run in progress on every node and leave the filesystems
-unmounted.
 
 .SH THE TRACE COMMAND
 generic/464 loses blocks on roughly half its runs and takes three
@@ -617,7 +613,7 @@ Defaults to nvme1n1.
 .TP
 .B XFSTESTS_DOMAIN
 libvirt domain of the node, for the counters taken host-side through
-virsh. Defaults to beamfs-InameR.
+virsh. Defaults to beamfs\-\fIname\fR.
 .TP
 .B XFSTESTS_NO_RESUME
 Start a run from scratch instead of resuming what the history holds.
