@@ -1046,7 +1046,11 @@ fn show_history() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
     println!("  === SAVED RUNS ===");
-    for tag in runs.iter().take(20) {
+    // Twenty shown out of a hundred and five on disk, with nothing
+    // saying so: a capture looked for here and not found was read as a
+    // run that never happened.
+    let shown = runs.len().min(20);
+    for tag in runs.iter().take(shown) {
         if let Some(rs) = h.load(tag) {
             let mut s = result::Summary::default();
             for r in &rs {
@@ -1055,6 +1059,9 @@ fn show_history() -> std::process::ExitCode {
             println!("    {tag}  {:>4} tests  {:>4} pass  {:>3} fail  {:>3} hang",
                      s.attempted(), s.pass, s.fail, s.hang);
         }
+    }
+    if runs.len() > shown {
+        println!("    ... and {} older run(s) not shown", runs.len() - shown);
     }
     println!();
     std::process::ExitCode::SUCCESS

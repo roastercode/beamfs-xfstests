@@ -465,14 +465,40 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
                 // name, and fsck given "vdb" looks for a file called
                 // vdb in the working directory and finds none.
                 "for d in /dev/{} /dev/{}; do echo \"--- $d ---\"; \
-                 sudo fsck.beamfs -v $d 2>&1 | head -400; done",
+                 sudo fsck.beamfs -v $d > /tmp/ev-fsck.out 2>&1; \
+                 n=$(wc -l < /tmp/ev-fsck.out); \
+                 echo \"fsck wrote $n line(s)\"; \
+                 head -5000 /tmp/ev-fsck.out; \
+                 if [ \"$n\" -gt 5000 ]; then \
+                 echo \"... $((n - 5000)) further line(s) from fsck, not captured\"; fi; \
+                 done",
                 node.test_dev, node.scratch_dev),
+            // A file of headers is not a profile. Twenty-three captures
+            // carried eight lines of column titles and nothing else,
+            // which reads as "measured and flat" rather than "never
+            // switched on".
             "@profile" => "sudo sh -c 'cat /sys/kernel/debug/tracing/trace_stat/function* 2>/dev/null \
-                | sort -k2 -rn | head -60' 2>/dev/null || true".to_string(),
-            "@tracing" => "sudo sh -c 'for e in /sys/kernel/debug/tracing/events/beamfs/*/enable; \
-                do echo \"$(basename $(dirname $e)) $(cat $e)\"; done; \
-                echo \"tracing_on $(cat /sys/kernel/debug/tracing/tracing_on)\"' 2>/dev/null || true".to_string(),
-            p => format!("sudo cat {p} 2>/dev/null || true"),
+                | grep -v \"^ *Function\\|^ *-----\" | sort -k2 -rn | head -60' 2>/dev/null \
+                | grep . \
+                || echo 'no function profile: function profiling was never enabled'".to_string(),
+            // The per-event state is not the answer on its own. A
+            // column of zeroes reads as "traced and quiet", and that is
+            // how twenty-three captures were taken with nothing armed
+            // and nobody noticing. The verdict line says which it was.
+            "@tracing" => "sudo sh -c 'armed=0; total=0; \
+                for e in /sys/kernel/debug/tracing/events/beamfs/*/enable; do \
+                [ -e \"$e\" ] || continue; total=$((total + 1)); \
+                v=$(cat $e 2>/dev/null); \
+                [ \"$v\" = 1 ] && armed=$((armed + 1)); \
+                echo \"$(basename $(dirname $e)) $v\"; done; \
+                on=$(cat /sys/kernel/debug/tracing/tracing_on 2>/dev/null); \
+                echo \"tracing_on $on\"; \
+                if [ \"$on\" = 1 ] && [ \"$armed\" != 0 ]; then \
+                echo \"VERDICT traced: $armed of $total event(s) armed\"; \
+                else \
+                echo \"VERDICT nothing was traced: tracing_on=$on armed=$armed of $total\"; \
+                fi' 2>/dev/null || true".to_string(),
+            p => capped_read(p),
         };
         if let Ok((body, _)) = c.run_rc(&cmd, Duration::from_secs(60)) {
             case.put(name, &body);
@@ -822,8 +848,52 @@ pub fn prune(root: &Path, keep: usize) -> usize {
     removed
 }
 
+
+/// Read a file on the node, and say what was left out.
+///
+/// The generic arm was a bare `cat`. One file took the whole capture
+/// with it: generic/013's .full is 4.1 MB of a 5.7 MB trace, for a test
+/// that passed, while the six failures shared 11 KB between them.
+///
+/// The cap is generous -- no /proc file this reads comes near it -- so
+/// in practice it only ever trims a harness log. What matters is the
+/// last line: a reader who does not know a file was trimmed will take
+/// what he sees for all there was, which is how a fsck cut at four
+/// hundred lines was read as a checker that gives up.
+#[must_use]
+pub fn capped_read(path: &str) -> String {
+    format!(
+        "sudo sh -c 'f={path}; \
+         n=$(wc -l < \"$f\" 2>/dev/null || echo 0); \
+         head -2000 \"$f\" 2>/dev/null; \
+         if [ \"$n\" -gt 2000 ]; then \
+         echo \"... $((n - 2000)) further line(s) of $f, not captured\"; \
+         fi' 2>/dev/null || true")
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_trimmed_file_says_so_rather_than_ending_quietly() {
+        let c = capped_read("/usr/xfstests/results/generic/013.full");
+        assert!(c.contains("013.full"), "the path is lost: {c}");
+        assert!(c.contains("wc -l"), "nothing counts the lines: {c}");
+        assert!(c.contains("not captured"),
+                "a trimmed file would end without saying so: {c}");
+    }
+
+    #[test]
+    fn the_fsck_command_counts_before_it_cuts() {
+        // The collector cut fsck at four hundred lines with no word of
+        // it, and passes five and six never appeared on the six
+        // volumes that needed them most.
+        let src = include_str!("evidence.rs");
+        assert!(!src.contains("fsck.beamfs -v $d 2>&1 | head -400"),
+                "the silent four-hundred-line cut is back");
+        assert!(src.contains("further line(s) from fsck, not captured"),
+                "fsck no longer says what it left out");
+    }
+
     use super::*;
 
     #[test]
