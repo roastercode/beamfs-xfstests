@@ -102,6 +102,31 @@ display once rebooted one twelve minutes into a thirty-minute test.
 .B XFSTESTS_FORCE=1
 takes it anyway.
 .TP
+.B nodes status
+Say what each configured node is, right now, and change nothing.
+.sp
+One ssh round trip per node: kernel, uptime, load, tasks in
+uninterruptible sleep, the size and mount state of both devices, which
+tools are installed and which version of
+.B fsck.beamfs
+answers, whether the beamfs tracepoints are armed, the inode cache, what
+a previous trial left running, and what
+.B deploy
+last established -- with whether the node has rebooted since, which
+decides if that record still describes this machine.
+.sp
+It then names what in the reading would spoil a measurement or explain
+one: a device still mounted under a checker that reads it raw, tracing
+off so a capture records zeroes,
+.B DUMP_CORRUPT_FS
+at zero so a failure keeps no image, or a node whose own root is beamfs,
+whose inode cache therefore counts the root's inodes and says nothing
+about the test volumes.
+.sp
+Since 2.3.0. Safe during a campaign: it starts, kills and mounts
+nothing. Exit status is 1 if a node could not be reached, 0 otherwise --
+a node with concerns is still a node that answered.
+.TP
 .B stop
 Stop a running campaign and leave the nodes in a state the next one can
 start from.

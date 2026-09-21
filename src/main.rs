@@ -47,6 +47,7 @@ mod console;
 mod history;
 mod journal;
 mod node;
+mod nodes;
 mod nodestate;
 mod probe;
 mod recovery;
@@ -155,7 +156,7 @@ fn main() -> std::process::ExitCode {
         // Commands that read or prepare rather than measure. None of
         // them is long enough to walk away from, so none of them rings.
         Some("report" | "history" | "compare" | "trend" | "deploy"
-             | "--help" | "-h" | "stop")
+             | "nodes" | "--help" | "-h" | "stop")
     );
 
     /*
@@ -188,6 +189,7 @@ fn main() -> std::process::ExitCode {
         Some("control") => do_control(&cfg, args.get(2), args.get(3), args.get(4)),
         Some("sweep") => do_sweep(&cfg, &args[2..]),
         Some("deploy") => do_deploy(&cfg, args.get(2)),
+        Some("nodes") => nodes::status(&cfg, args.get(2)),
         Some("checkpoint") => {
             checkpoint::report(&cfg, cfg.nodes.first());
             std::process::ExitCode::SUCCESS
@@ -240,7 +242,7 @@ fn main() -> std::process::ExitCode {
 
 fn usage() -> std::process::ExitCode {
     eprintln!(
-        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|matrix|bench|baseline|sweep|trend|deploy|stop]\n\
+        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|matrix|bench|baseline|sweep|trend|nodes|deploy|stop]\n\
          \n\
          run      shard the suite across the nodes and follow it (default)\n\
          probe    run one test with console capture and sampling\n\
@@ -271,6 +273,8 @@ fn usage() -> std::process::ExitCode {
 deploy   put the newest image and this repo's tools on a node,\n\
                   and prove they arrived\n\
                   deploy [node]       (default: the first configured)\n\
+         nodes    say what each configured node is, and change nothing\n\
+                  nodes status        one round trip per node\n\
          stop     kill the shards and release the mounts, and check\n\
                   that they are gone\n\
                   stop --hard         restart a node that will not let go\n\
