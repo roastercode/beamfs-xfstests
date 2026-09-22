@@ -873,9 +873,30 @@ pub fn run(
         } else {
             None
         };
+        // A bpftrace script, attached for the length of the trial, the
+        // way sweep attaches one for the length of a test. Until 2.3.9
+        // XFSTESTS_BPF was read by sweep alone: a probe named for three
+        // trials of generic/083 attached to none of them, and the run
+        // said nothing about it.
+        let mut probe = match std::env::var("XFSTESTS_BPF") {
+            Ok(name) if !name.is_empty() => match bpf::start(&c, &name) {
+                Ok(r) => {
+                    say!("    {} attached on {}", r.name, r.node());
+                    Some(r)
+                }
+                Err(e) => {
+                    say!("    {name} did not start: {e}");
+                    None
+                }
+            },
+            _ => None,
+        };
         let t = match one_trial(&c, test, Duration::from_secs(budget)) {
             Ok(t) => t,
             Err(e) => {
+                if let Some(pr) = probe.take() {
+                    let _ = pr.stop_into(&c, std::path::Path::new("/tmp"));
+                }
                 // Counted, not dropped. A trial that fails in transport
                 // is neither a pass nor a failure, but it consumed one
                 // of the trials asked for; uncounted it turned ten into
@@ -889,6 +910,9 @@ pub fn run(
         };
         if t.aborted {
             r.aborted += 1;
+            if let Some(pr) = probe.take() {
+                let _ = pr.stop_into(&c, std::path::Path::new("/tmp"));
+            }
             p.finish(&format!("ABORTED ({}s) -- not a verdict", t.trial.secs));
             // An abort usually leaves the node in a state the next
             // trial hits too. Clear it rather than aborting nine more
@@ -906,6 +930,19 @@ pub fn run(
         // reported over the last two days came from a stale file that
         // way.
         let case = Case::new(&evidence_root(), &r.test, n);
+        // The probe first: stopped before the checker runs, so what it
+        // saw is the trial rather than the trial plus its verification.
+        if let Some(pr) = probe.take() {
+            match pr.stop_into(&c, &case.dir) {
+                Some((p, bytes)) => {
+                    say!("    kept {} ({} KiB)",
+                         p.file_name().unwrap_or_default().to_string_lossy(),
+                         bytes / 1024);
+                    bpf::speak(&p);
+                }
+                None => say!("    the probe brought nothing back"),
+            }
+        }
         // Recorded here too, not only in sweep.
         //
         // trend read five sweeps and ignored ten baseline trials --

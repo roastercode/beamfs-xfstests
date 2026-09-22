@@ -599,6 +599,29 @@ asking the first should not cost the second. Before 0.9.0 the
 profiler ran only under full tracing and nothing was ever kept, so
 every question about a duration was answered by guessing.
 .TP
+.B XFSTESTS_BPF
+The stem of a bpftrace script from
+.BR --probes ,
+attached to the node for the length of each test under
+.B sweep
+and, since 2.3.9, of each trial under
+.B bench
+and
+.BR baseline ,
+stopped before the checker runs so the capture is the test and not
+its verification, and kept in the case directory as
+.IR bpf-<name>.txt .
+Nothing runs without it: bpftrace instruments the kernel, and a
+campaign measuring durations must not carry a probe it did not ask
+for. Before 2.3.9 only sweep read it; a bench named with a probe ran
+without one and said nothing.
+.TP
+.B XFSTESTS_BPF_SCRIPTS
+Where the scripts are read from. Defaults to the repository's
+.I scripts/
+when running from it, otherwise
+.IR /usr/share/beamfs-xfstests/scripts .
+.TP
 .B XFSTESTS_SCRUB_MS
 Milliseconds the scrubber waits between blocks. 0 parks the
 scrubber; empty, the default, leaves the node as it is.
