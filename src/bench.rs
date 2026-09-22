@@ -1957,9 +1957,28 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             last_seen = v.clone();
             last_test = test.clone();
         }
-        if watch_wedged.load(std::sync::atomic::Ordering::Relaxed) {
+        let wedged = watch_wedged.load(std::sync::atomic::Ordering::Relaxed);
+        if wedged {
             say!("    the node stopped writing with tasks stuck -- \
                       this test is not finishing");
+            // The stacks, while the tasks are still stuck.
+            //
+            // generic/074 on 2026-09-22: Dirty 194 824 kB, Writeback 0,
+            // no I/O in flight for twenty-eight minutes, and nothing in
+            // the evidence named the lock -- the kill came, the fsck
+            // ran on the mounted volume, and the tasks that held it
+            // were never asked what they were waiting for. This is the
+            // one record that answers that, and it costs one round
+            // trip to a node that still answers ssh.
+            let (stacks, dmesg, mounts) = c.stall_evidence();
+            let body = format!(
+                "=== tasks in uninterruptible sleep, and their stacks ===\n{stacks}\n\
+                 === kernel messages ===\n{dmesg}\n=== mounts ===\n{mounts}\n");
+            match std::fs::write(case.dir.join("stall.txt"), &body) {
+                Ok(()) => say!("    kept stall.txt ({} KiB): what was stuck, and where",
+                               body.len() / 1024),
+                Err(e) => say!("    stall.txt not kept: {e}"),
+            }
         }
 
         // Kept whichever way it went: a pass is a zero, and a test
@@ -2007,6 +2026,34 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                     // the next mkfs.
                     apparatus.push(format!("{test}: the volume could not be frozen"));
                 }
+            }
+        }
+
+        // A node whose disk stopped with tasks stuck is not a node the
+        // next test can run on.
+        //
+        // The sweep used to note it and go on: prepare() then ran
+        // mkfs over a device the stuck tasks still held, the fresh
+        // mount succeeded, the old superblock's dirty buffers came
+        // down on top of it later, and generic/075 was recorded with
+        // 59 351 blocks referenced by an inode and marked free by the
+        // bitmap -- a defect the harness made, not the filesystem. The
+        // runner of `run` writes STUCK and exits in the same spot; a
+        // sweep is the campaign that runs all night, so it restarts
+        // the domain the way `stop --hard` does and carries on, and
+        // stops only if the node does not come back.
+        if wedged {
+            let r = crate::recovery::Recovery::new(cfg);
+            let domain = r.domain_for(&node.name);
+            say!("    restarting {domain}: a node that stopped writing with \
+                      tasks stuck cannot give the next test a verdict");
+            let mut jr = crate::journal::Journal::create(&std::env::temp_dir());
+            let outcome = r.recover(&c, &domain, 2, &mut jr);
+            say!("    {}", outcome.as_str());
+            if !outcome.usable() {
+                say!("    the node did not come back: stopping here, {} test(s) not run",
+                     tests.len() - i - 1);
+                break;
             }
         }
     }

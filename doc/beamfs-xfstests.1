@@ -191,6 +191,17 @@ its console is kept first, through the hypervisor (SysRq w, l and m,
 under evidence/wedge-<node>-<time>/ in the data directory), and the
 domain is then restarted and waited for. Before 2.3.13 a silent node
 read as "nothing left running" and --hard never reached it.
+.sp
+A
+.B sweep
+that sees the disk stop with tasks stuck keeps the stacks of those tasks
+in the case's
+.I stall.txt
+(and in the run's .md), then restarts the domain the same way before the
+next test, and stops if the node does not come back. Before 2.3.18 it
+went on to the next test with the stuck tasks still holding the device,
+and mkfs over that device produced a failure the harness had made
+itself.
 .PP
 A sweep also stops when
 .I /tmp/beamfs-xfstests.stop

@@ -172,6 +172,7 @@ pub fn digest(dirs: &[PathBuf]) -> std::io::Result<PathBuf> {
             ("what the checker found", "full", 400usize),
             ("what it named", "fsck.verbose", 400),
             ("what the runner saw before the kill", "runner.log", 400),
+            ("what was stuck when the node stopped writing", "stall.txt", 400),
             ("why the test failed", "check.out", 40),
             ("where it was mounted", "mounts", 20),
             ("what the device did", "diskstats", 10),
