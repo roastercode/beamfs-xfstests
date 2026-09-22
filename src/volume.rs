@@ -811,6 +811,13 @@ pub fn report_to(r: &VolumeReport, dir: Option<&Path>) {
 /// zeroes is a couple of megabytes -- and decompressing every one to
 /// look at it would fill the disk a campaign is running on.
 pub fn inspect_compressed(path: &Path) -> std::io::Result<VolumeReport> {
+    // Said here rather than by zstd on the terminal: "can't stat" from
+    // a child process is not an answer a caller can act on.
+    if !path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no image at {}", path.display())));
+    }
     let tmp = std::env::temp_dir().join(format!(
         "beamfs-inspect-{}.img",
         std::process::id()

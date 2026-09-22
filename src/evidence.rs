@@ -676,6 +676,57 @@ pub fn freeze_volume(
     Ok(total)
 }
 
+/// The images freeze_volume kept in a case, scratch first.
+///
+/// Two callers inspected scratch.img.zst by name. A test that fails on
+/// the test device -- generic/074, 075, 102 -- has vdb.img.zst there
+/// and no scratch.img.zst, so zstd printed "can't stat" on the terminal
+/// and the image that was kept went unread, on every such failure since
+/// the second device was first frozen.
+#[must_use]
+pub fn frozen_images(dir: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".img.zst")))
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort_by_key(|p| (p.file_name().and_then(|n| n.to_str()) != Some("scratch.img.zst"),
+                       p.clone()));
+    v
+}
+
+#[cfg(test)]
+mod frozen_tests {
+    use super::*;
+
+    #[test]
+    fn every_frozen_image_is_found_scratch_first_and_nothing_else() {
+        let d = std::env::temp_dir().join(format!("bxfz-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("vdb.img.zst"), b"x").unwrap();
+        std::fs::write(d.join("scratch.img.zst"), b"x").unwrap();
+        std::fs::write(d.join("dmesg"), b"x").unwrap();
+        let v = frozen_images(&d);
+        let names: Vec<String> = v.iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, vec!["scratch.img.zst".to_string(), "vdb.img.zst".to_string()], "{names:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_case_with_no_image_yields_nothing() {
+        let d = std::env::temp_dir().join(format!("bxfz2-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(frozen_images(&d).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
 /// Strip what differs between any two runs but means nothing.
 ///
 /// Pids, timestamps, kernel addresses and inode numbers change on every

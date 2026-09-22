@@ -976,9 +976,13 @@ pub fn run(
                     // says how many; this says whether they are lost at
                     // all or sitting under one indirect block that was
                     // named and never written.
-                    match volume::inspect_compressed(&case.dir.join("scratch.img.zst")) {
-                        Ok(v) => volume::report_to(&v, Some(&case.dir)),
-                        Err(e) => say!("    volume not inspected: {e}"),
+                    for img in evidence::frozen_images(&case.dir) {
+                        say!("    === {} ===",
+                             img.file_name().unwrap_or_default().to_string_lossy());
+                        match volume::inspect_compressed(&img) {
+                            Ok(v) => volume::report_to(&v, Some(&case.dir)),
+                            Err(e) => say!("    not inspected: {e}"),
+                        }
                     }
                 }
                 Err(e) => say!("    volume not kept: {e}"),
@@ -2023,10 +2027,13 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             match evidence::freeze_volume(cfg, node, &case, &t.output) {
                 Ok(sz) => {
                     say!("    volume kept: {} MiB compressed", sz / 1048576);
-                    if let Ok(v) =
-                        volume::inspect_compressed(&case.dir.join("scratch.img.zst"))
-                    {
-                        volume::report_to(&v, Some(&case.dir));
+                    for img in evidence::frozen_images(&case.dir) {
+                        say!("    === {} ===",
+                             img.file_name().unwrap_or_default().to_string_lossy());
+                        match volume::inspect_compressed(&img) {
+                            Ok(v) => volume::report_to(&v, Some(&case.dir)),
+                            Err(e) => say!("    not inspected: {e}"),
+                        }
                     }
                 }
                 Err(e) => {
