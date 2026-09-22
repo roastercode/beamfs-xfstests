@@ -260,7 +260,9 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
            if ! pgrep -x bpftrace >/dev/null; then break; fi; \
            sleep 0.5; \
          done; \
+         sleep 1; \
          if grep -q Attaching {remote_out} 2>/dev/null && \
+            ! grep -q ERROR {remote_out} 2>/dev/null && \
             pgrep -x bpftrace >/dev/null; then echo BX_ATTACHED; \
          else echo BX_FAILED; \
               echo \"--- bpftrace said ---\"; cat {remote_out} 2>/dev/null; \
@@ -391,7 +393,12 @@ pub fn speak(path: &Path) {
     let mut totals: Vec<&str> = Vec::new();
     for line in text.lines() {
         let t = line.trim();
-        if t.starts_with("LOST ") || t.starts_with("  installed by ") {
+        // What bpftrace refused, and what it warned about: a kprobe on
+        // an inlined function prints "Attaching 5 probes..." and dies a
+        // second later, and the attach check read the first line as
+        // success while the capture held the reason on the third.
+        if t.starts_with("LOST ") || t.starts_with("  installed by ")
+            || t.starts_with("ERROR") || t.contains("WARNING:") {
             findings.push(t);
         } else if t.starts_with('@') && t.contains(':') && !t.contains('[') {
             totals.push(t);
