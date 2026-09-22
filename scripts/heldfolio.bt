@@ -8,32 +8,42 @@
  * measures the pool as mem.orphan_file; ten trials of generic/083 add
  * about 200 MiB each, pass or fail, and nothing ever gives it back.
  *
- * __filemap_remove_folio is where a folio leaves its mapping, on
- * truncate, unlink, invalidate and kill_bdev alike. At that moment
- * two references are expected: the caller's and the page cache's,
- * plus one if something is attached as private. Anything above that
- * is a reference that will outlive the mapping, and this records
- * whose folio it was and who was removing it.
+ * The first version sat on __filemap_remove_folio and saw two things
+ * it was not looking for. 286 896 removals per trial at refcount 0:
+ * reclaim, which freezes the count before it removes, and which
+ * cannot take a folio that holds an extra reference at all. And 13
+ * with one reference too many, shmem but one. What it could not see
+ * is the batched path: truncate_inode_pages_range removes folios
+ * through delete_from_page_cache_batch, which never calls
+ * __filemap_remove_folio, and evicting an inode goes through it
+ * entirely. That is the path an unlink storm takes.
+ *
+ * filemap_free_folio is called for every folio deleted from the
+ * cache, batched or not, before the cache gives its references back.
+ * At its entry a folio of order zero holds the caller's reference
+ * and the cache's, plus one if something is attached as private;
+ * anything above that will outlive the mapping. This records whose
+ * folio it was, whether private was still attached, and who was
+ * deleting it.
  *
  * A folio of order above zero carries one reference per page from
- * the cache, so if beamfs ever gets large folios the histogram will
- * show peaks at 1 + n rather than at 1; read it before the counts.
+ * the cache; the histogram shows it as peaks at 1 + n rather than 1.
  */
 
-BEGIN { printf("watching folios leave their mapping\n"); }
+BEGIN { printf("watching folios leave the page cache\n"); }
 
-kprobe:__filemap_remove_folio
+kprobe:filemap_free_folio
 {
-    $f = (struct folio *)arg0;
+    $f = (struct folio *)arg1;
+    $host = ((struct address_space *)arg0)->host;
     $ref = $f->_refcount.counter;
     $priv = (uint64)$f->private;
-    $host = $f->mapping->host;
     $expect = 2;
     if ($priv != 0) {
         $expect = 3;
     }
-    @removed = count();
-    @refs_at_removal = hist($ref);
+    @freed = count();
+    @refs_at_free = hist($ref);
     if ($ref > $expect) {
         @held = count();
         @excess = hist($ref - $expect);
@@ -48,10 +58,13 @@ kprobe:__filemap_remove_folio
     }
 }
 
+kprobe:delete_from_page_cache_batch { @batches = count(); }
+kprobe:__remove_mapping { @reclaimed = count(); }
+
 END
 {
-    printf("\nfolios removed from their mapping while still held, by inode:\n");
+    printf("\nfolios deleted from the cache while still held, by inode:\n");
     print(@held_ino, 20);
-    printf("\nwho was removing them:\n");
+    printf("\nwho was deleting them:\n");
     print(@held_from, 6);
 }
