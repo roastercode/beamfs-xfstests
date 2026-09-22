@@ -1,0 +1,57 @@
+#!/usr/bin/env bpftrace
+/*
+ * A folio leaving its mapping with a reference nobody will drop.
+ *
+ * On 2026-09-21 the guest stalled with 6.6 GiB on the file LRU and
+ * 114 MiB in any address_space: folios their file or device had
+ * dropped, still held by someone, never freed. beamfs-xfstests
+ * measures the pool as mem.orphan_file; ten trials of generic/083 add
+ * about 200 MiB each, pass or fail, and nothing ever gives it back.
+ *
+ * __filemap_remove_folio is where a folio leaves its mapping, on
+ * truncate, unlink, invalidate and kill_bdev alike. At that moment
+ * two references are expected: the caller's and the page cache's,
+ * plus one if something is attached as private. Anything above that
+ * is a reference that will outlive the mapping, and this records
+ * whose folio it was and who was removing it.
+ *
+ * A folio of order above zero carries one reference per page from
+ * the cache, so if beamfs ever gets large folios the histogram will
+ * show peaks at 1 + n rather than at 1; read it before the counts.
+ */
+
+BEGIN { printf("watching folios leave their mapping\n"); }
+
+kprobe:__filemap_remove_folio
+{
+    $f = (struct folio *)arg0;
+    $ref = $f->_refcount.counter;
+    $priv = (uint64)$f->private;
+    $host = $f->mapping->host;
+    $expect = 2;
+    if ($priv != 0) {
+        $expect = 3;
+    }
+    @removed = count();
+    @refs_at_removal = hist($ref);
+    if ($ref > $expect) {
+        @held = count();
+        @excess = hist($ref - $expect);
+        @held_with_private[$priv != 0] = count();
+        if (($host->i_mode & 0170000) == 0060000) {
+            @held_bdev = count();
+        } else {
+            @held_file = count();
+            @held_ino[$host->i_ino] = count();
+        }
+        @held_from[kstack(10)] = count();
+    }
+}
+
+END
+{
+    printf("\nfolios removed from their mapping while still held, by inode:\n");
+    print(@held_ino, 20);
+    printf("\nwho was removing them:\n");
+    print(@held_from, 6);
+}
