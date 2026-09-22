@@ -184,10 +184,37 @@ pub enum Verdict {
     Improvement { delta: f64 },
     /// No baseline: nothing to compare a difference against.
     Unknown { delta: f64 },
+    /// Too few trials on one side to carry the difference at all,
+    /// whatever the spread of unchanged code says.
+    TooFew { delta: f64, trials: usize, margin: f64 },
+}
+
+/// The half-width a two-sided 95% binomial interval has at `n` trials,
+/// at the worst case p = 0.5: what a difference has to clear before
+/// the trial count alone could have produced it.
+#[must_use]
+pub fn binomial_margin(n: usize) -> f64 {
+    if n == 0 {
+        return 1.0;
+    }
+    1.96 * (0.25f64 / n as f64).sqrt()
 }
 
 pub fn compare(before: &Series, after: &Series, base: Option<&Baseline>) -> Verdict {
     let delta = after.rate() - before.rate();
+
+    // The trial count first. On 2026-09-22 one trial against two, on
+    // the same commit, printed "within what 1 trials can resolve
+    // (+/-98) -- no verdict" and, ten lines below, "REGRESSION, outside
+    // the spread": the spread of unchanged code was 30 points and the
+    // difference 50, but a difference carried by one trial is not a
+    // difference. Two verdicts on one page, the wrong one last.
+    let n = before.n().min(after.n());
+    let margin = binomial_margin(n);
+    if delta.abs() < margin {
+        return Verdict::TooFew { delta, trials: n, margin };
+    }
+
     let Some(b) = base else {
         return Verdict::Unknown { delta };
     };
@@ -298,6 +325,11 @@ pub fn report_verdict(v: &Verdict) {
         Verdict::Regression { delta } => {
             println!("  change {:+.0} points -- REGRESSION, outside the spread", delta * 100.0);
         }
+        Verdict::TooFew { delta, trials, margin } => {
+            println!("  change {:+.0} points, but {trials} trial(s) resolve nothing under +/-{:.0}",
+                     delta * 100.0, margin * 100.0);
+            println!("  -- no verdict: the difference is smaller than the trial count can carry");
+        }
         Verdict::Improvement { delta } => {
             println!("  change {:+.0} points -- improvement, outside the spread", delta * 100.0);
         }
@@ -375,6 +407,13 @@ mod tests {
                              (true, 0, 0), (false, 9, 0), (false, 9, 0), (false, 9, 0),
                              (false, 9, 0), (false, 9, 0)]);
         assert!(matches!(compare(&before, &after, Some(&base)), Verdict::Noise { .. }));
+    }
+
+    #[test]
+    fn one_trial_against_two_is_too_few_whatever_the_spread() {
+        assert!(binomial_margin(1) > 0.9, "{}", binomial_margin(1));
+        assert!(binomial_margin(100) < 0.1, "{}", binomial_margin(100));
+        assert!(binomial_margin(0) >= 1.0);
     }
 
     #[test]
