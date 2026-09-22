@@ -416,6 +416,9 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str, tracing: bool)
         // processes are gone, and a mount that is still held refuses to
         // go however many times it is asked.
         "sudo sh -c 'printf \"{fstyp} {mkfs_opts}\" > /tmp/beamfs-xfstests.owner; \
+         grep -qw \"{fstyp}\" /proc/filesystems || modprobe {fstyp} >/dev/null 2>&1; \
+         grep -qw \"{fstyp}\" /proc/filesystems || printf \"fstyp-missing=%s\\n\" \"{fstyp}\"; \
+         command -v mkfs.{fstyp} >/dev/null 2>&1 || printf \"mkfs-missing=%s\\n\" \"{fstyp}\"; \
          pkill -9 check fsstress xfs_io fsx 2>/dev/null; \
          for i in 1 2 3 4 5; do \
            pgrep -x check >/dev/null 2>&1 || break; \
@@ -463,7 +466,33 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str, tracing: bool)
          printf \"kcsan=%s\\n\" \"$(cat /sys/kernel/debug/kcsan 2>/dev/null | head -1)\"; \
          printf \"mounts=%s\\n\" \"$(mount | grep -cE \" /mnt/test | /mnt/scratch \")\"'"
     );
-    c.run(&cmd, Duration::from_secs(180)).map_err(|e| e.to_string())
+    let out = c.run(&cmd, Duration::from_secs(180)).map_err(|e| e.to_string())?;
+    if let Some(why) = cannot_make(&out) {
+        return Err(why);
+    }
+    Ok(out)
+}
+
+/// A filesystem the node cannot make or mount is not a baseline.
+///
+/// The preparation step prints fstyp-missing= when the kernel does
+/// not list the type after a modprobe, and mkfs-missing= when the
+/// formatter is absent. A run past that point measures xfstests
+/// refusing to start, and on 2026-09-19 such a run was scored as a
+/// failure of the filesystem under contrast.
+fn cannot_make(prepared: &str) -> Option<String> {
+    let missing = prepared
+        .lines()
+        .find(|l| l.starts_with("fstyp-missing=") || l.starts_with("mkfs-missing="))?;
+    let (what, fstyp) = missing.split_once('=')?;
+    Some(match what {
+        "fstyp-missing" => format!(
+            "the node's kernel does not know the filesystem {fstyp}, even after modprobe; \
+             a run against it would measure the refusal, not the filesystem"),
+        _ => format!(
+            "the node has no mkfs.{fstyp}; \
+             a run against it would measure the refusal, not the filesystem"),
+    })
 }
 
 /// Watch a node while a test runs, and say when it has stopped working.
@@ -1995,9 +2024,23 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             last_test = test.clone();
         }
         let wedged = watch_wedged.load(std::sync::atomic::Ordering::Relaxed);
-        if wedged {
-            say!("    the node stopped writing with tasks stuck -- \
-                      this test is not finishing");
+        // On a wedge, and on a kill by the budget.
+        //
+        // 2.3.18 armed this on the wedge alone. On 2026-09-22 the
+        // sweep of the six known failures killed generic/074, 102 and
+        // 476 at the budget with the node answering ssh the whole
+        // time: no wedge, no stall.txt, and ninety-three minutes that
+        // produced no stack. The tasks a killed test leaves in D are
+        // still there when the shell reports the kill, and they are
+        // the only witnesses of what the test was waiting for.
+        if wedged || t.killed {
+            if wedged {
+                say!("    the node stopped writing with tasks stuck -- \
+                          this test is not finishing");
+            } else {
+                say!("    the budget killed it: asking the tasks it left \
+                          behind where they were waiting");
+            }
             // The stacks, while the tasks are still stuck.
             //
             // generic/074 on 2026-09-22: Dirty 194 824 kB, Writeback 0,
@@ -2270,6 +2313,16 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_filesystem_the_node_cannot_make_is_refused_by_name() {
+        let out = "dumpfs=0\nfstyp-missing=ext4\ntracing=absent\n";
+        let why = super::cannot_make(out).expect("refused");
+        assert!(why.contains("does not know the filesystem ext4"));
+        let out = "dumpfs=0\nmkfs-missing=xfs\n";
+        let why = super::cannot_make(out).expect("refused");
+        assert!(why.contains("no mkfs.xfs"));
+        assert!(super::cannot_make("dumpfs=0\ntracing=1\n").is_none());
+    }
     use super::*;
 
     #[test]

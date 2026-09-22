@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: GPL-2.0-only
-.TH BEAMFS-XFSTESTS 1 "2026-09-21" "beamfs-xfstests" "beamfs development tools"
+.TH BEAMFS-XFSTESTS 1 "2026-09-22" "beamfs-xfstests" "beamfs development tools"
 
 .TP
 .B sweep \fR[\fIselection\fR]
@@ -212,6 +212,19 @@ next test, and stops if the node does not come back. Before 2.3.18 it
 went on to the next test with the stuck tasks still holding the device,
 and mkfs over that device produced a failure the harness had made
 itself.
+.sp
+Since 2.3.25 the same
+.I stall.txt
+is kept when the budget kills a test on a node that still answers: the
+tasks the kill leaves in uninterruptible sleep are asked for their whole
+stacks, SysRq w is sent and the whole kernel ring since the test began
+is kept with it, along with Dirty and Writeback from /proc/meminfo and
+the in-flight count of every virtio disk. On 2026-09-22 three tests were
+killed at the budget in one sweep and no stack was kept, because the
+node had never stopped answering. The watcher that decides "the disk
+stopped" also reads both the test and the scratch device since 2.3.25;
+before, it read the scratch device alone, and a test on the test device
+was watched through a disk it never touched.
 .PP
 A sweep also stops when
 .I /tmp/beamfs-xfstests.stop
@@ -532,6 +545,10 @@ kernel error proves nothing on its own. The same load, in the
 same VM, on the same devices, against a filesystem known to be
 sound is what separates a machine that corrupts from a
 filesystem that corrupts.
+.sp
+Since 2.3.25 the preparation step refuses a type the node's kernel does
+not list after a modprobe, or one without its mkfs, and says which. A
+run past that point would measure xfstests declining to start.
 .TP
 .B XFSTESTS_MKFS_OPTIONS
 Passed to mkfs.beamfs when a node is prepared.
@@ -661,7 +678,12 @@ buffers still attached (the pool of 2026-09-21, 4 KiB per unreleased
 buffer_head); bhbalance counts buffer_head references taken
 (__bread_gfp, bdev_getblk, __find_get_block) and released (__brelse,
 __bforget) per calling function, so the sb_bread without its brelse is
-named by the function that lost it.
+named by the function that lost it; iowho (2.3.25) counts every bio
+submitted for the test and scratch devices by the kernel stack that
+submitted it, in bytes and in requests, with a size histogram and a
+split by zone of the volume (inode table, bitmap, parity and budget
+regions, data), and the allocations made meanwhile -- the instrument
+for a volume that received 9 121 MiB for 220 MiB of file data.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's

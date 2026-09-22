@@ -454,11 +454,15 @@ impl<'a> NodeConn<'a> {
         let out = self
             .run(
                 &format!(
+                    // Both devices. generic/074 runs on TEST_DEV and the
+                    // watcher read SCRATCH_DEV alone, so a test device
+                    // that stopped for twenty-eight minutes was watched
+                    // through a scratch device that had nothing to say.
                     "printf '%s %s %s\\n' \
-                     \"$(awk '/ {} /{{print $10}}' /proc/diskstats)\" \
+                     \"$(awk '/ {} / || / {} / {{s += $10}} END {{print s + 0}}' /proc/diskstats)\" \
                      \"$(ps -eo state= | grep -c '^D')\" \
                      \"$(cut -d' ' -f1 /proc/loadavg)\"",
-                    self.node.scratch_dev
+                    self.node.test_dev, self.node.scratch_dev
                 ),
                 Duration::from_secs(15),
             )
@@ -569,24 +573,33 @@ impl<'a> NodeConn<'a> {
     /// node was already too far gone; empty strings are more useful
     /// than a failed call that returns nothing at all.
     pub fn stall_evidence(&self) -> (String, String, String) {
+        // Every task in D and its whole stack, then SysRq w for the
+        // ones /proc/<pid>/stack cannot show. Five tasks and twelve
+        // frames was a choice made before anyone had read one: a
+        // stack cut at twelve frames stops in the block layer, above
+        // the filesystem function that took the lock.
         let stacks = self
             .run(
-                "for p in $(ps -eo pid,state | awk '$2 ~ /D/ {print $1}' | head -5); do \
+                "for p in $(ps -eo pid,state | awk '$2 ~ /D/ {print $1}'); do \
                  echo \"--- pid $p $(ps -o comm= -p $p) $(ps -o etime= -p $p) ---\"; \
-                 sudo cat /proc/$p/stack 2>/dev/null | head -12; done",
-                Duration::from_secs(25),
+                 sudo cat /proc/$p/stack 2>/dev/null; done; \
+                 echo '--- sysrq w ---'; \
+                 echo w | sudo tee /proc/sysrq-trigger >/dev/null 2>&1; sleep 1; \
+                 echo '--- dirty ---'; grep -E '^(Dirty|Writeback|NFS_Unstable):' /proc/meminfo; \
+                 for d in /sys/block/vd*/inflight; do echo \"$d $(cat $d)\"; done",
+                Duration::from_secs(40),
             )
             .unwrap_or_default();
 
-        // Tail rather than the whole buffer: the interesting part is
-        // what the kernel said as it went under, and the rest is mount
-        // messages from every test that came before.
+        // The whole ring. It was cleared when the test started, so
+        // everything in it belongs to this test, including what SysRq
+        // just added.
         let dmesg = self
-            .run("sudo dmesg | tail -40", Duration::from_secs(25))
+            .run("sudo dmesg", Duration::from_secs(25))
             .unwrap_or_default();
 
         let mounts = self
-            .run("mount | grep beamfs; echo '--- df ---'; df -h /mnt/test /mnt/scratch 2>&1",
+            .run("mount | grep -E ' /mnt/(test|scratch) '; echo '--- df ---'; df -h /mnt/test /mnt/scratch 2>&1",
                  Duration::from_secs(20))
             .unwrap_or_default();
 
