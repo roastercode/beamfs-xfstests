@@ -1095,6 +1095,15 @@ fn compare_runs(a: Option<&String>, b: Option<&String>) -> std::process::ExitCod
     println!("    unchanged {:>4}", d.unchanged);
     println!("    fixed     {:>4}", d.fixed.len());
     println!("    new       {:>4}", d.new.len());
+    // Named, all of them: a "fixed 2" that names nobody cannot be
+    // checked, and on 2026-09-22 the two it counted had to be found by
+    // hand in the run report.
+    for t in &d.fixed {
+        println!("      {t:<16} fixed");
+    }
+    for (t, _) in &d.new {
+        println!("      {t:<16} new");
+    }
     println!("    missing   {:>4}", d.missing.len());
     println!("    REGRESSED {:>4}", d.regressed.len());
     for (t, o) in &d.regressed {

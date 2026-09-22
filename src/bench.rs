@@ -950,6 +950,17 @@ pub fn run(
         // its own reporting could not see.
         crate::history::losses::record(&r.test, t.trial.lost);
 
+        // The state of the guest at the end of the trial, taken before
+        // anything of this harness reads the device.
+        //
+        // It was taken after the evidence and the frozen image, and
+        // the dd of a failing trial's volume -- 2 097 152 sectors, the
+        // whole gigabyte -- went into blk.vdc.rd_sectors. For two days
+        // that variable "separated" failing trials from passing ones
+        // with sep inf, and was read as the scrubber sweeping the
+        // volume. It was this harness measuring itself.
+        let after = state::capture(cfg, node, &domain);
+
         evidence::collect(cfg, node, &case, &t.output);
         evidence::speak(&case);
         if !t.trial.passed && !t.aborted {
@@ -974,7 +985,6 @@ pub fn run(
             }
         }
 
-        let after = state::capture(cfg, node, &domain);
         // The indicator owns the current line until finish() clears it.
         // Printing a report over it interleaves the two.
         p.finish(&if t.trial.passed {

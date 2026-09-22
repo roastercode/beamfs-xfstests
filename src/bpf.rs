@@ -380,6 +380,79 @@ pub fn map_overflowed(text: &str) -> bool {
     text.contains("Map full")
 }
 
+/// What a capture says, as lines to print.
+///
+/// Findings first (LOST, ERROR, WARNING), then every scalar map,
+/// bracketed or not: `@with_buffers[1]: 521` was the figure that
+/// closed 3.15 on 2026-09-22 and the report never showed it, because
+/// a bracket was taken for a stack. A keyed map of more than eight
+/// entries is counted rather than listed -- forty block numbers are a
+/// list to read in the file. A histogram is printed with its rows;
+/// its name alone said nothing. Stacks stay in the capture.
+#[must_use]
+pub fn summarise(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut findings: Vec<String> = Vec::new();
+    let mut scalars: Vec<String> = Vec::new();
+    let mut keyed: Vec<(String, String)> = Vec::new();
+    let mut hists: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim();
+        if t.starts_with("LOST ") || t.starts_with("installed by ")
+            || t.starts_with("ERROR") || t.contains("WARNING:") {
+            if !findings.iter().any(|f| f == t) {
+                findings.push(t.to_string());
+            }
+        } else if t.starts_with('@') && t.ends_with(':') && !t.contains('[') {
+            // A histogram: its rows follow until a blank line.
+            let mut rows = vec![t.to_string()];
+            let mut j = i + 1;
+            while j < lines.len() && !lines[j].trim().is_empty() {
+                rows.push(format!("  {}", lines[j].trim()));
+                j += 1;
+            }
+            if rows.len() > 1 && !hists.contains(&rows[0]) {
+                hists.extend(rows);
+            }
+            i = j;
+            continue;
+        } else if t.starts_with('@') && !t.ends_with('[') {
+            if let Some((k, v)) = t.rsplit_once(':') {
+                if v.trim().parse::<i64>().is_ok() {
+                    if let Some((name, _)) = k.split_once('[') {
+                        if !keyed.iter().any(|(_, l)| l == t) {
+                            keyed.push((name.to_string(), t.to_string()));
+                        }
+                    } else if !scalars.iter().any(|l| l == t) {
+                        scalars.push(t.to_string());
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let mut out = findings;
+    out.extend(scalars);
+    let mut names: Vec<String> = Vec::new();
+    for (n, _) in &keyed {
+        if !names.contains(n) {
+            names.push(n.clone());
+        }
+    }
+    for n in names {
+        let rows: Vec<&String> = keyed.iter().filter(|(k, _)| *k == n).map(|(_, l)| l).collect();
+        if rows.len() <= 8 {
+            out.extend(rows.into_iter().cloned());
+        } else {
+            out.push(format!("{n}: {} entries, in the capture", rows.len()));
+        }
+    }
+    out.extend(hists);
+    out
+}
+
 pub fn speak(path: &Path) {
     let Ok(text) = std::fs::read_to_string(path) else { return };
 
@@ -389,34 +462,13 @@ pub fn speak(path: &Path) {
                  path.file_name().unwrap_or_default().to_string_lossy());
     }
 
-    let mut findings: Vec<&str> = Vec::new();
-    let mut totals: Vec<&str> = Vec::new();
-    for line in text.lines() {
-        let t = line.trim();
-        // What bpftrace refused, and what it warned about: a kprobe on
-        // an inlined function prints "Attaching 5 probes..." and dies a
-        // second later, and the attach check read the first line as
-        // success while the capture held the reason on the third.
-        if t.starts_with("LOST ") || t.starts_with("  installed by ")
-            || t.starts_with("ERROR") || t.contains("WARNING:") {
-            findings.push(t);
-        } else if t.starts_with('@') && t.contains(':') && !t.contains('[') {
-            totals.push(t);
-        }
-    }
-
-    if findings.is_empty() && totals.is_empty() {
+    let lines = summarise(&text);
+    if lines.is_empty() {
         return;
     }
     println!("    {} saw:", path.file_name().unwrap_or_default().to_string_lossy());
-    for f in findings.iter().take(6) {
-        println!("      {f}");
-    }
-    if findings.len() > 6 {
-        println!("      and {} more", findings.len() - 6);
-    }
-    for t in totals.iter().take(10) {
-        println!("      {t}");
+    for l in &lines {
+        println!("      {l}");
     }
 }
 
@@ -441,6 +493,30 @@ mod tests {
         // malformed line would do.
         speak(&p);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The figure that closes a case is a bracketed one as often as
+    /// not, and a histogram's name is not its rows.
+    #[test]
+    fn a_keyed_count_is_spoken_a_long_map_is_counted_and_a_histogram_has_rows() {
+        let text = "Attaching 3 probes...\n\
+             watching folios leave the page cache\n\
+             @held_from[\n        delete_from_page_cache_batch+278\n]: 8\n\
+             @removed: 280813\n\
+             @with_buffers[1]: 521\n\
+             @held_ino[1]: 1\n@held_ino[2]: 1\n@held_ino[3]: 1\n@held_ino[4]: 1\n\
+             @held_ino[5]: 1\n@held_ino[6]: 1\n@held_ino[7]: 1\n@held_ino[8]: 1\n\
+             @held_ino[9]: 1\n@held_ino[10]: 1\n\
+             @bh_count:\n[1]                  519 |@@@@|\n[2, 4)                 2 |    |\n\n\
+             @excess:\n\n";
+        let s = summarise(text);
+        assert!(s.contains(&"@with_buffers[1]: 521".to_string()), "{s:?}");
+        assert!(s.contains(&"@removed: 280813".to_string()), "{s:?}");
+        assert!(s.iter().any(|l| l.starts_with("@held_ino: 10 entries")), "{s:?}");
+        assert!(s.iter().any(|l| l.contains("[1]") && l.contains("519")), "{s:?}");
+        assert!(!s.iter().any(|l| l.contains("delete_from_page_cache_batch")),
+                "a stack was spoken: {s:?}");
+        assert!(!s.iter().any(|l| l == "@excess:"), "an empty histogram was spoken: {s:?}");
     }
 
     /// An empty capture is read without complaint.
