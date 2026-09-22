@@ -30,17 +30,9 @@ kprobe:__find_get_block   { @taken = count(); @findget[kstack(4)] = count(); }
 kprobe:__brelse           { @released = count(); @brelse[kstack(4)] = count(); }
 kprobe:__bforget          { @released = count(); @bforget[kstack(4)] = count(); }
 
-END
-{
-    printf("\nsb_bread, by caller:\n");
-    print(@bread, 25);
-    printf("\nsb_getblk, by caller:\n");
-    print(@getblk, 15);
-    printf("\nsb_find_get_block, by caller:\n");
-    print(@findget, 10);
-    printf("\nbrelse, by caller:\n");
-    print(@brelse, 30);
-    printf("\nbforget, by caller:\n");
-    print(@bforget, 10);
-    clear(@bread); clear(@getblk); clear(@findget); clear(@brelse); clear(@bforget);
-}
+/*
+ * No END block: bpftrace prints every map whole at exit. The first
+ * version printed the top 25 of each and the balance could not be
+ * struck -- a caller missing from one side's top 25 looked like a
+ * leak on the other.
+ */
