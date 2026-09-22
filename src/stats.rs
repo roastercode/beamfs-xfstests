@@ -202,27 +202,34 @@ pub fn binomial_margin(n: usize) -> f64 {
 
 pub fn compare(before: &Series, after: &Series, base: Option<&Baseline>) -> Verdict {
     let delta = after.rate() - before.rate();
-
-    // The trial count first. On 2026-09-22 one trial against two, on
-    // the same commit, printed "within what 1 trials can resolve
-    // (+/-98) -- no verdict" and, ten lines below, "REGRESSION, outside
-    // the spread": the spread of unchanged code was 30 points and the
-    // difference 50, but a difference carried by one trial is not a
-    // difference. Two verdicts on one page, the wrong one last.
     let n = before.n().min(after.n());
     let margin = binomial_margin(n);
-    if delta.abs() < margin {
-        return Verdict::TooFew { delta, trials: n, margin };
-    }
 
     let Some(b) = base else {
+        // No spread to judge against; the trial count still can.
+        if delta.abs() < margin {
+            return Verdict::TooFew { delta, trials: n, margin };
+        }
         return Verdict::Unknown { delta };
     };
+
+    // Inside the spread of unchanged code: noise, and the spread is
+    // the informative figure.
     let (lo, hi) = b.spread();
     let spread = hi - lo;
     if delta.abs() <= spread {
         return Verdict::Noise { delta, spread, need: b.trials_needed(delta.abs().max(0.05)) };
     }
+
+    // Outside the spread but carried by too few trials: no verdict
+    // either. On 2026-09-22 one trial against two, on the same commit,
+    // was called a REGRESSION outside a 30-point spread, ten lines
+    // under bench's own "within what 1 trials can resolve". A
+    // difference one trial carries is not a difference.
+    if delta.abs() < margin {
+        return Verdict::TooFew { delta, trials: n, margin };
+    }
+
     if delta < 0.0 {
         Verdict::Regression { delta }
     } else {
