@@ -47,6 +47,28 @@ the commit of the first. A campaign measured as 30, 0, 40 was stored as
 30, 40, and the failing trial that leaked nothing was not in the file
 to be seen.
 .IP
+Since 2.3.7 a failing trial also reports what the checker found
+beside the blocks lost: blocks some inode still references while the
+bitmap marks them free, and pointers outside the volume. Neither is a
+loss and neither enters the losses; both go to
+.I state\-<test>.log
+as
+.B referenced_free
+and
+.BR out_of_range ,
+one line per trial. Before 2.3.7 a trial that failed on hundreds of
+the first kind was recorded as having lost nothing.
+.IP
+Since 2.3.7 the state taken around each trial also carries
+.BR mem.orphan_file ,
+the file folios on the LRU that no mapping holds, in kB: Active(file)
+plus Inactive(file) minus (Cached minus Shmem) minus Buffers. A folio leaves the
+mapped count when its file or device drops it and leaves the LRU only
+when it is freed, so a figure that grows across trials and never
+falls is memory something still holds a reference to. On 2026-09-21
+it reached 6.5 GiB of an 8 GiB guest and the allocator stalled on it.
+The run report prints it at the start and at the end.
+.IP
 The file is rewritten whole by each campaign. Copy it before measuring
 again if the previous spread is to be compared against.
 .TP

@@ -49,6 +49,35 @@ impl Snapshot {
         self.v.get(k).copied()
     }
 
+    /// File folios on the LRU that no address_space holds.
+    ///
+    /// Cached + Buffers is NR_FILE_PAGES, the folios present in some
+    /// mapping; Cached also counts Shmem, which sits on the anon LRU,
+    /// so Shmem is taken back out. Active(file) + Inactive(file) is
+    /// what sits on the file LRU. A folio leaves the mapped count when
+    /// it is removed from its mapping and the LRU only when it is
+    /// freed, so the difference is folios that were dropped by their
+    /// file or device and are still held by someone. Unevictable file
+    /// folios would lower the figure; the guest had none.
+    ///
+    /// Without the Shmem term the station itself read -99572 kB, which
+    /// no pool of orphans can be. On 2026-09-21 that difference reached
+    /// 6.5 GiB of an 8 GiB guest, in steps taken by four tests and
+    /// never given back, and the allocator stalled on it until ssh
+    /// stopped answering. It is what wedge-1 looks like from meminfo.
+    fn derive(&mut self) {
+        let get = |k: &str| self.v.get(k).copied();
+        if let (Some(a), Some(i), Some(c), Some(b), Some(sh)) = (
+            get("mem.active_file"),
+            get("mem.inactive_file"),
+            get("mem.cached"),
+            get("mem.buffers"),
+            get("mem.shmem"),
+        ) {
+            self.v.insert("mem.orphan_file".into(), a + i - (c - sh) - b);
+        }
+    }
+
     /// What changed between two instants, for counters that only rise.
     pub fn delta(&self, before: &Snapshot) -> Snapshot {
         let mut d = Snapshot::default();
@@ -96,6 +125,9 @@ awk "/^MemTotal:/{{print \"mem.total=\" \$2}}
      /^Buffers:/{{print \"mem.buffers=\" \$2}}
      /^Cached:/{{print \"mem.cached=\" \$2}}
      /^Slab:/{{print \"mem.slab=\" \$2}}
+     /^Active\\(file\\):/{{print \"mem.active_file=\" \$2}}
+     /^Inactive\\(file\\):/{{print \"mem.inactive_file=\" \$2}}
+     /^Shmem:/{{print \"mem.shmem=\" \$2}}
      /^SReclaimable:/{{print \"mem.slab_recl=\" \$2}}" /proc/meminfo
 
 # The thresholds the load is measured against: a run that spends its
@@ -156,12 +188,12 @@ for d in /sys/fs/beamfs/*/; do
   done
 done
 # Mounted beamfs volumes: the leak needs a second filesystem, measured.
-echo "fs.mounts=$(mount | grep -c \"type beamfs\")"
-echo "fs.mounts_any=$(mount | grep -cE \" /mnt/(test|scratch) \")"
+echo "fs.mounts=$(mount | grep -c "type beamfs")"
+echo "fs.mounts_any=$(mount | grep -cE " /mnt/(test|scratch) ")"
 
 # --- the tree checker, when the kernel carries it ---
-echo "tc.violations=$(dmesg | grep -c \"LOST POINTER\")"
-echo "tc.zeroed=$(dmesg | grep -c \"ZEROED IN SERVICE\")"
+echo "tc.violations=$(dmesg | grep -c "LOST POINTER")"
+echo "tc.zeroed=$(dmesg | grep -c "ZEROED IN SERVICE")"
 echo "tc.present=$(grep -c beamfs_tc_store /proc/kallsyms)"
 '"#
     )
@@ -179,6 +211,7 @@ fn parse(out: &str) -> Snapshot {
             snap.num(k, n);
         }
     }
+    snap.derive();
     snap
 }
 
@@ -268,10 +301,24 @@ fn host_self() -> Snapshot {
 /// Everything, at one instant, from both sides.
 pub fn capture(cfg: &Config, node: &Node, domain: &str) -> Snapshot {
     let c = NodeConn::new(node, cfg);
-    let mut snap = c
-        .run(&guest_probe(&node.scratch_dev, &node.test_dev), Duration::from_secs(60))
-        .map(|o| parse(&o))
-        .unwrap_or_default();
+    // Said, not swallowed. Two hundred and four trials of generic/083
+    // went into state-generic-083.log with host.* keys only: the guest
+    // probe had failed on every one of them and unwrap_or_default hid
+    // it, so the separation report compared libvirt counters and
+    // called that the machine's state.
+    let mut snap = match c.run(&guest_probe(&node.scratch_dev, &node.test_dev), Duration::from_secs(60)) {
+        Ok(o) => {
+            let s = parse(&o);
+            if s.v.is_empty() {
+                println!("  guest state: the probe answered but nothing parsed; first bytes: {:?}", o.chars().take(200).collect::<String>());
+            }
+            s
+        }
+        Err(e) => {
+            println!("  guest state not captured: {e}");
+            Snapshot::default()
+        }
+    };
     for (k, v) in host_probe(domain).v {
         snap.v.insert(k, v);
     }
@@ -399,6 +446,7 @@ pub fn report(records: &[Record]) {
             ("fs.mounts", "beamfs volumes mounted"),
             ("mem.total", "guest memory, kB"),
             ("host.balloon.rss", "guest resident on the host, kB"),
+            ("mem.orphan_file", "file folios in no mapping at the start, kB"),
         ] {
             if let Some(v) = r.before.get(k) {
                 println!("  {label}: {v}");
@@ -408,6 +456,16 @@ pub fn report(records: &[Record]) {
             println!("  {k}: {v}");
         }
         println!();
+    }
+
+    // The pool that never drains. Stated once for the whole run, as
+    // start against end: a run that adds to it is one that will, given
+    // enough trials, stall the allocator.
+    if let (Some(first), Some(last)) = (records.first(), records.last()) {
+        if let (Some(a), Some(b)) = (first.before.get("mem.orphan_file"), last.after.get("mem.orphan_file")) {
+            println!("  file folios in no mapping: {a} kB at the start, {b} kB at the end ({:+} kB)", b - a);
+            println!();
+        }
     }
 
     // Every failing trial in full: its number, what it lost, how long
@@ -441,6 +499,7 @@ pub fn report(records: &[Record]) {
         // The state it ended in, for the volume it was writing to.
         for (k, label) in [
             ("mem.dirty", "dirty at the end, kB"),
+            ("mem.orphan_file", "file folios in no mapping at the end, kB"),
             ("fs.mounts", "beamfs volumes mounted"),
         ] {
             if let Some(v) = r.after.get(k) {
@@ -521,6 +580,32 @@ mod tests {
             during: snap(during),
             dmesg: String::new(),
         }
+    }
+
+    /// The probe runs under sh -c '...': inside those single quotes a
+    /// \" is two characters, not a quote. Four greps carried them and
+    /// the shell died on a bare parenthesis at line 75, rc != 0, and
+    /// run() threw away the sixty lines printed before it. Every guest
+    /// key was lost that way on every trial since the probe was written.
+    #[test]
+    fn the_guest_probe_carries_no_escaped_quote_outside_awk() {
+        let p = guest_probe("vdc", "vdb");
+        assert!(!p.contains("grep -c \\\""), "a grep still carries an escaped quote:\n{p}");
+        assert!(!p.contains("grep -cE \\\""), "a grep still carries an escaped quote:\n{p}");
+        assert!(p.contains("grep -c \"type beamfs\""));
+        assert!(p.contains("grep -c \"LOST POINTER\""));
+    }
+
+    #[test]
+    fn orphan_file_folios_are_the_lru_minus_the_mapped() {
+        let s = parse("mem.active_file=100\nmem.inactive_file=50\nmem.cached=30\nmem.buffers=20\nmem.shmem=10");
+        assert_eq!(s.get("mem.orphan_file"), Some(110));
+    }
+
+    #[test]
+    fn no_orphan_figure_without_all_five_inputs() {
+        let s = parse("mem.active_file=100\nmem.inactive_file=50\nmem.cached=30\nmem.buffers=20");
+        assert_eq!(s.get("mem.orphan_file"), None);
     }
 
     #[test]

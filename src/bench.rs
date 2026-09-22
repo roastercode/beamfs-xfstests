@@ -155,11 +155,13 @@ fn load_baseline(test: &str) -> Option<Baseline> {
         .map(|r| Series {
             commit: r.commit.clone(),
             trials: (0..r.passed)
-                .map(|_| Trial { passed: true, lost: 0, violations: 0, secs: 0 })
+                .map(|_| Trial { passed: true, lost: 0, violations: 0, referenced_free: 0, out_of_range: 0, secs: 0 })
                 .chain(r.lost.iter().map(|&l| Trial {
                     passed: false,
                     lost: l,
                     violations: 0,
+                    referenced_free: 0,
+                    out_of_range: 0,
                     secs: 0,
                 }))
                 .collect(),
@@ -614,10 +616,18 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
     // 464 runs _check_scratch_fs in its cleanup, so a trial that dies
     // early never reaches fsck: no count is not the same as no leak,
     // and the two were being reported identically.
-    let lost = c
-        .run_rc(
+    // Three counts from the same summary lines, one command each.
+    //
+    // The checker reports three things that are not the same defect:
+    // blocks the bitmap calls used that nothing references (a leak),
+    // blocks something references that the bitmap calls free (the
+    // reverse, and what generic/464 and 476 actually fail on), and
+    // pointers outside the volume. Only the first was read, so the
+    // other two were reported as zero blocks lost.
+    let count_in_full = |phrase: &str| -> usize {
+        c.run_rc(
             &format!(
-                "sudo grep -oE '[0-9]+ used-but-unreferenced' \
+                "sudo grep -oE '[0-9]+ {phrase}' \
                  /usr/xfstests/results/{test}.full 2>/dev/null | \
                  head -1 | grep -oE '[0-9]+' | head -1 || true"
             ),
@@ -625,7 +635,11 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
         )
         .ok()
         .and_then(|(s, _)| s.trim().parse().ok())
-        .unwrap_or(0);
+        .unwrap_or(0)
+    };
+    let lost = count_in_full("used-but-unreferenced");
+    let referenced_free = count_in_full("referenced-but-free");
+    let out_of_range = count_in_full("out-of-range pointer");
 
     // Pointers the tree checker saw vanish, when the kernel was built
     // with it. Without that number a leak of 28 blocks and a leak of
@@ -670,7 +684,7 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
 
 
     Ok(Attempt {
-        trial: Trial { passed, lost, violations, secs: t0.elapsed().as_secs() },
+        trial: Trial { passed, lost, violations, referenced_free, out_of_range, secs: t0.elapsed().as_secs() },
         aborted,
         killed,
         output: out.clone(),
@@ -930,8 +944,8 @@ pub fn run(
             format!("pass ({}s)", t.trial.secs)
         } else {
             format!(
-                "FAIL ({}s, {} blocks lost, {} pointer(s) seen to vanish)",
-                t.trial.secs, t.trial.lost, t.trial.violations
+                "FAIL ({}s, {} blocks lost, {} referenced but free, {} out of range, {} pointer(s) seen to vanish)",
+                t.trial.secs, t.trial.lost, t.trial.referenced_free, t.trial.out_of_range, t.trial.violations
             )
         });
         if !t.reason.is_empty() {
@@ -1035,11 +1049,13 @@ pub fn run(
         let before = Series {
             commit: prev.commit.clone(),
             trials: (0..prev.passed)
-                .map(|_| Trial { passed: true, lost: 0, violations: 0, secs: 0 })
+                .map(|_| Trial { passed: true, lost: 0, violations: 0, referenced_free: 0, out_of_range: 0, secs: 0 })
                 .chain(prev.lost.iter().map(|&l| Trial {
                     passed: false,
                     lost: l,
                     violations: 0,
+                    referenced_free: 0,
+                    out_of_range: 0,
                     secs: 0,
                 }))
                 .collect(),
@@ -1291,11 +1307,13 @@ pub fn baseline(
         b.series.push(Series {
             commit: r.commit.clone(),
             trials: (0..r.passed)
-                .map(|_| Trial { passed: true, lost: 0, violations: 0, secs: 0 })
+                .map(|_| Trial { passed: true, lost: 0, violations: 0, referenced_free: 0, out_of_range: 0, secs: 0 })
                 .chain(r.lost.iter().map(|&l| Trial {
                     passed: false,
                     lost: l,
                     violations: 0,
+                    referenced_free: 0,
+                    out_of_range: 0,
                     secs: 0,
                 }))
                 .collect(),
@@ -1346,6 +1364,8 @@ fn append_record(test: &str, n: u32, t: &Trial, during: &crate::state::Snapshot)
         t.violations,
         t.secs
     );
+    body.push_str(&format!("{now} {n} referenced_free={}\n", t.referenced_free));
+    body.push_str(&format!("{now} {n} out_of_range={}\n", t.out_of_range));
     for (k, v) in &during.v {
         body.push_str(&format!("{now} {n} {k}={v}\n"));
     }

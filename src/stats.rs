@@ -32,6 +32,12 @@ pub struct Trial {
     pub lost: usize,
     /// Pointers the tree checker saw vanish during this trial.
     pub violations: usize,
+    /// Blocks some inode still points at while the bitmap calls them
+    /// free. Not a loss: the opposite of one, and the more dangerous,
+    /// since the allocator can hand such a block out again.
+    pub referenced_free: usize,
+    /// Pointers fsck found outside the volume.
+    pub out_of_range: usize,
     pub secs: u64,
 }
 
@@ -228,6 +234,15 @@ pub fn report(s: &Series) {
         }
     }
 
+    let rf: usize = s.trials.iter().map(|t| t.referenced_free).sum();
+    let oor: usize = s.trials.iter().map(|t| t.out_of_range).sum();
+    if rf + oor > 0 {
+        println!(
+            "  fsck also saw: {rf} block(s) referenced but marked free, {oor} pointer(s) out of range"
+        );
+        println!("  -- not in the losses above, which count used-but-unreferenced only");
+    }
+
     let (exact, partial, none) = s.accounted();
     if exact + partial + none > 0 {
         println!(
@@ -316,9 +331,20 @@ mod tests {
             commit: commit.into(),
             trials: outcomes
                 .iter()
-                .map(|&(passed, lost, violations)| Trial { passed, lost, violations, secs: 100 })
+                .map(|&(passed, lost, violations)| Trial { passed, lost, violations, referenced_free: 0, out_of_range: 0, secs: 100 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn a_block_referenced_but_free_is_not_a_loss() {
+        // generic/464 and 476 fail on hundreds of these and were
+        // recorded as losing nothing. They still are not losses; they
+        // are counted, and said, apart.
+        let mut x = s("abc", &[(false, 0, 0)]);
+        x.trials[0].referenced_free = 400;
+        assert!(x.losses().is_empty());
+        assert_eq!(x.trials[0].referenced_free, 400);
     }
 
     #[test]
