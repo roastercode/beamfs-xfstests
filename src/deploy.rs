@@ -166,7 +166,7 @@ pub fn commits_after_image(image: &Path) -> Vec<String> {
                 out.push(format!(
                     "yocto-beamfs is {} min ahead of the image outside the mirror: {short} {}: run bitbake",
                     (when - built) / 60,
-                    &subject[..subject.len().min(46)]));
+                    subject));
             }
         }
     }

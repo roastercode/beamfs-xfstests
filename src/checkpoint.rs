@@ -119,7 +119,7 @@ pub fn verify_local() -> Vec<Finding> {
                 link: "commits -> image",
                 level: if ahead.is_empty() { Level::Fine } else { Level::Stale },
                 detail: if ahead.is_empty() {
-                    "the image was built after the last commit".into()
+                    "the layer mirrors the repository, and the image was built after the layer last changed".into()
                 } else {
                     ahead.join("; ")
                 },

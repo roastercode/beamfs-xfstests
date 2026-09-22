@@ -208,6 +208,21 @@ fn commit() -> String {
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
+        .map(|h| {
+            // A tree with uncommitted changes to what the kernel is
+            // built from is not that commit. On 2026-09-22 a kernel
+            // built from a patched file_inline.c was measured under
+            // the label of the commit before the patch, and the label
+            // was read as the code for an afternoon.
+            let dirty = std::process::Command::new("git")
+                .args(["-C", &tree])
+                .args(["--no-pager", "status", "--porcelain", "--untracked-files=no", "--",
+                       "*.c", "*.h", "Kconfig", "Makefile"])
+                .output()
+                .ok()
+                .is_some_and(|o| !o.stdout.is_empty());
+            if dirty { format!("{h}+dirty") } else { h }
+        })
         .unwrap_or_else(|| "unknown".into())
 }
 
@@ -793,7 +808,11 @@ pub fn run(
     }
 
     let state = prepare(&c, &cfg.mkfs_options, &cfg.fstyp, tracing_wanted()).map_err(|e| format!("prepare: {e}"))?;
-    println!("  node    : {}", state.trim());
+    // One prefix per line: the state is several lines and only the
+    // first carried it, so the rest read as stray output.
+    for line in state.trim().lines() {
+        println!("  node    : {line}");
+    }
     println!();
 
     let r_commit_test = test.to_string();
@@ -1689,6 +1708,9 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     let mut probe_missing: Vec<String> = Vec::new();
     // Tests the budget stopped rather than defects.
     let mut killed_tests: Vec<String> = Vec::new();
+    // How long each test took, for the saved run: report printed 0s
+    // on every test and "test time 0 min" on a run of 346 minutes.
+    let mut secs_of: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     // Things that went wrong with the apparatus rather than with the
     // filesystem.
     //
@@ -1904,6 +1926,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             continue;
         }
 
+        secs_of.insert(test.clone(), t.trial.secs);
         if t.trial.passed {
             passed += 1;
             p.finish(&format!("pass ({}s)", t.trial.secs));
@@ -2133,7 +2156,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             all.push(crate::result::TestResult {
                 name: name.clone(),
                 outcome: crate::result::Outcome::Fail,
-                seconds: 0,
+                seconds: secs_of.get(name).copied().unwrap_or(0),
                 node: node.name.clone(),
                 reason: String::new(),
             });
@@ -2142,7 +2165,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             all.push(crate::result::TestResult {
                 name: name.clone(),
                 outcome: crate::result::Outcome::NotRun,
-                seconds: 0,
+                seconds: secs_of.get(name).copied().unwrap_or(0),
                 node: node.name.clone(),
                 reason: "the node would not prepare".into(),
             });
@@ -2155,7 +2178,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                 all.push(crate::result::TestResult {
                     name: t.clone(),
                     outcome: crate::result::Outcome::Pass,
-                    seconds: 0,
+                    seconds: secs_of.get(t).copied().unwrap_or(0),
                     node: node.name.clone(),
                     reason: String::new(),
                 });

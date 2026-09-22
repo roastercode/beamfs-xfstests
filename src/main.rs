@@ -156,7 +156,7 @@ fn main() -> std::process::ExitCode {
         // Commands that read or prepare rather than measure. None of
         // them is long enough to walk away from, so none of them rings.
         Some("report" | "history" | "compare" | "trend" | "deploy"
-             | "nodes" | "--help" | "-h" | "stop")
+             | "nodes" | "checkpoint" | "--help" | "-h" | "stop")
     );
 
     /*
@@ -1049,7 +1049,7 @@ fn show_history() -> std::process::ExitCode {
     // Twenty shown out of a hundred and five on disk, with nothing
     // saying so: a capture looked for here and not found was read as a
     // run that never happened.
-    let shown = runs.len().min(20);
+    let shown = runs.len();
     for tag in runs.iter().take(shown) {
         if let Some(rs) = h.load(tag) {
             let mut s = result::Summary::default();
@@ -1059,9 +1059,6 @@ fn show_history() -> std::process::ExitCode {
             println!("    {tag}  {:>4} tests  {:>4} pass  {:>3} fail  {:>3} hang",
                      s.attempted(), s.pass, s.fail, s.hang);
         }
-    }
-    if runs.len() > shown {
-        println!("    ... and {} older run(s) not shown", runs.len() - shown);
     }
     println!();
     std::process::ExitCode::SUCCESS
