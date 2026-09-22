@@ -1165,12 +1165,60 @@ fn signal(pid: u32, sig: &str) {
 /// So: kill, wait, look. What survives a SIGKILL is in uninterruptible
 /// sleep and will not die until its I/O finishes; `hard` restarts the
 /// domain instead of waiting for it.
+/// Where a silent node's console is kept: beside the trial evidence,
+/// named by node and by the moment, so two wedges do not overwrite
+/// each other.
+fn wedge_dir(node: &str) -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    std::path::PathBuf::from(home)
+        .join(".local/share/beamfs-xfstests/evidence")
+        .join(format!("wedge-{node}-{at}"))
+}
+
 fn stop(cfg: &Config, hard: bool) -> std::process::ExitCode {
     println!();
     let mut stubborn = 0usize;
 
     for n in &cfg.nodes {
         let c = NodeConn::new(n, cfg);
+
+        // A node that does not answer is not a node with nothing
+        // running. leftover_work() turns an ssh failure into an empty
+        // list, and on 2026-09-22 stop read that list as "stopped,
+        // nothing left running" on a guest wedged at 5.7 GiB of held
+        // folios; --hard sat behind the list and was never reached.
+        // The console is the one channel such a guest still has, so
+        // it is kept before the domain is touched.
+        if let Err(e) = c.run("true", std::time::Duration::from_secs(12)) {
+            println!("  {:<10} does not answer: {e}", n.name);
+            if !hard {
+                stubborn += 1;
+                println!("               beamfs-xfstests stop --hard keeps its console");
+                println!("               and restarts the domain");
+                continue;
+            }
+            let r = Recovery::new(cfg);
+            let domain = r.domain_for(&n.name);
+            let dir = wedge_dir(&n.name);
+            match wedge::capture_wedged(&domain, &dir) {
+                Ok(bytes) => println!("               console kept: {bytes} bytes in {}",
+                                      dir.display()),
+                Err(e) => println!("               no console kept: {e}"),
+            }
+            println!("               restarting {domain}");
+            let mut jr = Journal::create(&std::env::temp_dir());
+            let outcome = r.recover(&c, &domain, 2, &mut jr);
+            println!("               {}", outcome.as_str());
+            if !outcome.usable() {
+                stubborn += 1;
+            }
+            continue;
+        }
+
         c.stop();
 
         // Up to fifteen seconds for the D-state work to finish and the
