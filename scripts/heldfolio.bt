@@ -6,30 +6,34 @@
  * 114 MiB in any address_space: folios their file or device had
  * dropped, still held by someone, never freed. beamfs-xfstests
  * measures the pool as mem.orphan_file; a trial of generic/083 adds
- * about 200 MiB, pass or fail, and nothing ever gives it back.
+ * about 196 MiB, pass or fail, and nothing ever gives it back.
  *
- * Three versions came before this one. The first sat on
- * __filemap_remove_folio and saw reclaim -- 286 896 removals per
- * trial at refcount 0, frozen by __remove_mapping, which cannot take
- * a held folio at all -- and thirteen held folios, shmem but one. It
- * could not see the batched path: truncate_inode_pages_range and
- * inode eviction remove folios through delete_from_page_cache_batch,
- * which never calls __filemap_remove_folio. The second sat on
- * filemap_free_folio, which covers both and is inlined. The third
- * unrolled the batch, and bpftrace indexes arrays with literals only.
+ * Every folio leaving the cache passes filemap_unaccount_folio, on
+ * the single path and the batched one alike, and that fires
+ * mm_filemap_delete_from_page_cache with the folio as first argument,
+ * mapping and refcount intact. On 2026-09-22, from a freshly booted
+ * node, two trials showed 282 939 and 294 669 removals, all but a
+ * dozen at exactly two references, and 70-odd held folios in known
+ * transient places. The pool does not form at the exit of the cache
+ * through an extra reference.
  *
- * Both paths call filemap_unaccount_folio for each folio before it
- * is taken out of the mapping, and that function fires the
- * mm_filemap_delete_from_page_cache tracepoint. Raw, its first
- * argument is the folio itself, mapping still set, refcount still
- * holding the cache's reference. One probe, every removal.
+ * What that version declared normal is the finding. beamfs reads its
+ * indirect blocks with sb_bread: buffer_heads in the block device's
+ * page cache, and a folio with buffers attached carries one
+ * reference for them. When the device is released,
+ * blkdev_flush_mapping truncates that mapping; block_invalidate_folio
+ * cannot free a buffer whose b_count is still positive, private
+ * stays, and the folio leaves the cache anyway -- at three
+ * references, batch, cache and buffers, which the previous version
+ * expected. Batch and cache then let go, the buffer's reference does
+ * not, and a folio out of the cache but never freed stays on the
+ * LRU: file LRU above NR_FILE_PAGES, the pool exactly.
  *
- * A folio at refcount 0 here is reclaim: __remove_mapping froze it
- * and nobody else holds it. It is counted apart. Otherwise two
- * references are expected, the remover's and the cache's, three
- * when private is still attached. A folio of order above zero
- * carries one reference per page from the cache; the histogram
- * shows it as peaks at 1 + n rather than 1.
+ * So a folio leaving with private set is what is counted here, with
+ * what the buffer_head says: its b_count, its block number, whether
+ * the mapping is a block device. The block numbers name the blocks
+ * whose buffer nobody released, and beamfs knows which of its paths
+ * reads those.
  */
 
 BEGIN { printf("watching folios leave the page cache\n"); }
@@ -43,17 +47,32 @@ rawtracepoint:mm_filemap_delete_from_page_cache
     } else {
         $priv = (uint64)$f->private;
         $host = $f->mapping->host;
+        $bdev = (($host->i_mode & 0170000) == 0060000);
+        @removed = count();
+        @refs_on_removal = hist($ref);
+
+        if ($priv != 0) {
+            // Buffers still attached as the folio leaves: after
+            // block_invalidate_folio tried to free them. A buffer
+            // that survived that is a buffer someone still holds.
+            $bh = (struct buffer_head *)$priv;
+            @with_buffers[$bdev] = count();
+            @bh_count = hist($bh->b_count.counter);
+            if ($bdev) {
+                @bdev_block_kept = hist($bh->b_blocknr);
+                @bdev_blocks_kept[$bh->b_blocknr] = count();
+            }
+            @with_buffers_from[kstack(8)] = count();
+        }
+
         $expect = 2;
         if ($priv != 0) {
             $expect = 3;
         }
-        @removed = count();
-        @refs_on_removal = hist($ref);
         if ($ref > $expect) {
             @held = count();
             @excess = hist($ref - $expect);
-            @held_with_private[$priv != 0] = count();
-            if (($host->i_mode & 0170000) == 0060000) {
+            if ($bdev) {
                 @held_bdev = count();
             } else {
                 @held_file = count();
@@ -66,8 +85,11 @@ rawtracepoint:mm_filemap_delete_from_page_cache
 
 END
 {
-    printf("\nfolios leaving the cache while still held, by inode:\n");
-    print(@held_ino, 20);
-    printf("\nwho was removing them:\n");
-    print(@held_from, 6);
+    printf("\nblock-device blocks whose buffer was still held when the folio left:\n");
+    print(@bdev_blocks_kept, 40);
+    clear(@bdev_blocks_kept);
+    printf("\nwho was removing folios that still carried buffers:\n");
+    print(@with_buffers_from, 6);
+    printf("\nfolios leaving the cache with an extra reference, by inode:\n");
+    print(@held_ino, 10);
 }
