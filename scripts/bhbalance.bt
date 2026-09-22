@@ -1,0 +1,46 @@
+#!/usr/bin/env bpftrace
+/*
+ * Buffer_head references taken and released, by the function that
+ * took or released them.
+ *
+ * On 2026-09-22 heldfolio established what the pool of 2026-09-21 is:
+ * per trial of generic/083, some 51 000 folios leave the block
+ * device's page cache at blkdev_flush_mapping with buffers still
+ * attached and b_count at 1 or more -- 411 948 kB of them across two
+ * trials, against 411 940 kB of pool growth. Buffers beamfs read with
+ * sb_bread and never gave back with brelse; their reference keeps the
+ * folio out of any mapping and on the LRU until memory runs out.
+ *
+ * sb_bread, sb_getblk, sb_find_get_block and brelse are inline, so
+ * the first frame above the exported function is the beamfs one.
+ * Four frames each: enough to tell a helper's callers apart.
+ *
+ * Reads: __bread_gfp (sb_bread), bdev_getblk (sb_getblk),
+ * __find_get_block (sb_find_get_block). Releases: __brelse, __bforget.
+ * A function that takes and never releases stands out by its count;
+ * one that takes here and releases in a callee shows on both sides
+ * under different names, which is why the whole picture is kept.
+ */
+
+BEGIN { printf("counting buffer_head references taken and released\n"); }
+
+kprobe:__bread_gfp        { @taken = count(); @bread[kstack(4)] = count(); }
+kprobe:bdev_getblk        { @taken = count(); @getblk[kstack(4)] = count(); }
+kprobe:__find_get_block   { @taken = count(); @findget[kstack(4)] = count(); }
+kprobe:__brelse           { @released = count(); @brelse[kstack(4)] = count(); }
+kprobe:__bforget          { @released = count(); @bforget[kstack(4)] = count(); }
+
+END
+{
+    printf("\nsb_bread, by caller:\n");
+    print(@bread, 25);
+    printf("\nsb_getblk, by caller:\n");
+    print(@getblk, 15);
+    printf("\nsb_find_get_block, by caller:\n");
+    print(@findget, 10);
+    printf("\nbrelse, by caller:\n");
+    print(@brelse, 30);
+    printf("\nbforget, by caller:\n");
+    print(@bforget, 10);
+    clear(@bread); clear(@getblk); clear(@findget); clear(@brelse); clear(@bforget);
+}

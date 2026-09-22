@@ -623,6 +623,12 @@ Nothing runs without it: bpftrace instruments the kernel, and a
 campaign measuring durations must not carry a probe it did not ask
 for. Before 2.3.9 only sweep read it; a bench named with a probe ran
 without one and said nothing.
+Scripts shipped: heldfolio counts folios leaving the page cache with
+buffers still attached (the pool of 2026-09-21, 4 KiB per unreleased
+buffer_head); bhbalance counts buffer_head references taken
+(__bread_gfp, bdev_getblk, __find_get_block) and released (__brelse,
+__bforget) per calling function, so the sb_bread without its brelse is
+named by the function that lost it.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's
