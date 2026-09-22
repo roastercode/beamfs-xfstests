@@ -142,6 +142,16 @@ always have. It reboots the node, and a deploy run to look at the
 display once rebooted one twelve minutes into a thirty-minute test.
 .B XFSTESTS_FORCE=1
 takes it anyway.
+.sp
+Since 2.3.20 the link from commits to image is judged on content: the
+layer's copy of the module sources against the repository (a difference
+means
+.B tools/sync-layer.sh
+was not run), the layer's copy against the image's date (a later change
+means bitbake was not), and the layer's recipes and configs by commit,
+the mirror left out. A commit that changed nothing the kernel is built
+from no longer breaks the chain; an unsynchronised layer breaks it
+without any commit.
 .TP
 .B nodes status
 Say what each configured node is, right now, and change nothing.

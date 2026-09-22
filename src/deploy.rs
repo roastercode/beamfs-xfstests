@@ -50,57 +50,124 @@ fn newest_image() -> Option<PathBuf> {
 /// afternoon.
 ///
 /// Returns the files that differ.
-/// Commits that were made after the image was built.
-///
-/// A commit made after the last build is not in the image, and
-/// measuring against it is measuring the commit before -- which is how
-/// an afternoon went to a defect that had already been fixed.
-pub fn commits_after_image(image: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    let home = std::env::var("HOME").unwrap_or_default();
-    let built = std::fs::metadata(image)
+/// Seconds since the epoch of a file's last change, 0 when unknown.
+fn mtime_secs(p: &Path) -> u64 {
+    std::fs::metadata(p)
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .unwrap_or(0)
+}
 
-    // Only what the image is built from.
-    //
-    // The last commit of the tree is the wrong question: a commit to
-    // tools/ or to a document changes nothing bitbake would rebuild,
-    // and reporting it as an image out of date teaches the reader to
-    // pass XFSTESTS_FORCE without looking, which is how a guard stops
-    // guarding. bitbake agreed: nine thousand tasks, none rerun.
-    for (tree, paths) in [
-        ("git/beamfs", vec!["*.c", "*.h", "Kconfig", "Makefile"]),
-        ("git/yocto-beamfs", vec!["."]),
-    ] {
-        let p = PathBuf::from(&home).join(tree);
-        let mut args: Vec<String> = vec![
-            "-C".into(), p.to_string_lossy().into_owned(),
-            "log".into(), "-1".into(), "--format=%ct %h %s".into(),
-            "--".into(),
-        ];
-        args.extend(paths.into_iter().map(String::from));
-        let Ok(o) = Command::new("git").args(&args).output() else {
-            continue;
-        };
-        if !o.status.success() {
-            continue;
+/// The sources the kernel is built from, under a directory: what
+/// do_inject_beamfs installs into fs/beamfs.
+fn module_sources(dir: &Path) -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else { return v };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
+        if ext == "c" || ext == "h" || name == "Kconfig" || name == "Makefile" {
+            v.push(p);
         }
-        let line = String::from_utf8_lossy(&o.stdout);
-        let mut f = line.trim().splitn(3, ' ');
-        let when: u64 = f.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-        let short = f.next().unwrap_or("");
-        let subject = f.next().unwrap_or("");
-        if when > built {
-            out.push(format!(
-                "{} is {} min ahead of the image: {short} {}",
-                tree.rsplit('/').next().unwrap_or(tree),
-                (when - built) / 60,
-                &subject[..subject.len().min(46)]
-            ));
+    }
+    v.sort();
+    v
+}
+
+/// Which of @files changed after @built, with how long after.
+///
+/// Its own function so the judgement can be tested without a build
+/// directory: the comparison is what was wrong, not the paths.
+#[must_use]
+pub fn changed_after(files: &[(String, u64)], built: u64) -> Vec<String> {
+    files
+        .iter()
+        .filter(|(_, when)| *when > built)
+        .map(|(name, when)| format!("{name} changed {} min after the image was built",
+                                    (when - built) / 60))
+        .collect()
+}
+
+/// What the image was built from, against what this repository holds.
+///
+/// Judged on content, not on the clock. Until 2.3.19 this read the
+/// time of the last commit touching beamfs sources and called the
+/// image stale when a commit came after it; on 2026-09-22 the image
+/// was built from the exact file_inline.c that was committed twenty
+/// minutes later, and the guard refused a sweep that measured what it
+/// named, while XFSTESTS_FORCE was the only way through. A guard that
+/// is right by its rule and wrong in substance teaches the reader to
+/// pass FORCE without looking.
+///
+/// Three things are asked instead, each with a remedy in its line:
+/// does the layer's copy match the repository, file by file, for what
+/// do_inject_beamfs installs (tools/sync-layer.sh if not); was the
+/// layer's copy changed after the image was built (bitbake if so); and
+/// were the layer's recipes and configs -- not the mirror -- committed
+/// after the build (bitbake if so).
+pub fn commits_after_image(image: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(home) = std::env::var("HOME") else { return out };
+    let home = PathBuf::from(home);
+    let built = mtime_secs(image);
+
+    let repo = home.join("git/beamfs");
+    let files = home.join("git/yocto-beamfs/recipes-kernel/beamfs/files");
+    let layer = crate::clean::newest_dir(&files, "beamfs-")
+        .unwrap_or_else(|| files.join("beamfs-0.1.5"));
+
+    // 1. The layer's copy against the repository.
+    if repo.is_dir() && layer.is_dir() {
+        for p in module_sources(&repo) {
+            let Some(name) = p.file_name() else { continue };
+            let there = layer.join(name);
+            let same = match (std::fs::read(&p), std::fs::read(&there)) {
+                (Ok(x), Ok(y)) => x == y,
+                (Ok(_), Err(_)) => false,
+                _ => true,
+            };
+            if !same {
+                out.push(format!("{} in the repository is not what the layer holds: \
+                                  run tools/sync-layer.sh, then bitbake",
+                                 name.to_string_lossy()));
+            }
+        }
+    }
+
+    // 2. The layer's copy against the image.
+    if built > 0 && layer.is_dir() {
+        let stamped: Vec<(String, u64)> = module_sources(&layer)
+            .iter()
+            .map(|p| (p.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                      mtime_secs(p)))
+            .collect();
+        for l in changed_after(&stamped, built) {
+            out.push(format!("the layer's {l}: run bitbake"));
+        }
+    }
+
+    // 3. The layer's recipes and configs, by commit, the mirror left out.
+    let yocto = home.join("git/yocto-beamfs");
+    if let Ok(o) = Command::new("git")
+        .args(["-C", &yocto.to_string_lossy(), "log", "-1", "--format=%ct %h %s", "--",
+               ".", ":!recipes-kernel/beamfs/files"])
+        .output()
+    {
+        if o.status.success() {
+            let line = String::from_utf8_lossy(&o.stdout);
+            let mut f = line.trim().splitn(3, ' ');
+            let when: u64 = f.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            let short = f.next().unwrap_or("");
+            let subject = f.next().unwrap_or("");
+            if built > 0 && when > built {
+                out.push(format!(
+                    "yocto-beamfs is {} min ahead of the image outside the mirror: {short} {}: run bitbake",
+                    (when - built) / 60,
+                    &subject[..subject.len().min(46)]));
+            }
         }
     }
     out
@@ -504,6 +571,15 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_file_changed_after_the_build_is_named_and_one_before_is_not() {
+        let files = vec![("file_inline.c".to_string(), 1_000_u64),
+                         ("scrub.c".to_string(), 5_000_u64)];
+        let v = changed_after(&files, 2_000);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].starts_with("scrub.c changed 50 min"), "{v:?}");
+    }
+
     #[test]
     fn the_root_device_is_read_out_of_virsh() {
         let out = " Target   Source\n\
