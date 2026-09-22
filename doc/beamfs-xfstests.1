@@ -168,6 +168,18 @@ Since 2.3.0. Safe during a campaign: it starts, kills and mounts
 nothing. Exit status is 1 if a node could not be reached, 0 otherwise --
 a node with concerns is still a node that answered.
 .TP
+.B nodes failures
+Print, whole, what the runner kept on each node under
+.IR /tmp/xfs-failures :
+for a test the budget killed, the watcher's last sample before the kill
+and the stacks of the tasks in uninterruptible sleep; for a test that
+failed, the harness output, the diff and the kernel messages. Since
+2.3.17, when the evidence of a killed generic/074 turned out to hold the
+fsck of a mounted volume and none of this. The same file is collected
+into the evidence as
+.I runner.log
+and printed in the run's .md. Reads only.
+.TP
 .B stop
 Stop a running campaign and leave the nodes in a state the next one can
 start from.

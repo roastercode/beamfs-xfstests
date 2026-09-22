@@ -171,6 +171,7 @@ pub fn digest(dirs: &[PathBuf]) -> std::io::Result<PathBuf> {
         for (title, file, lines) in [
             ("what the checker found", "full", 400usize),
             ("what it named", "fsck.verbose", 400),
+            ("what the runner saw before the kill", "runner.log", 400),
             ("why the test failed", "check.out", 40),
             ("where it was mounted", "mounts", 20),
             ("what the device did", "diskstats", 10),

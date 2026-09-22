@@ -154,12 +154,52 @@ fn domstate(domain: &str) -> String {
     }
 }
 
+/// Print, whole, what the runner kept about each test that failed or
+/// was killed, from every configured node.
+///
+/// The runner writes /tmp/xfs-failures/<test>.log as it goes: for a
+/// test the budget killed, the watcher's last sample before the kill
+/// and the stacks of the tasks in uninterruptible sleep -- the record
+/// that names the lock a stalled writeback sits on. On 2026-09-22 the
+/// evidence of generic/074 held the fsck of a mounted volume and none
+/// of this, while the file sat on the node. Reads only.
+pub fn failures(cfg: &Config) -> std::process::ExitCode {
+    println!();
+    if cfg.nodes.is_empty() {
+        println!("  no nodes configured");
+        println!();
+        return std::process::ExitCode::SUCCESS;
+    }
+    for n in &cfg.nodes {
+        let c = NodeConn::new(n, cfg);
+        let list = c.failure_list();
+        if list.is_empty() {
+            println!("  {:<10} nothing under /tmp/xfs-failures, or the node did not answer: \
+                      nodes status tells the two apart", n.name);
+            println!();
+            continue;
+        }
+        for t in &list {
+            println!("  === {} {t} ===", n.name);
+            match c.failure_log(t) {
+                Some(body) => println!("{body}"),
+                None => println!("  (empty)"),
+            }
+            println!();
+        }
+    }
+    std::process::ExitCode::SUCCESS
+}
+
 /// Print what every configured node is, and stop there.
 pub fn status(cfg: &Config, what: Option<&String>) -> std::process::ExitCode {
     if let Some(other) = what.map(String::as_str) {
+        if other == "failures" {
+            return failures(cfg);
+        }
         if other != "status" {
             eprintln!();
-            eprintln!("  nodes: no such subcommand \"{other}\". The only one is status.");
+            eprintln!("  nodes: no such subcommand \"{other}\". They are status and failures.");
             eprintln!();
             return std::process::ExitCode::from(2);
         }

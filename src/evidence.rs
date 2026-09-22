@@ -399,6 +399,14 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
         ("out.bad", format!("/usr/xfstests/results/{}.out.bad", case.test)),
         ("dmesg", "@dmesg".into()),
         ("mounts", "@mount".into()),
+        // What the runner kept on the node about this test: for one the
+        // budget killed, the watcher's last sample before the kill and
+        // the stacks of the tasks in uninterruptible sleep. The one
+        // record that names the lock a stalled writeback sits on, and
+        // until 2.3.17 the only file in /tmp/xfs-failures this
+        // collection did not bring back: generic/074 on 2026-09-22
+        // came with the fsck of a mounted volume and nothing of this.
+        ("runner.log", "@runner".into()),
         ("meminfo", "/proc/meminfo".into()),
         ("vmstat", "/proc/vmstat".into()),
         ("diskstats", "/proc/diskstats".into()),
@@ -457,6 +465,11 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
                  grep -n -A 6 \"DUMP_CORRUPT_FS\" \
                  /usr/xfstests/common/rc 2>/dev/null | head -20'".to_string(),
             "@mount" => "mount".to_string(),
+            "@runner" => format!(
+                "sudo cat /tmp/xfs-failures/{}.log 2>/dev/null \
+                 || echo 'no runner log for {}: the runner writes one only \
+                 for a test that failed or was killed'",
+                case.test.replace('/', "-"), case.test),
             // Both devices: a test that fails on the test device and a
             // test that fails on the scratch one look the same from
             // here, and the checker is cheap.
@@ -848,6 +861,13 @@ pub fn prune(root: &Path, keep: usize) -> usize {
 ///
 /// Both devices, because a failure on the test device and one on the
 /// scratch device look identical from here.
+///
+/// Whole since 2.3.17: the cap of 5000 lines cut the 37 490 of a
+/// generic/074 and the 30 461 of a generic/075 on 2026-09-22, and two
+/// truncated lists cannot be compared. A mounted device is skipped
+/// with the reason on the line: the fsck of a killed generic/074 was
+/// taken on /dev/vdb still mounted, and its findings were read as
+/// facts for an afternoon.
 #[must_use]
 pub fn fsck_command(test_dev: &str, scratch_dev: &str) -> String {
     // /dev/ prefixed here: the node carries the bare name, and fsck
@@ -856,13 +876,13 @@ pub fn fsck_command(test_dev: &str, scratch_dev: &str) -> String {
     format!(
         "for d in /dev/{test_dev} /dev/{scratch_dev}; do \
          echo \"--- $d ---\"; \
+         if grep -q \"^$d \" /proc/mounts; then \
+         echo \"$d is mounted: not checked -- a checker on a mounted volume reads a moving target\"; \
+         continue; fi; \
          sudo fsck.beamfs -v $d > /tmp/ev-fsck.out 2>&1; \
          n=$(wc -l < /tmp/ev-fsck.out); \
          echo \"fsck wrote $n line(s)\"; \
-         head -5000 /tmp/ev-fsck.out; \
-         if [ \"$n\" -gt 5000 ]; then \
-         echo \"... $((n - 5000)) further line(s) from fsck, not captured\"; \
-         fi; done")
+         cat /tmp/ev-fsck.out; done")
 }
 
 /// Read a file on the node, and say what was left out.
@@ -899,14 +919,14 @@ mod tests {
     }
 
     #[test]
-    fn the_fsck_command_counts_before_it_cuts() {
+    fn the_fsck_command_skips_a_mounted_device_and_cuts_nothing() {
         let c = fsck_command("vdb", "vdc");
         assert!(c.contains("/dev/vdb"), "test device missing: {c}");
         assert!(c.contains("/dev/vdc"), "scratch device missing: {c}");
         assert!(c.contains("wc -l"), "nothing counts the lines: {c}");
-        assert!(c.contains("not captured"), "it would cut in silence: {c}");
-        // Generous enough that passes 5 and 6 survive on a bad volume.
-        assert!(c.contains("5000"), "not the intended cap: {c}");
+        assert!(!c.contains("head -"), "it would cut: {c}");
+        assert!(c.contains("/proc/mounts"), "it would check a mounted volume: {c}");
+        assert!(c.contains("mounted"), "it would skip a device without saying why: {c}");
     }
 
     use super::*;
