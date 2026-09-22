@@ -5,71 +5,36 @@
  * On 2026-09-21 the guest stalled with 6.6 GiB on the file LRU and
  * 114 MiB in any address_space: folios their file or device had
  * dropped, still held by someone, never freed. beamfs-xfstests
- * measures the pool as mem.orphan_file; ten trials of generic/083 add
- * about 200 MiB each, pass or fail, and nothing ever gives it back.
+ * measures the pool as mem.orphan_file; a trial of generic/083 adds
+ * about 200 MiB, pass or fail, and nothing ever gives it back.
  *
- * Two versions came before this one. The first sat on
+ * Three versions came before this one. The first sat on
  * __filemap_remove_folio and saw reclaim -- 286 896 removals per
  * trial at refcount 0, frozen by __remove_mapping, which cannot take
  * a held folio at all -- and thirteen held folios, shmem but one. It
- * could not see the batched path: truncate_inode_pages_range removes
- * folios through delete_from_page_cache_batch, which never calls
- * __filemap_remove_folio, and evicting an inode goes through it
- * entirely. The second sat on filemap_free_folio, which covers both,
- * and is inlined: bpftrace refused it.
+ * could not see the batched path: truncate_inode_pages_range and
+ * inode eviction remove folios through delete_from_page_cache_batch,
+ * which never calls __filemap_remove_folio. The second sat on
+ * filemap_free_folio, which covers both and is inlined. The third
+ * unrolled the batch, and bpftrace indexes arrays with literals only.
  *
- * So both entrances, each on its own probe. delete_from_page_cache_batch
- * takes the batch while its folios are still in the mapping and after
- * truncate_cleanup_folio has detached whatever was private: two
- * references expected, the caller's and the cache's. The batch holds
- * at most 31 folios and bpftrace has no loop, so it is unrolled.
- * __filemap_remove_folio keeps the single path; a folio there at
- * refcount 0 is reclaim and is counted apart.
+ * Both paths call filemap_unaccount_folio for each folio before it
+ * is taken out of the mapping, and that function fires the
+ * mm_filemap_delete_from_page_cache tracepoint. Raw, its first
+ * argument is the folio itself, mapping still set, refcount still
+ * holding the cache's reference. One probe, every removal.
  *
- * A folio of order above zero carries one reference per page from
- * the cache; the histogram shows it as peaks at 1 + n rather than 1.
+ * A folio at refcount 0 here is reclaim: __remove_mapping froze it
+ * and nobody else holds it. It is counted apart. Otherwise two
+ * references are expected, the remover's and the cache's, three
+ * when private is still attached. A folio of order above zero
+ * carries one reference per page from the cache; the histogram
+ * shows it as peaks at 1 + n rather than 1.
  */
 
 BEGIN { printf("watching folios leave the page cache\n"); }
 
-kprobe:delete_from_page_cache_batch
-{
-    $fb = (struct folio_batch *)arg1;
-    $host = ((struct address_space *)arg0)->host;
-    $n = (uint64)$fb->nr;
-    @batches = count();
-    @batch_size = hist($n);
-    $i = (uint64)0;
-    unroll(31) {
-        if ($i < $n) {
-            $f = $fb->folios[$i];
-            $ref = $f->_refcount.counter;
-            $priv = (uint64)$f->private;
-            $expect = 2;
-            if ($priv != 0) {
-                $expect = 3;
-            }
-            @batched = count();
-            @refs_in_batch = hist($ref);
-            if ($ref > $expect) {
-                @held = count();
-                @held_batched = count();
-                @excess = hist($ref - $expect);
-                @held_with_private[$priv != 0] = count();
-                if (($host->i_mode & 0170000) == 0060000) {
-                    @held_bdev = count();
-                } else {
-                    @held_file = count();
-                    @held_ino[$host->i_ino] = count();
-                }
-                @held_from[kstack(10)] = count();
-            }
-        }
-        $i = $i + 1;
-    }
-}
-
-kprobe:__filemap_remove_folio
+rawtracepoint:mm_filemap_delete_from_page_cache
 {
     $f = (struct folio *)arg0;
     $ref = $f->_refcount.counter;
@@ -82,11 +47,10 @@ kprobe:__filemap_remove_folio
         if ($priv != 0) {
             $expect = 3;
         }
-        @single = count();
-        @refs_single = hist($ref);
+        @removed = count();
+        @refs_on_removal = hist($ref);
         if ($ref > $expect) {
             @held = count();
-            @held_single = count();
             @excess = hist($ref - $expect);
             @held_with_private[$priv != 0] = count();
             if (($host->i_mode & 0170000) == 0060000) {
