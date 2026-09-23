@@ -30,6 +30,8 @@
  * (off/239)*255 + off%239 on its own, since a slot straddles a
  * subblock boundary, and all 256 bytes are tested -- the first 8 are
  * the parity of the first 29 pointers alone, zero for a sparse file.
+ * Loops rather than unrolling: 14 x 32 unrolled words overflowed the
+ * 512-byte BPF stack on 2026-09-23 and the probe never attached.
  */
 
 BEGIN { printf("watching indirect parity updates, region dirtying, region writes and reads\n"); }
@@ -61,23 +63,16 @@ kprobe:mark_buffer_dirty
         $d = (uint8 *)$bh->b_data;
         $m = (uint64)0;
         $k = (uint64)0;
-        unroll (14) {
-            /* All 256 bytes of the slot, 8 at a time, each 8 mapped
-             * through the interleave on its own: fsck tests the whole
-             * slot, and the parity of an indirect block whose first 29
-             * pointers are empty starts with 8 zero bytes. */
+        while ($k < 14) {
             $nz = (uint64)0;
             $j = (uint64)0;
-            unroll (32) {
+            while ($j < 32) {
                 $off = $k * 256 + $j * 8;
-                $r   = $off % 239;
+                $r = $off % 239;
                 $raw = ($off / 239) * 255 + $r;
                 if ($r <= 231) {
                     $nz = $nz | *(uint64 *)($d + $raw);
                 } else {
-                    /* The word straddles the 16 parity bytes that follow
-                     * every 239 of payload: the bytes on each side, the
-                     * parity between them skipped. */
                     $n1 = 239 - $r;
                     $nz = $nz | (*(uint64 *)($d + $raw) & (((uint64)1 << (8 * $n1)) - 1));
                     $nz = $nz | (*(uint64 *)($d + $raw + $n1 + 16) & (((uint64)1 << (8 * (8 - $n1))) - 1));
@@ -127,19 +122,16 @@ kprobe:submit_bio
                 $d    = (uint8 *)$virt;
                 $m = (uint64)0;
                 $k = (uint64)0;
-                unroll (14) {
+                while ($k < 14) {
                     $nz = (uint64)0;
                     $j = (uint64)0;
-                    unroll (32) {
+                    while ($j < 32) {
                         $off = $k * 256 + $j * 8;
-                        $r   = $off % 239;
+                        $r = $off % 239;
                         $raw = ($off / 239) * 255 + $r;
                         if ($r <= 231) {
                             $nz = $nz | *(uint64 *)($d + $raw);
                         } else {
-                            /* The word straddles the 16 parity bytes that follow
-                             * every 239 of payload: the bytes on each side, the
-                             * parity between them skipped. */
                             $n1 = 239 - $r;
                             $nz = $nz | (*(uint64 *)($d + $raw) & (((uint64)1 << (8 * $n1)) - 1));
                             $nz = $nz | (*(uint64 *)($d + $raw + $n1 + 16) & (((uint64)1 << (8 * (8 - $n1))) - 1));

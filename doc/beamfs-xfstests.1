@@ -735,7 +735,8 @@ block from the device -- a second read is a reload over memory. 2.3.30
 tested the first 8 bytes of a slot, which are the parity of the first
 29 pointers alone and zero for a sparse file; 2.3.31 tests all 256,
 each 8-byte word mapped through the interleave on its own, and records
-who dirties a region block, by kernel stack.
+who dirties a region block, by kernel stack. 2.3.31 unrolled those 448
+words and overflowed the BPF stack; 2.3.32 loops.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's
