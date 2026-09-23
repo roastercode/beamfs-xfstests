@@ -165,4 +165,26 @@ tracepoint:beamfs:beamfs_block_free
     }
 }
 
-END { printf("\n"); }
+END {
+    /*
+     * The decisive maps first, by hand: bpftrace prints the rest in
+     * alphabetical order afterwards, and on 2026-09-23 the harness
+     * killed it three seconds into that listing -- @upd_region and
+     * @wrmask, the ones the question is about, were the ones cut.
+     * The bulky maps nothing reads are cleared so the listing is short.
+     */
+    print(@upd_region);
+    print(@upd_ptrs);
+    print(@wrmask);
+    print(@wrmask_ns);
+    print(@memmask);
+    print(@memmask_ns);
+    print(@region_read_count);
+    clear(@upd_ino);
+    clear(@upd_count);
+    clear(@memstate);
+    clear(@region_read_ns);
+    clear(@landed_count);
+    clear(@freed_after_update);
+    printf("\n");
+}

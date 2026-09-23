@@ -337,13 +337,22 @@ impl Running {
     /// SIGINT rather than SIGKILL: bpftrace prints its maps in the END
     /// block, and the counts are most of what the script is for.
     pub fn stop_into(self, conn: &NodeConn, dir: &Path) -> Option<(PathBuf, u64)> {
+        // SIGINT, then wait for bpftrace to leave on its own: END
+        // prints every map, and a script with tens of thousands of
+        // keys needs longer than a fixed pause. On 2026-09-23 three
+        // seconds cut the listing in the middle of @upd_ns, and the
+        // two maps the run was for were never written. SIGKILL only
+        // when it has not left after three minutes.
         let _ = conn.run(
-            "sudo pkill -INT -x bpftrace || true",
-            Duration::from_secs(20));
-        // Give END time to print. A kill here truncates the maps.
-        std::thread::sleep(Duration::from_secs(3));
-        let _ = conn.run("sudo pkill -x bpftrace || true",
-                         Duration::from_secs(15));
+            "sudo pkill -INT -x bpftrace || true; \
+             for i in $(seq 1 360); do \
+               pgrep -x bpftrace >/dev/null 2>&1 || break; \
+               sleep 0.5; \
+             done; \
+             if pgrep -x bpftrace >/dev/null 2>&1; then \
+               echo BX_BPF_KILLED; sudo pkill -x bpftrace || true; \
+             fi",
+            Duration::from_secs(200));
 
         let _ = std::fs::create_dir_all(dir);
         let local = dir.join(format!("bpf-{}.txt", self.name));

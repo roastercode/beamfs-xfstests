@@ -1,6 +1,6 @@
 [package]
 name = "beamfs-xfstests"
-version = "2.3.32"
+version = "2.3.33"
 edition = "2021"
 license = "GPL-2.0-only"
 authors = ["Aurelien Desbrieres <aurelien@hackers.camp>"]
