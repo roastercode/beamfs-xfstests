@@ -1,0 +1,64 @@
+#!/usr/bin/env bpftrace
+/*
+ * Who allocates, who frees, and what the stores overwrite.
+ *
+ * generic/074 on 2026-09-22, under iowho: 981 771 allocations for at
+ * most 56 320 logical blocks, 8 915 MiB written for 220 MiB asked, and
+ * df showing 492 MiB used at the end -- so some 870 000 blocks were
+ * allocated, written, and freed again, in bursts every fifty seconds
+ * for thirty-one minutes, with no task blocked and treecheck seeing
+ * no pointer lost. alloc.bt keeps a key per block and would overflow
+ * at that count. This keeps counts: by stack, by freeing site, by
+ * inode and by minute, plus what each slot store replaced.
+ */
+
+BEGIN { printf("watching allocation, freeing and slot stores\n"); }
+
+tracepoint:beamfs:beamfs_block_alloc
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    @allocs = count();
+    @allocs_by_ino[args.ino] = count();
+    @allocs_by_stack[kstack(8)] = count();
+    @allocs_per_minute[elapsed / 60000000000] = count();
+}
+
+tracepoint:beamfs:beamfs_block_free
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    @frees = count();
+    @frees_by_site[ksym(args.site)] = count();
+    @frees_by_stack[kstack(8)] = count();
+    @frees_per_minute[elapsed / 60000000000] = count();
+}
+
+/*
+ * A store that replaces a live pointer with a different one is the
+ * old block leaving the tree. If the old block is not freed, that is
+ * the leak fsck counts as "used but unreferenced"; if it is, that is
+ * the churn.
+ */
+tracepoint:beamfs:beamfs_slot_store
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    @stores = count();
+    @stores_by_level[args.level] = count();
+    if (args.old != 0 && args.new != args.old && args.new != 0) {
+        @live_slot_replaced = count();
+        @live_slot_replaced_by_stack[kstack(8)] = count();
+    }
+    if (args.new == 0 && args.old != 0) {
+        @slot_cleared = count();
+        @slot_cleared_by_stack[kstack(6)] = count();
+    }
+}
+
+/* Writeback ranges asked of the filesystem: how many, and how long. */
+kprobe:beamfs_inline_writeback_range
+{
+    @writeback_ranges = count();
+    @writeback_len = hist(arg3);
+    @writeback_per_minute[elapsed / 60000000000] = count();
+}
+
+END { printf("\n"); }

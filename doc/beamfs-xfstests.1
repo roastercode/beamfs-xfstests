@@ -269,6 +269,16 @@ it had. Work is split across nodes, because a test that takes ten
 seconds on hardware takes two to three minutes under emulation.
 
 .SH COMMANDS
+.PP
+Since 2.3.26
+.B deploy
+refuses an image older than the layer or the commits it should carry,
+naming each file and commit, and pushes nothing. Before, it said "run
+bitbake first" for each of them, then sealed and pushed the stale image
+and returned success; the sweep that followed refused it for the same
+reason.
+.B XFSTESTS_FORCE=1
+deploys it anyway.
 .TP
 .B run
 Shard the suite across the configured nodes and follow it.
@@ -683,7 +693,11 @@ submitted for the test and scratch devices by the kernel stack that
 submitted it, in bytes and in requests, with a size histogram and a
 split by zone of the volume (inode table, bitmap, parity and budget
 regions, data), and the allocations made meanwhile -- the instrument
-for a volume that received 9 121 MiB for 220 MiB of file data.
+for a volume that received 9 121 MiB for 220 MiB of file data; churn
+(2.3.26) counts allocations and frees by stack, freeing site, inode and
+minute, slot stores by level with the live pointers they replace or
+clear, and writeback ranges with their lengths -- no key per block, so
+it survives the 981 771 allocations iowho counted under generic/074.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's

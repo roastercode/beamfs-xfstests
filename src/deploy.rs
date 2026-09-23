@@ -335,6 +335,22 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
     println!("  image   : {} ({} min old)",
              image.file_name().unwrap_or_default().to_string_lossy(), age);
 
+    // A stale image is refused here, before anything is sealed or
+    // pushed. On 2026-09-22 deploy printed "run bitbake first" six
+    // times, sealed the old image as the current one, pushed it, and
+    // returned success; the sweep that followed then refused the same
+    // image for the same reason. A tool that knows the answer does not
+    // hand the question on.
+    let stale = commits_after_image(Path::new(&image));
+    if !stale.is_empty() && std::env::var("XFSTESTS_FORCE").is_err() {
+        for l in &stale {
+            println!();
+            println!("  {l}");
+        }
+        return Err("the image predates the code it is meant to carry: run bitbake first, \
+                    or set XFSTESTS_FORCE=1 to deploy it anyway".into());
+    }
+
     // What the chain held before this deploy. Between two campaigns
     // beamfs-bench may have sealed an image of its own, and a BX run
     // that silently overwrites it is how the two labs drifted onto
