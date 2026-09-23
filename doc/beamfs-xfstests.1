@@ -697,7 +697,12 @@ for a volume that received 9 121 MiB for 220 MiB of file data; churn
 (2.3.26) counts allocations and frees by stack, freeing site, inode and
 minute, slot stores by level with the live pointers they replace or
 clear, and writeback ranges with their lengths -- no key per block, so
-it survives the 981 771 allocations iowho counted under generic/074.
+it survives the 981 771 allocations iowho counted under generic/074;
+cpuwho (2.3.27) samples the kernel stack on every CPU at 99 Hz, with
+the per-command count that tells idle from busy, and sums the time
+tasks spend in uninterruptible sleep by the stack they slept in -- for
+the run where the device is no longer the limit and the test is no
+faster.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's
