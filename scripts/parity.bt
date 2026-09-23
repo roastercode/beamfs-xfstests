@@ -26,8 +26,10 @@
  * The region zone is that of the 1 GiB volume mkfs.beamfs -N 16384
  * lays out: blocks 1033 to 18442. Slot k of a region sits at payload
  * offset k*256, and the payload is interleaved with parity, 239 bytes
- * every 255: raw = (off/239)*255 + off%239. For k in 0..13 the first
- * 8 bytes never straddle a subblock.
+ * every 255: each 8-byte word of a slot is mapped through raw =
+ * (off/239)*255 + off%239 on its own, since a slot straddles a
+ * subblock boundary, and all 256 bytes are tested -- the first 8 are
+ * the parity of the first 29 pointers alone, zero for a sparse file.
  */
 
 BEGIN { printf("watching indirect parity updates, region dirtying, region writes and reads\n"); }
@@ -60,14 +62,35 @@ kprobe:mark_buffer_dirty
         $m = (uint64)0;
         $k = (uint64)0;
         unroll (14) {
-            $off = $k * 256;
-            $raw = ($off / 239) * 255 + ($off % 239);
-            if (*(uint64 *)($d + $raw) != 0) {
+            /* All 256 bytes of the slot, 8 at a time, each 8 mapped
+             * through the interleave on its own: fsck tests the whole
+             * slot, and the parity of an indirect block whose first 29
+             * pointers are empty starts with 8 zero bytes. */
+            $nz = (uint64)0;
+            $j = (uint64)0;
+            unroll (32) {
+                $off = $k * 256 + $j * 8;
+                $r   = $off % 239;
+                $raw = ($off / 239) * 255 + $r;
+                if ($r <= 231) {
+                    $nz = $nz | *(uint64 *)($d + $raw);
+                } else {
+                    /* The word straddles the 16 parity bytes that follow
+                     * every 239 of payload: the bytes on each side, the
+                     * parity between them skipped. */
+                    $n1 = 239 - $r;
+                    $nz = $nz | (*(uint64 *)($d + $raw) & (((uint64)1 << (8 * $n1)) - 1));
+                    $nz = $nz | (*(uint64 *)($d + $raw + $n1 + 16) & (((uint64)1 << (8 * (8 - $n1))) - 1));
+                }
+                $j = $j + 1;
+            }
+            if ($nz != 0) {
                 $m = $m | ((uint64)1 << $k);
             }
             $k = $k + 1;
         }
         @dirtied = count();
+        @dirtied_by_stack[kstack(6)] = count();
         @memmask[$blk]    = $m;
         @memmask_ns[$blk] = nsecs;
         @memstate[$blk]   = $bh->b_state;
@@ -105,9 +128,25 @@ kprobe:submit_bio
                 $m = (uint64)0;
                 $k = (uint64)0;
                 unroll (14) {
-                    $off = $k * 256;
-                    $raw = ($off / 239) * 255 + ($off % 239);
-                    if (*(uint64 *)($d + $raw) != 0) {
+                    $nz = (uint64)0;
+                    $j = (uint64)0;
+                    unroll (32) {
+                        $off = $k * 256 + $j * 8;
+                        $r   = $off % 239;
+                        $raw = ($off / 239) * 255 + $r;
+                        if ($r <= 231) {
+                            $nz = $nz | *(uint64 *)($d + $raw);
+                        } else {
+                            /* The word straddles the 16 parity bytes that follow
+                             * every 239 of payload: the bytes on each side, the
+                             * parity between them skipped. */
+                            $n1 = 239 - $r;
+                            $nz = $nz | (*(uint64 *)($d + $raw) & (((uint64)1 << (8 * $n1)) - 1));
+                            $nz = $nz | (*(uint64 *)($d + $raw + $n1 + 16) & (((uint64)1 << (8 * (8 - $n1))) - 1));
+                        }
+                        $j = $j + 1;
+                    }
+                    if ($nz != 0) {
                         $m = $m | ((uint64)1 << $k);
                     }
                     $k = $k + 1;
