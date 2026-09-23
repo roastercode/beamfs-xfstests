@@ -1,36 +1,36 @@
 #!/usr/bin/env bpftrace
 /*
- * Did the parity of an indirect block reach the medium?
+ * Did the parity of an indirect block reach the medium -- and what did
+ * the region block hold on its way there?
  *
- * generic/476 on 2026-09-23, module 0.1.10 on 7.3-rc4: the test
- * passed, the volume unmounted cleanly, and fsck found 105 indirect
- * blocks holding pointers under a parity slot still zero -- written,
- * named by an inode, parity never filed. Every path that installs a
- * pointer calls beamfs_ind_parity_update, which puts the region block
- * on the inode's metadata list and marks the inode dirty; so either
- * the update ran and its region block never went down after it, or
- * the region block went down and carried something else.
+ * generic/476 on 2026-09-23, module 0.1.10 then 0.1.11 on 7.3-rc4: the
+ * test passed, the volume unmounted cleanly, and fsck found 102, then
+ * 112 indirect blocks holding pointers under a parity slot still zero.
+ * The first version of this script showed, for every one of them, an
+ * update with exactly the pointer count fsck read, followed by a write
+ * of the region block; 46 of the 112 were the only indirect block of
+ * their region ever updated, and their region was written exactly
+ * once, after the last update, carrying a zero slot. So between the
+ * update, done in the buffer under its lock, and the write, the
+ * buffer's bytes changed. This version reads those bytes.
  *
- * This tells the two apart. For every indirect block: when its parity
- * was last computed, into which region block, and with how many
- * pointers set. For every region block: when it was last written to
- * the device. Read against the blocks fsck names: an update later
- * than the region's last write is a dirty buffer that nothing
- * flushed; a write later than the update is a write that carried
- * stale bytes.
- *
- * Frees of the region's own zone are counted too, and every free of
- * a block the parity tracepoint has named, so a block freed and
- * handed out again shows as such rather than as a lost update.
+ * Three views of every region block of the test and scratch devices:
+ *   - at mark_buffer_dirty, right after an update: which of the
+ *     14 slots are non-zero in b_data (the first 8 bytes of each);
+ *   - at submit_bio of a write: the same mask, read from the page the
+ *     bio carries (page address from vmemmap_base/page_offset_base);
+ *   - every read of the block from the device: one is the first use,
+ *     a second one is a reload over whatever memory held.
+ * Plus the per-indirect-block record the first version kept.
  *
  * The region zone is that of the 1 GiB volume mkfs.beamfs -N 16384
- * lays out: blocks 1033 to 18442 hold the parity and budget regions.
- * On another layout the zone is wrong and the per-block maps are
- * still right, since those come from the tracepoint's own region
- * number.
+ * lays out: blocks 1033 to 18442. Slot k of a region sits at payload
+ * offset k*256, and the payload is interleaved with parity, 239 bytes
+ * every 255: raw = (off/239)*255 + off%239. For k in 0..13 the first
+ * 8 bytes never straddle a subblock.
  */
 
-BEGIN { printf("watching indirect parity updates and region writes\n"); }
+BEGIN { printf("watching indirect parity updates, region dirtying, region writes and reads\n"); }
 
 tracepoint:beamfs:beamfs_parity_slot
 /args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
@@ -43,6 +43,37 @@ tracepoint:beamfs:beamfs_parity_slot
     @upd_count[args.phys]  = count();
 }
 
+/*
+ * The buffer the update just modified, as it is marked dirty.
+ * mark_buffer_dirty is the exported function every dirtying goes
+ * through, the per-inode metadata list helper included; the mmb_*
+ * helper itself may be inlined and carry no symbol to attach to.
+ */
+kprobe:mark_buffer_dirty
+{
+    $bh  = (struct buffer_head *)arg0;
+    $dev = $bh->b_bdev->bd_dev;
+    $blk = $bh->b_blocknr;
+
+    if (($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) && $blk >= 1033 && $blk < 18443) {
+        $d = (uint8 *)$bh->b_data;
+        $m = (uint64)0;
+        $k = (uint64)0;
+        unroll (14) {
+            $off = $k * 256;
+            $raw = ($off / 239) * 255 + ($off % 239);
+            if (*(uint64 *)($d + $raw) != 0) {
+                $m = $m | ((uint64)1 << $k);
+            }
+            $k = $k + 1;
+        }
+        @dirtied = count();
+        @memmask[$blk]    = $m;
+        @memmask_ns[$blk] = nsecs;
+        @memstate[$blk]   = $bh->b_state;
+    }
+}
+
 kprobe:submit_bio
 {
     $bio = (struct bio *)arg0;
@@ -53,16 +84,42 @@ kprobe:submit_bio
         $bytes = $bio->bi_iter.bi_size;
         $blk   = $bio->bi_iter.bi_sector / 8;
 
-        if ($op == 1 && $blk >= 1033 && $blk < 18443) {
-            @region_writes = count();
-            @region_write_size = hist($bytes);
-            @landed_ns[$blk] = nsecs;
-            @landed_count[$blk] = count();
-            @region_writes_by_stack[kstack(8)] = count();
-            if ($bytes > 4096) {
-                /* A multi-block bio marks only its first block above:
-                 * counted so the analysis knows the gap exists. */
-                @region_multi = count();
+        if ($blk >= 1033 && $blk < 18443) {
+            if ($op == 1) {
+                @region_writes = count();
+                @region_write_size = hist($bytes);
+                @landed_ns[$blk] = nsecs;
+                @landed_count[$blk] = count();
+                @region_writes_by_stack[kstack(8)] = count();
+                if ($bytes > 4096) {
+                    @region_multi = count();
+                }
+
+                /* The bytes this bio carries, read from its first page. */
+                $bv   = $bio->bi_io_vec;
+                $pg   = (uint64)$bv->bv_page;
+                $vm   = *(uint64 *)kaddr("vmemmap_base");
+                $po   = *(uint64 *)kaddr("page_offset_base");
+                $virt = (($pg - $vm) / 64) * 4096 + $po + (uint64)$bv->bv_offset;
+                $d    = (uint8 *)$virt;
+                $m = (uint64)0;
+                $k = (uint64)0;
+                unroll (14) {
+                    $off = $k * 256;
+                    $raw = ($off / 239) * 255 + ($off % 239);
+                    if (*(uint64 *)($d + $raw) != 0) {
+                        $m = $m | ((uint64)1 << $k);
+                    }
+                    $k = $k + 1;
+                }
+                @wrmask[$blk] = $m;
+                @wrmask_ns[$blk] = nsecs;
+            }
+            if ($op == 0) {
+                @region_reads = count();
+                @region_read_count[$blk] = count();
+                @region_read_ns[$blk] = nsecs;
+                @region_reads_by_stack[kstack(8)] = count();
             }
         }
     }
