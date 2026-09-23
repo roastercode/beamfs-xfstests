@@ -73,11 +73,27 @@ impl Progress {
             let mut step = String::from("start");
             let mut step_since = Instant::now();
 
+            let mut written: Option<u64> = None;
+
             while mine.load(Ordering::Relaxed) {
-                if let Some(now) = read_step(&k, &h) {
+                if let Some((now, sectors)) = read_step(&k, &h) {
                     if now != step && !now.is_empty() {
                         step = now;
                         step_since = Instant::now();
+                    }
+                    /*
+                     * The test devices writing is progress whatever
+                     * the step file says. generic/074 on 2026-09-22
+                     * was shown STALLED for thirty minutes while the
+                     * node wrote 9 GiB: fstest prints nothing until it
+                     * exits, and the step file only moves between
+                     * phases of the harness.
+                     */
+                    if let Some(s) = sectors {
+                        if written.is_some_and(|w| w != s) {
+                            step_since = Instant::now();
+                        }
+                        written = Some(s);
                     }
                 }
                 let held = step_since.elapsed().as_secs();
@@ -175,7 +191,9 @@ impl Drop for Progress {
 /// Returns None when it is not time to ask again, so the caller keeps
 /// what it had rather than blanking the display between polls. Adding
 /// load to the node under test would change what is being measured.
-fn read_step(key: &str, host: &str) -> Option<String> {
+/// The step, and the sectors written so far to the test devices (every
+/// virtio disk but the root's, vda: the lab's layout).
+fn read_step(key: &str, host: &str) -> Option<(String, Option<u64>)> {
     use std::sync::atomic::AtomicU64;
     use std::time::{SystemTime, UNIX_EPOCH};
     static LAST: AtomicU64 = AtomicU64::new(0);
@@ -203,11 +221,18 @@ fn read_step(key: &str, host: &str) -> Option<String> {
         .args(["-o", "UserKnownHostsFile=/dev/null"])
         .args(["-o", "LogLevel=ERROR"])
         .arg(host)
-        .arg("cat /tmp/beamfs-step 2>/dev/null")
+        .arg("cat /tmp/beamfs-step 2>/dev/null; echo; \
+              awk '$3 ~ /^vd[b-z]$/ {s += $10} END {print s + 0}' /proc/diskstats")
         .stdin(std::process::Stdio::null())
         .output()
         .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .map(|o| {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let mut lines = text.lines();
+            let step = lines.next().unwrap_or("").trim().to_string();
+            let sectors = text.lines().last().and_then(|l| l.trim().parse::<u64>().ok());
+            (step, sectors)
+        })
 }
 
 #[cfg(test)]

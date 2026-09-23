@@ -420,14 +420,15 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str, tracing: bool)
          grep -qw \"{fstyp}\" /proc/filesystems || printf \"fstyp-missing=%s\\n\" \"{fstyp}\"; \
          command -v mkfs.{fstyp} >/dev/null 2>&1 || printf \"mkfs-missing=%s\\n\" \"{fstyp}\"; \
          pkill -9 check fsstress xfs_io fsx 2>/dev/null; \
-         for i in 1 2 3 4 5; do \
-           pgrep -x check >/dev/null 2>&1 || break; \
+         for i in $(seq 1 60); do \
+           pgrep -x \"check|fsstress|fsx|xfs_io\" >/dev/null 2>&1 || break; \
            sleep 1; \
          done; \
+         printf \"writers-left=%s\\n\" \"$(pgrep -x \"check|fsstress|fsx|xfs_io\" 2>/dev/null | wc -l)\"; \
          for i in 1 2 3 4 5; do \
            umount /mnt/test /mnt/scratch 2>/dev/null; \
-           [ \"$(mount | grep -c \" /mnt/test \")\" -eq 0 ] && break; \
-           umount -l /mnt/test /mnt/scratch 2>/dev/null; \
+           [ \"$(mount | grep -cE \" /mnt/(test|scratch) \")\" -eq 0 ] && break; \
+           sleep 1; \
          done; \
          mkdir -p /mnt/test /mnt/scratch; \
          rm -f /usr/xfstests/results/generic/*.full /usr/xfstests/results/generic/*.out.bad; \
@@ -470,7 +471,46 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str, tracing: bool)
     if let Some(why) = cannot_make(&out) {
         return Err(why);
     }
+    if let Some(why) = not_ready(&out) {
+        return Err(why);
+    }
     Ok(out)
+}
+
+/// A node that still carries the previous test is not prepared.
+///
+/// Until 2.3.28 prepare waited for `check` alone, detached a mount
+/// that would not go with umount -l, and formatted the device under
+/// it. On 2026-09-23 generic/650 then ran on a scratch device whose
+/// previous filesystem was still alive behind that detached mount,
+/// held open by generic/476's fsstress in sync; when those died, the
+/// old superblock flushed itself over the new filesystem: 24 130
+/// orphan blocks and directories naming free inodes. A writer that
+/// survives sixty seconds of SIGKILL is in uninterruptible sleep and
+/// only a restart of the domain ends it; a mount that stays is the
+/// same thing seen from the other side.
+fn not_ready(prepared: &str) -> Option<String> {
+    let value = |key: &str| {
+        prepared
+            .lines()
+            .find_map(|l| l.strip_prefix(key))
+            .map(|v| v.trim().to_string())
+    };
+    if let Some(w) = value("writers-left=") {
+        if w != "0" {
+            return Some(format!(
+                "{w} process(es) of the previous test survived SIGKILL for a minute -- \
+                 stuck in the kernel; the node needs a restart before another test"));
+        }
+    }
+    if let Some(m) = value("mounts=") {
+        if m != "1" {
+            return Some(format!(
+                "mounts={m} after preparation where 1 (the test device) was expected -- \
+                 a mount of the previous test did not come off; the node needs a restart"));
+        }
+    }
+    None
 }
 
 /// A filesystem the node cannot make or mount is not a baseline.
@@ -2125,11 +2165,20 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         // sweep is the campaign that runs all night, so it restarts
         // the domain the way `stop --hard` does and carries on, and
         // stops only if the node does not come back.
-        if wedged {
+        // And after a kill by the budget, since 2.3.28: the processes
+        // the kill leaves in uninterruptible sleep hold the device,
+        // prepare cannot take it from them, and the next test formats
+        // under them (generic/650 after generic/476, 2026-09-23).
+        if wedged || t.killed {
             let r = crate::recovery::Recovery::new(cfg);
             let domain = r.domain_for(&node.name);
-            say!("    restarting {domain}: a node that stopped writing with \
-                      tasks stuck cannot give the next test a verdict");
+            if wedged {
+                say!("    restarting {domain}: a node that stopped writing with \
+                          tasks stuck cannot give the next test a verdict");
+            } else {
+                say!("    restarting {domain}: what the budget killed may still \
+                          hold the device, and the next test must not format under it");
+            }
             let mut jr = crate::journal::Journal::create(&std::env::temp_dir());
             let outcome = r.recover(&c, &domain, 2, &mut jr);
             say!("    {}", outcome.as_str());
@@ -2313,6 +2362,15 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_node_with_writers_or_mounts_left_is_not_ready() {
+        assert!(super::not_ready("dumpfs=0\nwriters-left=0\nmounts=1\n").is_none());
+        let why = super::not_ready("writers-left=3\nmounts=1\n").expect("refused");
+        assert!(why.contains("3 process(es)"));
+        let why = super::not_ready("writers-left=0\nmounts=2\n").expect("refused");
+        assert!(why.contains("mounts=2"));
+    }
+
     #[test]
     fn a_filesystem_the_node_cannot_make_is_refused_by_name() {
         let out = "dumpfs=0\nfstyp-missing=ext4\ntracing=absent\n";

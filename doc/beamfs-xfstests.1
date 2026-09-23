@@ -213,6 +213,18 @@ went on to the next test with the stuck tasks still holding the device,
 and mkfs over that device produced a failure the harness had made
 itself.
 .sp
+Since 2.3.28 a test the budget killed is followed by a restart of the
+domain, exactly as a wedge is: what the kill leaves in uninterruptible
+sleep holds the device, and the preparation of the next test used to
+detach the mount lazily and format under it -- generic/650 on
+2026-09-23 ran on a device whose previous filesystem was still alive
+and was overwritten by its last flush. The preparation now waits up to
+a minute for check, fsstress, fsx and xfs_io to die, never detaches a
+mount lazily, and refuses the node if a writer or a mount of the
+previous test remains. The progress line also counts the test devices
+writing as progress, so a test that prints nothing while writing is no
+longer shown as STALLED.
+.sp
 Since 2.3.25 the same
 .I stall.txt
 is kept when the budget kills a test on a node that still answers: the
