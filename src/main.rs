@@ -285,6 +285,7 @@ deploy   put the newest image and this repo's tools on a node,\n\
          \n\
          environment:\n\
          \x20 XFSTESTS_TIMEOUT        seconds per test, default 300\n\
+         \x20 XFSTESTS_TRIAL_TIMEOUT  seconds per test in a sweep, default 1900\n\
          \x20 XFSTESTS_MKFS_OPTIONS   passed to mkfs.beamfs, default -N 16384\n\
          \x20 XFSTESTS_FSTYP          filesystem to test, default beamfs\n\
          \x20 XFSTESTS_NODES          name:host:test_dev:scratch_dev, comma separated\n\

@@ -1813,7 +1813,14 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     if carries_sanitizer(&c) {
         println!("  kernel  : carries a sanitizer, expect it slow");
     }
-    println!("  budget  : 1900s, and the watcher cuts earlier");
+    // The number printed is the number used. Until 2.3.29 this line
+    // said 1900 whatever XFSTESTS_TRIAL_TIMEOUT held, and a run under
+    // a longer budget reported a budget it did not have.
+    let budget_says: u64 = std::env::var("XFSTESTS_TRIAL_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1900);
+    println!("  budget  : {budget_says}s, and the watcher cuts earlier");
 
     for (i, test) in tests.iter().enumerate() {
         if stopping() {

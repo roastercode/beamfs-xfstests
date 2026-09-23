@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: GPL-2.0-only
-.TH BEAMFS-XFSTESTS 1 "2026-09-22" "beamfs-xfstests" "beamfs development tools"
+.TH BEAMFS-XFSTESTS 1 "2026-09-23" "beamfs-xfstests" "beamfs development tools"
 
 .TP
 .B sweep \fR[\fIselection\fR]
@@ -598,9 +598,13 @@ hangs.
 Seconds a single test may take before it is killed.
 .TP
 .B XFSTESTS_TRIAL_TIMEOUT
-Seconds a trial may take, overriding the default \(em ten minutes for one
-test, fourteen hours for a whole suite. A sweep of 734 tests where one
-wedges must not take the rest with it.
+Seconds a test may take in a sweep before the shell kills it: 1900 by
+default, flat, whatever the kernel carries; the watcher cuts earlier a
+test whose disks have stopped. Raise it for a test that ends near the
+ceiling under a probe -- generic/476 took 1751 seconds on 2026-09-23
+with nothing attached -- so the kill does not throw the probe's capture
+away with the domain. The budget line at the start of a sweep prints
+the value in force; before 2.3.29 it printed 1900 regardless.
 .TP
 .B XFSTESTS_SEED
 Seed for the load, so two trials of one test do the same work and can be
@@ -715,6 +719,14 @@ the per-command count that tells idle from busy, and sums the time
 tasks spend in uninterruptible sleep by the stack they slept in -- for
 the run where the device is no longer the limit and the test is no
 faster.
+parity (2.3.29) records, for every indirect block, when its parity was
+last computed, into which region block and with how many pointers set,
+and for every region block when it was last written to the device,
+with the frees of blocks the parity tracepoint had named -- read
+against the indirect blocks fsck reports as never described, it says
+whether the update never went down or the write carried stale bytes.
+generic/476 on 2026-09-23 left 105 such blocks after a clean unmount
+on a test that passed.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's

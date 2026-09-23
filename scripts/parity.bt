@@ -1,50 +1,80 @@
 #!/usr/bin/env bpftrace
 /*
- * Where the parity work goes.
+ * Did the parity of an indirect block reach the medium?
  *
- * Every indirect block read verifies its parity, and every indirect
- * block written updates it; both decode or encode sixteen RS codewords
- * over a 4096-byte region block. perf says that is 12.9% of the machine
- * on a busy volume. This says which blocks, how often, and whether the
- * reads and the writes are looking at the same ones.
+ * generic/476 on 2026-09-23, module 0.1.10 on 7.3-rc4: the test
+ * passed, the volume unmounted cleanly, and fsck found 105 indirect
+ * blocks holding pointers under a parity slot still zero -- written,
+ * named by an inode, parity never filed. Every path that installs a
+ * pointer calls beamfs_ind_parity_update, which puts the region block
+ * on the inode's metadata list and marks the inode dirty; so either
+ * the update ran and its region block never went down after it, or
+ * the region block went down and carried something else.
  *
- * A region block appearing under @update but never under @verify is one
- * nobody reads back. The reverse is one nobody maintains.
+ * This tells the two apart. For every indirect block: when its parity
+ * was last computed, into which region block, and with how many
+ * pointers set. For every region block: when it was last written to
+ * the device. Read against the blocks fsck names: an update later
+ * than the region's last write is a dirty buffer that nothing
+ * flushed; a write later than the update is a write that carried
+ * stale bytes.
+ *
+ * Frees of the region's own zone are counted too, and every free of
+ * a block the parity tracepoint has named, so a block freed and
+ * handed out again shows as such rather than as a lost update.
+ *
+ * The region zone is that of the 1 GiB volume mkfs.beamfs -N 16384
+ * lays out: blocks 1033 to 18442 hold the parity and budget regions.
+ * On another layout the zone is wrong and the per-block maps are
+ * still right, since those come from the tracepoint's own region
+ * number.
  */
 
-BEGIN { printf("watching parity\n"); }
+BEGIN { printf("watching indirect parity updates and region writes\n"); }
 
-kprobe:beamfs_ind_parity_update
+tracepoint:beamfs:beamfs_parity_slot
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
 {
     @updates = count();
-    @update_block[((struct buffer_head *)arg1)->b_blocknr] = count();
-    @update_by[comm] = count();
+    @upd_ns[args.phys]     = nsecs;
+    @upd_region[args.phys] = args.region;
+    @upd_ptrs[args.phys]   = args.nz;
+    @upd_ino[args.phys]    = args.ino;
+    @upd_count[args.phys]  = count();
 }
 
-kprobe:beamfs_ind_parity_verify
+kprobe:submit_bio
 {
-    @verifies = count();
-    @verify_block[((struct buffer_head *)arg1)->b_blocknr] = count();
-    @verify_by[comm] = count();
+    $bio = (struct bio *)arg0;
+    $dev = $bio->bi_bdev->bd_dev;
+
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        $op    = $bio->bi_opf & 0xff;
+        $bytes = $bio->bi_iter.bi_size;
+        $blk   = $bio->bi_iter.bi_sector / 8;
+
+        if ($op == 1 && $blk >= 1033 && $blk < 18443) {
+            @region_writes = count();
+            @region_write_size = hist($bytes);
+            @landed_ns[$blk] = nsecs;
+            @landed_count[$blk] = count();
+            @region_writes_by_stack[kstack(8)] = count();
+            if ($bytes > 4096) {
+                /* A multi-block bio marks only its first block above:
+                 * counted so the analysis knows the gap exists. */
+                @region_multi = count();
+            }
+        }
+    }
 }
 
-/* What a verify costs, which is what 12.9% is made of. */
-kprobe:beamfs_ind_parity_verify { @vstart[tid] = nsecs; }
-kretprobe:beamfs_ind_parity_verify /@vstart[tid]/
+tracepoint:beamfs:beamfs_block_free
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
 {
-    @verify_ns = hist(nsecs - @vstart[tid]);
-    delete(@vstart[tid]);
+    @frees = count();
+    if (@upd_ns[args.blk] != 0) {
+        @freed_after_update[args.blk] = nsecs;
+    }
 }
 
-/* A verify that fails is the interesting one. */
-kretprobe:beamfs_ind_parity_verify /retval != 0/
-{
-    @verify_failed = count();
-    @failed_by[comm, kstack(6)] = count();
-}
-
-END
-{
-    clear(@vstart);
-    printf("\n");
-}
+END { printf("\n"); }
