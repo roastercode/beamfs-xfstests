@@ -740,7 +740,10 @@ words and overflowed the BPF stack; 2.3.32 loops. Since 2.3.33 the
 harness waits for bpftrace to finish printing its maps after the
 interrupt, up to three minutes, instead of killing it three seconds
 later -- which on 2026-09-23 cut the listing before the two maps the
-run was for -- and the script prints those maps first.
+run was for -- and the script prints those maps first. 2.3.34 keeps
+the read timestamps of region blocks, cleared by mistake in 2.3.33, and
+notes that the slot masks read by the script disagreed with the
+module's own read-back (0.1.13, 0.1.14) and are no longer a witness.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's

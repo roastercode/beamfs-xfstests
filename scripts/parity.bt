@@ -23,6 +23,12 @@
  *     a second one is a reload over whatever memory held.
  * Plus the per-indirect-block record the first version kept.
  *
+ * The slot masks are not a witness any more: on 2026-09-24 the module
+ * read its slot back from b_data at the same instants, 802 816 times,
+ * and never missed it, while this script reported it absent for 30% of
+ * updates. The timestamps of writes and reads stand; 2.3.33 cleared
+ * @region_read_ns at END by mistake, 2.3.34 keeps it.
+ *
  * The region zone is that of the 1 GiB volume mkfs.beamfs -N 16384
  * lays out: blocks 1033 to 18442. Slot k of a region sits at payload
  * offset k*256, and the payload is interleaved with parity, 239 bytes
@@ -183,7 +189,6 @@ END {
     clear(@upd_ino);
     clear(@upd_count);
     clear(@memstate);
-    clear(@region_read_ns);
     clear(@landed_count);
     clear(@freed_after_update);
     printf("\n");
