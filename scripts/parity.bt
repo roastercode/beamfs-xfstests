@@ -225,6 +225,63 @@ kprobe:bdev_getblk
     }
 }
 
+/*
+ * The whole sequence, in the order it happened.
+ *
+ * Every map above keeps one value per block: the last update, the
+ * last write, the last read. 0.1.18 on 2026-09-25 showed the device
+ * holding exactly what each update wrote, and fsck still finding a
+ * hundred slots at zero: what matters is what came after the last
+ * event the maps kept. So every event is also printed as it happens,
+ * one line each, to be read back per block:
+ *   EV U ns cpu ino phys region slot nz      a parity update
+ *   EV A ns cpu ino blk level                 a block allocated
+ *   EV F ns cpu ino blk                       a block freed
+ *   EV W ns cpu first last                    a write covering the zone
+ *   EV R ns cpu first last                    a read covering the zone
+ */
+BEGIN { printf("EV T %llu\n", (uint64)nsecs); }
+
+tracepoint:beamfs:beamfs_parity_slot
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    printf("EV U %llu %d %lu %llu %llu %u %u\n", (uint64)nsecs, cpu, args.ino, args.phys, args.region, args.slot, args.nz);
+}
+
+tracepoint:beamfs:beamfs_block_alloc
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    printf("EV A %llu %d %lu %llu %u\n", (uint64)nsecs, cpu, args.ino, args.blk, args.level);
+}
+
+tracepoint:beamfs:beamfs_block_free
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    printf("EV F %llu %d %lu %llu\n", (uint64)nsecs, cpu, args.ino, args.blk);
+}
+
+kprobe:submit_bio
+{
+    $bio = (struct bio *)arg0;
+    $dev = $bio->bi_bdev->bd_dev;
+
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        $op    = $bio->bi_opf & 0xff;
+        $bytes = $bio->bi_iter.bi_size;
+        $first = $bio->bi_iter.bi_sector / 8;
+        $last  = ($bio->bi_iter.bi_sector + $bytes / 512 - 1) / 8;
+
+        if ($bytes > 0 && $last >= 1033 && $first < 18443) {
+            if ($op == 1) {
+                printf("EV W %llu %d %llu %llu\n", (uint64)nsecs, cpu, $first, $last);
+            }
+            if ($op == 0) {
+                printf("EV R %llu %d %llu %llu\n", (uint64)nsecs, cpu, $first, $last);
+            }
+        }
+    }
+}
+
 tracepoint:beamfs:beamfs_block_free
 /args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
 {
