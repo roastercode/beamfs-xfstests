@@ -840,6 +840,11 @@ A sweep of the whole suite takes three hours and a single generic/269
 takes twenty-two minutes, so a finished run sits in a terminal nobody
 is watching. Every command that drives a node rings when it is done,
 every four seconds, until Return is pressed.
+Since 2.3.36 the script also counts, by kernel stack, every lookup of
+a region block by number (__find_get_block, bdev_getblk): the 2.3.35
+run showed no bio but the module's own one-block writes touching the
+zone, so whatever changes a region's bytes between the update and the
+write does it in memory, and has to find the buffer first.
 .PP
 The sound is compiled into the binary; there is nothing to install or
 configure for it. What is needed is a player, and one of these has to

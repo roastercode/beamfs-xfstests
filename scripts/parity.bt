@@ -192,6 +192,39 @@ kprobe:submit_bio
     }
 }
 
+/*
+ * Who looks a region block up by number.
+ *
+ * 2.3.35 on 2026-09-25: every bio touching the zone is a one-block
+ * write starting in it; the 105 regions of the undescribed blocks are
+ * each written once right after their last update, never read again
+ * while mounted, never written again -- and hold zeros. The bytes
+ * change in memory between the update and the write, with no I/O.
+ * Whoever does that has to find the buffer first: __find_get_block for
+ * a lookup, bdev_getblk to create one. The module's own reasons to be
+ * here are beamfs_bread from the parity update and verify, and the
+ * diagnostics; any other stack is the writer.
+ */
+kprobe:__find_get_block
+{
+    $bdev = (struct block_device *)arg0;
+    $blk  = (uint64)arg1;
+
+    if (($bdev->bd_dev == BX_TEST_DEV || $bdev->bd_dev == BX_SCRATCH_DEV) && $blk >= 1033 && $blk < 18443) {
+        @find_by_stack[kstack(10)] = count();
+    }
+}
+
+kprobe:bdev_getblk
+{
+    $bdev = (struct block_device *)arg0;
+    $blk  = (uint64)arg1;
+
+    if (($bdev->bd_dev == BX_TEST_DEV || $bdev->bd_dev == BX_SCRATCH_DEV) && $blk >= 1033 && $blk < 18443) {
+        @getblk_by_stack[kstack(10)] = count();
+    }
+}
+
 tracepoint:beamfs:beamfs_block_free
 /args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
 {
@@ -222,6 +255,8 @@ END {
     print(@cover_odd_by_stack);
     print(@cover_odd_first_last);
     print(@cover_odd_ns);
+    print(@find_by_stack);
+    print(@getblk_by_stack);
     clear(@upd_ino);
     clear(@upd_count);
     clear(@memstate);

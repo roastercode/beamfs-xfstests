@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "beamfs-xfstests"
-version = "2.3.35"
+version = "2.3.36"
 dependencies = [
  "liveblock",
 ]
