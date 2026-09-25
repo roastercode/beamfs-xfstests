@@ -647,11 +647,13 @@ said about the scratch device reduced to one line and a count, and
 a defect appearing a thousand times a run could not be investigated
 from what remained. Pieces are now stored as they were said, and
 collapsed only when a case is read out loud.
-Since 2.3.42 the checker runs twice on each unmounted device: once
-through the block device's page cache, as any reader of /dev/X does,
-and once more after blockdev --flushbufs has invalidated that cache.
-The file ends with both counts of undescribed indirect blocks and a
-VERDICT line saying whether the two readings agree.
+Since 2.3.43 the checker runs three times on each unmounted device:
+through the block device's page cache, as any reader of /dev/X does;
+after blockdev --flushbufs has invalidated that cache; and on a copy of
+the device taken with O_DIRECT, past the page cache altogether, since
+flushbufs leaves a folio alone while a buffer on it is still held. The
+file ends with the three counts of undescribed indirect blocks and a
+VERDICT line saying whether the readings agree.
 .TP
 .B checkpoint
 Say whether this repository, the layer, the image and the node still
