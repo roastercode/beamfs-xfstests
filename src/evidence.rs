@@ -920,6 +920,14 @@ pub fn prune(root: &Path, keep: usize) -> usize {
 /// taken on /dev/vdb still mounted, and its findings were read as
 /// facts for an afternoon.
 #[must_use]
+/// Twice per device since 2.3.42: once as fsck reads it, through the
+/// block device's page cache, and once more after blockdev --flushbufs
+/// has invalidated that cache. beamfs 0.1.18 on 2026-09-25 read every
+/// region back from the device identical to what it wrote, past the
+/// page cache; a 40-minute soak of the bare device lost nothing; and
+/// fsck, reading through the page cache, still found a hundred parity
+/// slots at zero. The two readings answer whether the medium or the
+/// cache holds the zeros.
 pub fn fsck_command(test_dev: &str, scratch_dev: &str) -> String {
     // /dev/ prefixed here: the node carries the bare name, and fsck
     // given "vdb" looks for a file called vdb in the working directory
@@ -933,7 +941,16 @@ pub fn fsck_command(test_dev: &str, scratch_dev: &str) -> String {
          sudo fsck.beamfs -v $d > /tmp/ev-fsck.out 2>&1; \
          n=$(wc -l < /tmp/ev-fsck.out); \
          echo \"fsck wrote $n line(s)\"; \
-         cat /tmp/ev-fsck.out; done")
+         cat /tmp/ev-fsck.out; \
+         sudo blockdev --flushbufs $d; \
+         sudo fsck.beamfs -v $d > /tmp/ev-fsck2.out 2>&1; \
+         a=$(grep -c 'no parity describes it' /tmp/ev-fsck.out); \
+         b=$(grep -c 'no parity describes it' /tmp/ev-fsck2.out); \
+         echo \"=== $d again, after blockdev --flushbufs: $(wc -l < /tmp/ev-fsck2.out) line(s) ===\"; \
+         echo \"undescribed indirect blocks: $a through the page cache, $b after flushbufs\"; \
+         if [ \"$a\" != \"$b\" ]; then echo \"VERDICT the two readings differ: the block device page cache and the medium disagree\"; \
+         diff /tmp/ev-fsck.out /tmp/ev-fsck2.out; \
+         else echo \"VERDICT same reading through the page cache and past it\"; fi; done")
 }
 
 /// Read a file on the node, and say what was left out.
