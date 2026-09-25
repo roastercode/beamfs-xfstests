@@ -23,12 +23,6 @@
  *     a second one is a reload over whatever memory held.
  * Plus the per-indirect-block record the first version kept.
  *
- * The slot masks are not a witness any more: on 2026-09-24 the module
- * read its slot back from b_data at the same instants, 802 816 times,
- * and never missed it, while this script reported it absent for 30% of
- * updates. The timestamps of writes and reads stand; 2.3.33 cleared
- * @region_read_ns at END by mistake, 2.3.34 keeps it.
- *
  * The region zone is that of the 1 GiB volume mkfs.beamfs -N 16384
  * lays out: blocks 1033 to 18442. Slot k of a region sits at payload
  * offset k*256, and the payload is interleaved with parity, 239 bytes
@@ -162,6 +156,42 @@ kprobe:submit_bio
     }
 }
 
+/*
+ * Every bio whose byte range covers a region block, whatever its
+ * operation and wherever it starts. 0.1.15 on 2026-09-25: the buffer
+ * and the bio agree, the region is written with the slot, and the
+ * next read from the device gets zeros -- 106 of 108 undescribed
+ * blocks have their region read back after that write. Something
+ * else wrote those sectors, and it is not a 4 KiB write starting in
+ * the zone, which is all the probe above counts. Here: writes and
+ * zeroing ops that start before the zone and reach into it, discards,
+ * write-zeroes, and writes longer than one block.
+ */
+kprobe:submit_bio
+{
+    $bio = (struct bio *)arg0;
+    $dev = $bio->bi_bdev->bd_dev;
+
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        $op    = $bio->bi_opf & 0xff;
+        $bytes = $bio->bi_iter.bi_size;
+        $first = $bio->bi_iter.bi_sector / 8;
+        $last  = ($bio->bi_iter.bi_sector + $bytes / 512 - 1) / 8;
+
+        /* REQ_OP_READ 0, WRITE 1, DISCARD 3, WRITE_ZEROES 9 */
+        /* $bytes > 0: a flush carries no data, and its sector is 0. */
+        if ($op != 0 && $bytes > 0 && $last >= 1033 && $first < 18443) {
+            @cover_ops[$op] = count();
+            if ($first < 1033 || $last > $first || $op != 1) {
+                @cover_odd_ops[$op] = count();
+                @cover_odd_by_stack[$op, kstack(8)] = count();
+                @cover_odd_first_last[$first, $last, $op] = count();
+                @cover_odd_ns[$first] = nsecs;
+            }
+        }
+    }
+}
+
 tracepoint:beamfs:beamfs_block_free
 /args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
 {
@@ -186,6 +216,12 @@ END {
     print(@memmask);
     print(@memmask_ns);
     print(@region_read_count);
+    print(@region_read_ns);
+    print(@cover_ops);
+    print(@cover_odd_ops);
+    print(@cover_odd_by_stack);
+    print(@cover_odd_first_last);
+    print(@cover_odd_ns);
     clear(@upd_ino);
     clear(@upd_count);
     clear(@memstate);

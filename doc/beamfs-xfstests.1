@@ -744,6 +744,11 @@ run was for -- and the script prints those maps first. 2.3.34 keeps
 the read timestamps of region blocks, cleared by mistake in 2.3.33, and
 notes that the slot masks read by the script disagreed with the
 module's own read-back (0.1.13, 0.1.14) and are no longer a witness.
+2.3.35 counts every bio whose range covers a region block, whatever
+its operation and wherever it starts -- discards, write-zeroes, writes
+longer than a block, writes that begin before the zone -- by operation
+and by stack: the medium lost slots that the 4 KiB writes counted so
+far had carried.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's
