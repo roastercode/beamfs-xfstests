@@ -42,6 +42,7 @@ mod trace;
 mod archive;
 mod runpack;
 mod scenario;
+mod soak;
 mod config;
 mod console;
 mod history;
@@ -187,6 +188,7 @@ fn main() -> std::process::ExitCode {
         Some("matrix") => do_matrix(&cfg, args.get(2), args.get(3)),
         Some("bench") => do_bench(&cfg, args.get(2), args.get(3)),
         Some("control") => do_control(&cfg, args.get(2), args.get(3), args.get(4)),
+        Some("soak") => do_soak(&cfg, args.get(2)),
         Some("sweep") => do_sweep(&cfg, &args[2..]),
         Some("deploy") => do_deploy(&cfg, args.get(2)),
         Some("nodes") => nodes::status(&cfg, args.get(2)),
@@ -258,6 +260,7 @@ fn usage() -> std::process::ExitCode {
          \x20        same devices, and say which is implicated\n\
          \x20        control [test] [trials] [fstyp,fstyp]\n\
          sweep    run every test of a selection once, one verdict each\n\
+         soak     random writes on the bare scratch device, read back now and later
                   sweep [selection]   (default: the whole suite)\n\
                   a selection is written, not looped over:\n\
                     generic/013            one test\n\
@@ -1667,6 +1670,29 @@ fn do_baseline(cfg: &Config, test: Option<&String>, trials: Option<&String>,
 /// fsck.beamfs -- 30840 bytes, dated 2011 -- answered in place of the
 /// 857568 built here, and a campaign reported 306 destroyed inodes on
 /// a volume that was sound.
+/// Random writes on the bare scratch device, read back at once and
+/// again later: does the device keep what it is given? beamfs 0.1.18
+/// on 2026-09-25 saw region blocks read back identical right after
+/// their write and holding zeros later, with no write in between.
+fn do_soak(cfg: &Config, secs: Option<&String>) -> std::process::ExitCode {
+    let Some(node) = cfg.nodes.first() else {
+        eprintln!("no nodes configured");
+        return std::process::ExitCode::FAILURE;
+    };
+    if let Err(e) = bench::refuse_if_busy(cfg, node) {
+        eprintln!("beamfs-xfstests: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
+    let secs = secs.and_then(|x| x.parse().ok()).unwrap_or(600);
+    match soak::soak(cfg, node, secs) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("  {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 fn do_deploy(cfg: &Config, which: Option<&String>) -> std::process::ExitCode {
     let Some(node) = (match which.map(|s| s.as_str()) {
         Some(n) => cfg.nodes.iter().find(|x| x.name == n),

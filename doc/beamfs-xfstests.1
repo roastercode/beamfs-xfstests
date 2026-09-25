@@ -21,6 +21,18 @@ Each test gets its own trial, its own archive and its own frozen volume
 on failure, written as it goes, so a run killed halfway keeps everything
 it measured.
 .TP
+.B soak [seconds]
+Random 4 KiB O_DIRECT writes on the bare scratch device for the given
+time (default 600 s), each block carrying its number, a generation and
+a CRC; every write is read back at once, a sample is read again every
+30 seconds, and every written block is read at the end. Anything but
+the last generation written is reported as zeros, an older generation
+(a lost write), another block's contents (a misplaced write) or
+garbage, with the region zone of the 1 GiB layout counted apart. The
+device must not be mounted. Added after beamfs 0.1.18 saw region
+blocks read back identical right after their write and holding zeros
+later, with no write in between.
+.TP
 .B baseline \fR[\fItest\fR] [\fItrials\fR] [\fIrounds\fR]
 Run the same code several times over and report the spread.
 .IP
