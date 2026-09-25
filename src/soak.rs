@@ -22,7 +22,13 @@ const REMOTE: &str = "/var/tmp/beamfs-bx/soak.py";
 /// print what it found. The device must not be mounted.
 pub fn soak(cfg: &Config, node: &Node, secs: u64) -> Result<(), String> {
     let conn = NodeConn::new(node, cfg);
-    let dev = &node.scratch_dev;
+    // The configuration names the device the way xfstests does, "vdc";
+    // the script opens a path.
+    let dev = if node.scratch_dev.starts_with('/') {
+        node.scratch_dev.clone()
+    } else {
+        format!("/dev/{}", node.scratch_dev)
+    };
 
     let mounted = conn
         .run(&format!("grep -c '^{dev} ' /proc/mounts; true"), Duration::from_secs(20))
