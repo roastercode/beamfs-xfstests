@@ -845,7 +845,7 @@ a region block by number (__find_get_block, bdev_getblk): the 2.3.35
 run showed no bio but the module's own one-block writes touching the
 zone, so whatever changes a region's bytes between the update and the
 write does it in memory, and has to find the buffer first.
-Since 2.3.37 every parity update, block allocation, block free, and
+Since 2.3.38 every parity update, block allocation, block free, and
 read or write covering the region zone is also printed as it happens,
 as an EV line with its timestamp and cpu, so the sequence of events on
 one block can be read back in order: the maps keep only the last of

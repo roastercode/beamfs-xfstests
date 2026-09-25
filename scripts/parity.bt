@@ -34,7 +34,10 @@
  * 512-byte BPF stack on 2026-09-23 and the probe never attached.
  */
 
-BEGIN { printf("watching indirect parity updates, region dirtying, region writes and reads\n"); }
+BEGIN {
+    printf("watching indirect parity updates, region dirtying, region writes and reads\n");
+    printf("EV T %llu\n", (uint64)nsecs);
+}
 
 tracepoint:beamfs:beamfs_parity_slot
 /args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
@@ -240,8 +243,6 @@ kprobe:bdev_getblk
  *   EV W ns cpu first last                    a write covering the zone
  *   EV R ns cpu first last                    a read covering the zone
  */
-BEGIN { printf("EV T %llu\n", (uint64)nsecs); }
-
 tracepoint:beamfs:beamfs_parity_slot
 /args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
 {
