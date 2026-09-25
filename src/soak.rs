@@ -49,7 +49,8 @@ pub fn soak(cfg: &Config, node: &Node, secs: u64) -> Result<(), String> {
     println!("  soaking {dev} on {} for {secs}s: random 4 KiB O_DIRECT writes, each read back at once,", node.name);
     println!("  a sample read again every 30 s, everything read again at the end");
     let out = conn
-        .run(&format!("python3 {REMOTE} {dev} {secs}"), Duration::from_secs(secs + 900))
+        // The block device belongs to root, as it does for the tests.
+        .run(&format!("sudo -n python3 {REMOTE} {dev} {secs}"), Duration::from_secs(secs + 900))
         .map_err(|e| e.to_string())?;
     let report = out.lines().rev().find(|l| l.starts_with('{')).unwrap_or("").to_string();
     println!();
