@@ -164,6 +164,13 @@ means bitbake was not), and the layer's recipes and configs by commit,
 the mirror left out. A commit that changed nothing the kernel is built
 from no longer breaks the chain; an unsynchronised layer breaks it
 without any commit.
+.IP
+The fsck.beamfs and mkfs.beamfs it pushes follow the machine's
+architecture. For a machine of this station's architecture they are
+built here, static; for any other they are the ones bitbake built for
+that machine, taken from its build tree. Until 2.3.46 every machine got
+the station's build, and an aarch64 node carried tools that could not
+start.
 .TP
 .B nodes status
 Say what each configured node is, right now, and change nothing.
@@ -601,7 +608,7 @@ run.
 .B XFSTESTS_KEEP_IMAGE
 Whether check keeps a compressed copy of a volume it declared
 inconsistent (DUMP_CORRUPT_FS), as it found it, next to the results.
-On by default since 2.3.45; set it to 0 to spend no disk on it.
+On by default since 2.3.46; set it to 0 to spend no disk on it.
 .IP
 It was off, and the frozen image of a test device came from a
 .B dd
@@ -661,11 +668,11 @@ the device taken with O_DIRECT, past the page cache altogether, since
 flushbufs leaves a folio alone while a buffer on it is still held. The
 file ends with the three counts of undescribed indirect blocks and a
 VERDICT line saying whether the readings agree.
-Since 2.3.45 a failing test also freezes the host's side of the
+Since 2.3.46 a failing test also freezes the host's side of the
 scratch device: the backing file libvirt reports for it, read on the
 station with O_DIRECT, kept as scratch-host.img.zst beside the
 guest's scratch.img.zst, so the two can be compared block by block.
-The configuration file also accepts ssh_key and user since 2.3.45:
+The configuration file also accepts ssh_key and user since 2.3.46:
 the key and the account that open the nodes.
 .TP
 .B checkpoint

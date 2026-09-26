@@ -406,7 +406,7 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
         // until 2.3.17 the only file in /tmp/xfs-failures this
         // collection did not bring back: generic/074 on 2026-09-22
         // came with the fsck of a mounted volume and nothing of this.
-        // Until 2.3.45 it was asked for under the test's name with its
+        // Until 2.3.46 it was asked for under the test's name with its
         // slash, generic/013.log, while the runner writes generic-013.log:
         // every failing case said "no runner log" and the log sat there.
         ("runner.log", "@runner".into()),
@@ -472,7 +472,7 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
                 "sudo cat /tmp/xfs-failures/{}.log 2>/dev/null \
                  || echo 'no runner log for {}: the runner writes one only \
                  for a test that failed or was killed'",
-                case.test.replace('/', "-").replace('/', "-"), case.test),
+                case.test.replace('/', "-"), case.test),
             // Both devices: a test that fails on the test device and a
             // test that fails on the scratch one look the same from
             // here, and the checker is cheap.

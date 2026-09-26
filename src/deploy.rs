@@ -219,12 +219,29 @@ fn diff_trees(a: &Path, b: &Path) -> Vec<String> {
     stale
 }
 
-/// Build the static tools this repo ships to the node.
+/// The tools this repo ships to the node, for the node's architecture.
 ///
-/// Static because the node's libc is not this machine's, and a tool
-/// that will not start is indistinguishable from one that found
-/// nothing.
-fn build_tools() -> Result<Vec<(String, PathBuf)>, String> {
+/// A machine of this station's architecture gets a static build made
+/// here: static because the node's libc is not this machine's, and a
+/// tool that will not start is indistinguishable from one that found
+/// nothing. A machine of another architecture gets the tools bitbake
+/// built for it, found under the build tree the deploy directory
+/// belongs to. Until 2.3.46 every machine got the static x86 build:
+/// compute01 (aarch64) on 2026-09-26 carried an fsck.beamfs and an
+/// mkfs.beamfs that answered "cannot execute binary file", check -n
+/// died on its first mkfs, and the sweep said the harness listed no
+/// tests.
+fn build_tools(deploy_dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    if let Some(machine) = deploy_dir.file_name().and_then(|n| n.to_str()) {
+        let target = match machine {
+            "qemux86-64" | "qemux86" | "genericx86-64" => "x86_64",
+            "qemuarm64" | "genericarm64" => "aarch64",
+            other => return Err(format!("deploy: no architecture known for machine {other}")),
+        };
+        if target != std::env::consts::ARCH {
+            return bitbake_tools(deploy_dir, machine, target);
+        }
+    }
     let home = PathBuf::from(std::env::var("HOME").map_err(|e| e.to_string())?);
     let fsck_dir = home.join("git/beamfs/tools/fsck.beamfs");
 
@@ -268,6 +285,45 @@ fn build_tools() -> Result<Vec<(String, PathBuf)>, String> {
         ("fsck.beamfs".into(), fsck_dir.join("fsck.beamfs")),
         ("mkfs.beamfs".into(), mkfs_out),
     ])
+}
+
+/// The fsck.beamfs and mkfs.beamfs bitbake built for `machine`: the
+/// newest `tmp/work/<tune>/<recipe>/<version>/image/usr/sbin/<tool>`
+/// under the build tree that owns `deploy_dir`
+/// (`<build>/tmp/deploy/images/<machine>`).
+fn bitbake_tools(deploy_dir: &Path, machine: &str, target: &str)
+    -> Result<Vec<(String, PathBuf)>, String>
+{
+    let tmp = deploy_dir
+        .ancestors()
+        .nth(3)
+        .ok_or_else(|| format!("deploy: {} is not <build>/tmp/deploy/images/<machine>", deploy_dir.display()))?;
+    let work = tmp.join("work");
+    let mut v = Vec::new();
+    for (recipe, tool) in [("fsck-beamfs", "fsck.beamfs"), ("mkfs-beamfs", "mkfs.beamfs")] {
+        let mut found: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+        for tune in std::fs::read_dir(&work).map_err(|e| format!("{}: {e}", work.display()))?.flatten() {
+            let r = tune.path().join(recipe);
+            let Ok(versions) = std::fs::read_dir(&r) else { continue };
+            for ver in versions.flatten() {
+                let p = ver.path().join("image/usr/sbin").join(tool);
+                if let Ok(m) = std::fs::metadata(&p) {
+                    found.push((m.modified().unwrap_or(std::time::UNIX_EPOCH), p));
+                }
+            }
+        }
+        found.sort();
+        let Some((_, p)) = found.pop() else {
+            return Err(format!(
+                "deploy: no {tool} built by bitbake for {machine} under {}; \
+                 bitbake {recipe} in that build first",
+                work.display()));
+        };
+        v.push((tool.to_string(), p));
+    }
+    println!("  tools   : bitbake's, for {machine} ({target}); this station is {}",
+             std::env::consts::ARCH);
+    Ok(v)
 }
 
 fn md5(p: &Path) -> Option<String> {
@@ -407,7 +463,7 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
     }
 
     // The tools first: a build that fails should not cost a reboot.
-    let tools = build_tools()?;
+    let tools = build_tools(&PathBuf::from(crate::lab::deploy_dir()))?;
     for (n, p) in &tools {
         println!("  built   : {n} ({} bytes)",
                  std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
