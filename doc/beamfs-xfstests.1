@@ -168,7 +168,7 @@ without any commit.
 The fsck.beamfs and mkfs.beamfs it pushes follow the machine's
 architecture. For a machine of this station's architecture they are
 built here, static; for any other they are the ones bitbake built for
-that machine, taken from its build tree. Until 2.3.46 every machine got
+that machine, taken from its build tree. Until 2.3.47 every machine got
 the station's build, and an aarch64 node carried tools that could not
 start.
 .TP
@@ -608,7 +608,7 @@ run.
 .B XFSTESTS_KEEP_IMAGE
 Whether check keeps a compressed copy of a volume it declared
 inconsistent (DUMP_CORRUPT_FS), as it found it, next to the results.
-On by default since 2.3.46; set it to 0 to spend no disk on it.
+On by default since 2.3.47; set it to 0 to spend no disk on it.
 .IP
 It was off, and the frozen image of a test device came from a
 .B dd
@@ -668,11 +668,11 @@ the device taken with O_DIRECT, past the page cache altogether, since
 flushbufs leaves a folio alone while a buffer on it is still held. The
 file ends with the three counts of undescribed indirect blocks and a
 VERDICT line saying whether the readings agree.
-Since 2.3.46 a failing test also freezes the host's side of the
+Since 2.3.47 a failing test also freezes the host's side of the
 scratch device: the backing file libvirt reports for it, read on the
 station with O_DIRECT, kept as scratch-host.img.zst beside the
 guest's scratch.img.zst, so the two can be compared block by block.
-The configuration file also accepts ssh_key and user since 2.3.46:
+The configuration file also accepts ssh_key and user since 2.3.47:
 the key and the account that open the nodes.
 .TP
 .B checkpoint
@@ -788,6 +788,19 @@ its operation and wherever it starts -- discards, write-zeroes, writes
 longer than a block, writes that begin before the zone -- by operation
 and by stack: the medium lost slots that the 4 KiB writes counted so
 far had carried.
+.IP
+The script is taken as attached when it has printed a line of its
+own, which a script does from
+.BR BEGIN .
+bpftrace announces "Attaching N probes" before the probes are armed,
+and until 2.3.47 that announcement was the signal: a script slow to
+arm missed the whole write phase of the test it was meant to watch.
+A script that prints nothing in BEGIN is given the full attach
+ceiling before the test starts. scripts/undeposited.bt, added in
+2.3.47, keeps every allocation, pointer store, parity deposit and
+free of the test devices by block, with stacks and times, and
+scripts/undeposited.py joins them with the indirect blocks fsck names
+on the frozen images.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's

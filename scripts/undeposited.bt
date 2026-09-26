@@ -1,0 +1,95 @@
+#!/usr/bin/env bpftrace
+/*
+ * Allocated as an indirect block, and deposited or never.
+ *
+ * generic/013 of the sealed sweep of 2026-09-26: seven indirect blocks
+ * hold pointers under no parity, and for five of them the whole region
+ * block on the medium is zero, 4096 bytes of it. Every earlier reading
+ * (parity.bt, the 0.1.19 slot audit) asked whether a slot once
+ * deposited was later lost, and found none lost. This one asks the
+ * other question: was it ever deposited.
+ *
+ * Kept per block, each with the time of its last occurrence: each
+ * allocation with its level and the stack that asked for it, each
+ * pointer stored into it (beamfs_slot_store), each beamfs_parity_slot
+ * event, each call of beamfs_ind_parity_update by buffer number, each
+ * free. The second capture of generic/013 said the three blocks fsck
+ * named had been deposited many times, last with nz=0, then freed,
+ * then held pointers again: the order of those events is the finding. bpftrace prints
+ * every map at exit; the station joins them with the blocks fsck names
+ * on the frozen image (scripts/undeposited.py).
+ *
+ * BX_TEST_DEV and BX_SCRATCH_DEV are put in by beamfs-xfstests for the
+ * node it attaches to: the root filesystem is beamfs too and would
+ * otherwise count.
+ */
+
+BEGIN { printf("indirect allocations against deposits\n"); }
+
+/*
+ * Every allocation on the two devices, whatever its level: on
+ * generic/013 the first capture saw 92 blocks deposited and not one
+ * allocation at level > 0, so level does not name the indirect
+ * blocks, and the join with fsck's list has to be made on all of them.
+ * A few thousand entries on this test.
+ */
+tracepoint:beamfs:beamfs_block_alloc
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    @alloc[args.blk] = args.ino;
+    @alloc_level[args.blk] = args.level;
+    @alloc_stack[args.blk] = kstack;
+    @alloc_ns[args.blk] = nsecs;
+    @alloc_n[args.blk] = count();
+    @allocs = count();
+    @allocs_by_level[args.level] = count();
+}
+
+/*
+ * A pointer installed in an indirect block: the last one, by time,
+ * against the last deposit of that block. A store after the last
+ * deposit is a block carrying pointers nothing describes.
+ */
+tracepoint:beamfs:beamfs_slot_store
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    @store_ns[args.parent] = nsecs;
+    @store_n[args.parent] = count();
+    @store_stack[args.parent] = kstack;
+    @stores = count();
+}
+
+tracepoint:beamfs:beamfs_parity_slot
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    @dep[args.phys] = count();
+    @dep_nz[args.phys] = args.nz;
+    @dep_region[args.phys] = args.region;
+    @dep_ns[args.phys] = nsecs;
+    @deps = count();
+}
+
+/*
+ * The deposit as the module calls it, by the buffer's block number:
+ * a call that fires no beamfs_parity_slot event is a deposit that
+ * returned before filing anything.
+ */
+kprobe:beamfs_ind_parity_update
+/((struct buffer_head *)arg1)->b_bdev->bd_dev == BX_TEST_DEV ||
+ ((struct buffer_head *)arg1)->b_bdev->bd_dev == BX_SCRATCH_DEV/
+{
+    $bh = (struct buffer_head *)arg1;
+    @upd[$bh->b_blocknr] = count();
+    @upd_stack[$bh->b_blocknr] = kstack;
+    @upds = count();
+}
+
+tracepoint:beamfs:beamfs_block_free
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    @freed[args.blk] = count();
+    @free_ns[args.blk] = nsecs;
+    @free_stack[args.blk] = kstack;
+}
+
+END { printf("end\n"); }

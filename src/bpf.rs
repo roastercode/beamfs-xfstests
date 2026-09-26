@@ -243,8 +243,16 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
          * the node -- and three fixes today moved that symptom without
          * removing it.
          *
-         * bpftrace prints "Attaching N probes" when it is ready, so:
-         * poll for it and say what the file holds if it never comes.
+         * bpftrace prints "Attaching N probes" when it is about to
+         * attach, not when it has: the word comes out before the
+         * probes are armed, and a script with three kstack maps and a
+         * BTF struct access spent the whole write phase of generic/013
+         * on 2026-09-26 still attaching while the test ran, so the
+         * capture held the cleanup and nothing else. The line a
+         * script's BEGIN prints comes out once every probe is armed,
+         * so that is what the loop waits for: a second line in the
+         * file. A script that says nothing in BEGIN waits the whole
+         * ceiling, and the manual asks every script to speak there.
          *
          * ATTACH_SECS, not fifteen seconds: a script with kstack on three
          * tracepoints took eighteen to compile and attach, and was
@@ -256,12 +264,13 @@ pub fn start(conn: &NodeConn, script: &str) -> Result<Running, String> {
          sudo sh -c 'rm -f {remote_out}; \
          setsid env BPFTRACE_MAX_MAP_KEYS=1000000 bpftrace {remote} > {remote_out} 2>&1 < /dev/null &' ; \
          for i in $(seq 1 {ticks}); do \
-           if grep -q Attaching {remote_out} 2>/dev/null; then break; fi; \
+           if [ \"$(grep -c \"\" {remote_out} 2>/dev/null)\" -ge 2 ]; then break; fi; \
            if ! pgrep -x bpftrace >/dev/null; then break; fi; \
            sleep 0.5; \
          done; \
          sleep 1; \
          if grep -q Attaching {remote_out} 2>/dev/null && \
+            [ \"$(grep -c \"\" {remote_out} 2>/dev/null)\" -ge 2 ] && \
             ! grep -q ERROR {remote_out} 2>/dev/null && \
             pgrep -x bpftrace >/dev/null; then echo BX_ATTACHED; \
          else echo BX_FAILED; \
