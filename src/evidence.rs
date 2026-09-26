@@ -406,6 +406,9 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
         // until 2.3.17 the only file in /tmp/xfs-failures this
         // collection did not bring back: generic/074 on 2026-09-22
         // came with the fsck of a mounted volume and nothing of this.
+        // Until 2.3.45 it was asked for under the test's name with its
+        // slash, generic/013.log, while the runner writes generic-013.log:
+        // every failing case said "no runner log" and the log sat there.
         ("runner.log", "@runner".into()),
         ("meminfo", "/proc/meminfo".into()),
         ("vmstat", "/proc/vmstat".into()),
@@ -469,7 +472,7 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
                 "sudo cat /tmp/xfs-failures/{}.log 2>/dev/null \
                  || echo 'no runner log for {}: the runner writes one only \
                  for a test that failed or was killed'",
-                case.test.replace('/', "-"), case.test),
+                case.test.replace('/', "-").replace('/', "-"), case.test),
             // Both devices: a test that fails on the test device and a
             // test that fails on the scratch one look the same from
             // here, and the checker is cheap.
@@ -651,16 +654,39 @@ pub fn freeze_volume(
             case.dir.join(format!("{dev}.img.zst"))
         };
 
+        // The image check kept, when there is one, and the live device
+        // only when there is not. check remakes the test device after
+        // its own fsck fails, so a dd taken here of that device is a
+        // picture of a fresh mkfs: generic/013 on 2026-09-26, two inodes
+        // where fsstress had left hundreds. With DUMP_CORRUPT_FS on,
+        // check copies the device as it found it to
+        // results/<group>/<number>.<dev>.check.img (compressed), and
+        // that copy is the state of the defect. Re-encoded to zstd when
+        // check chose another compressor, so every reader of *.img.zst
+        // keeps working.
+        //
         // The node's device name, with or without the /dev prefix: the
         // config carries "vdc" and a first version passed it to dd as a
         // relative path, which failed silently and left thirteen bytes
         // of compressed nothing in every case directory.
+        let num = case.test.rsplit('/').next().unwrap_or(&case.test);
         let status = std::process::Command::new("sh")
             .arg("-c")
             .arg(format!(
                 "ssh -i {key} -o BatchMode=yes -o StrictHostKeyChecking=no \
                  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR {user}@{host} \
-                 'sudo dd if=/dev/{dev} bs=1M 2>/dev/null | zstd -3 -T0 -c' > {out}",
+                 'f=$(sudo sh -c \"ls /usr/xfstests/results/*/{num}.{dev}.check.img* 2>/dev/null\" | head -1); \
+                  if [ -n \"$f\" ]; then \
+                    echo \"    {dev}: the image check kept, as it found the volume ($f)\" >&2; \
+                    case \"$f\" in \
+                      *.zst) sudo cat \"$f\";; \
+                      *.gz) sudo zcat \"$f\" | zstd -3 -T0 -c;; \
+                      *.xz) sudo xzcat \"$f\" | zstd -3 -T0 -c;; \
+                      *) sudo cat \"$f\" | zstd -3 -T0 -c;; \
+                    esac; \
+                  else \
+                    sudo dd if=/dev/{dev} bs=1M 2>/dev/null | zstd -3 -T0 -c; \
+                  fi' > {out}",
                 key = cfg.ssh_key,
                 user = cfg.user,
                 host = node.host,
@@ -698,24 +724,36 @@ pub fn freeze_volume(
     Ok(total)
 }
 
-/// The file on this machine that backs `dev` in the node's domain, as
-/// libvirt reports it: `virsh domblklist` names the target and its
-/// source. None when the domain or the target is unknown here.
+/// The file on this machine that backs `dev` in the node's domain.
+///
+/// `dev` is the guest's name. The guest names virtio disks in the order
+/// they sit on the bus, which is the order `virsh domblklist` prints
+/// them, whatever target the XML gave each one: on x86-01 the scratch
+/// is vdc in the guest and vdh in the XML, and a lookup by target name
+/// found nothing for two days while the host side stayed unfrozen. So:
+/// the n-th vd* disk of the listing for the n-th letter. None when the
+/// domain is unknown here or has fewer disks than that.
 fn host_backing_file(node: &Node, dev: &str) -> Option<String> {
     let domain = format!("beamfs-{}", node.name);
     let out = std::process::Command::new("virsh")
         .args(["-c", "qemu:///system", "domblklist", &domain])
         .output()
         .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.lines()
+    backing_from_listing(&String::from_utf8_lossy(&out.stdout), dev)
+}
+
+fn backing_from_listing(listing: &str, dev: &str) -> Option<String> {
+    let letter = dev.trim_start_matches("/dev/").strip_prefix("vd")?.chars().next()?;
+    let rank = (letter as usize).checked_sub('a' as usize)?;
+    listing
+        .lines()
         .filter_map(|l| {
             let mut it = l.split_whitespace();
             let target = it.next()?;
             let source = it.next()?;
-            (target == dev && source.starts_with('/')).then(|| source.to_string())
+            (target.starts_with("vd") && source.starts_with('/')).then(|| source.to_string())
         })
-        .next()
+        .nth(rank)
 }
 
 /// The images freeze_volume kept in a case, scratch first.
@@ -745,6 +783,43 @@ pub fn frozen_images(dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod frozen_tests {
     use super::*;
+
+    #[test]
+    fn the_host_file_follows_the_guest_rank_not_the_target_name() {
+        let listing = " Target   Source
+---------------------------------------------------------------------------
+ vda      /var/lib/libvirt/images/hpc-arm64/beamfs-compute01.beamfs
+ vdb      /var/lib/libvirt/images/hpc-arm64/beamfs-compute01.img
+ vdc      /dev/disk/by-id/usb-VendorC_ProductCode_FC150E356BE8F-0:0-part1
+ vdd      /dev/disk/by-id/usb-VendorC_ProductCode_FC0540021E785-0:0-part1
+ vde      /dev/disk/by-id/usb-VendorC_ProductCode_FC061F9457246-0:0-part1
+ vdf      /dev/disk/by-id/usb-VendorC_ProductCode_FC036C9A3728A-0:0-part1
+ vdg      /dev/disk/by-id/usb-VendorC_ProductCode_FC067B715871B-0:0-part1
+ vdh      /var/lib/libvirt/images/hpc-arm64/scratch-compute01.img
+";
+        assert_eq!(
+            backing_from_listing(listing, "vdh").as_deref(),
+            Some("/var/lib/libvirt/images/hpc-arm64/scratch-compute01.img")
+        );
+        assert_eq!(
+            backing_from_listing(listing, "/dev/vdb").as_deref(),
+            Some("/var/lib/libvirt/images/hpc-arm64/beamfs-compute01.img")
+        );
+        // x86-01: three disks, the guest's vdc is the third whatever
+        // the XML calls it.
+        let x86 = " Target   Source
+------------------------------------------------------------
+ vda      /var/lib/libvirt/images/x86-nocow/beamfs-x86-01.beamfs
+ vdb      /var/lib/libvirt/images/x86-nocow/beamfs-x86-01-test.img
+ vdh      /var/lib/libvirt/images/x86-nocow/beamfs-x86-01-scratch.img
+";
+        assert_eq!(
+            backing_from_listing(x86, "vdc").as_deref(),
+            Some("/var/lib/libvirt/images/x86-nocow/beamfs-x86-01-scratch.img")
+        );
+        assert_eq!(backing_from_listing(x86, "vdd"), None);
+        assert_eq!(backing_from_listing(x86, "sda"), None);
+    }
 
     #[test]
     fn every_frozen_image_is_found_scratch_first_and_nothing_else() {

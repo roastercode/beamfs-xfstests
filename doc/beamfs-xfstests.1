@@ -599,12 +599,19 @@ variable set on the command line stays the operator speaking about one
 run.
 .TP
 .B XFSTESTS_KEEP_IMAGE
-Set to keep a compressed copy of the volume when a check fails
-(DUMP_CORRUPT_FS). Off by default: the harness dd's the whole device and
-runs it through zstd, which on the x86 node is a gigabyte. generic/013
-took 56 seconds without it and 1875 with, the difference being
-compression alone, and the budget it blew was read as a filesystem that
-hangs.
+Whether check keeps a compressed copy of a volume it declared
+inconsistent (DUMP_CORRUPT_FS), as it found it, next to the results.
+On by default since 2.3.45; set it to 0 to spend no disk on it.
+.IP
+It was off, and the frozen image of a test device came from a
+.B dd
+taken after
+.B _check_generic_filesystem
+had remade that device: generic/013 on 2026-09-26 came back with two
+inodes where fsstress had left hundreds, and the one indirect block
+fsck counted as damage was nowhere to be measured. With the dump on,
+the sweep brings back the copy check kept, re-encoded to zstd when
+needed, and reads the live device only when check kept none.
 .TP
 .B XFSTESTS_TIMEOUT
 Seconds a single test may take before it is killed.
@@ -654,11 +661,11 @@ the device taken with O_DIRECT, past the page cache altogether, since
 flushbufs leaves a folio alone while a buffer on it is still held. The
 file ends with the three counts of undescribed indirect blocks and a
 VERDICT line saying whether the readings agree.
-Since 2.3.44 a failing test also freezes the host's side of the
+Since 2.3.45 a failing test also freezes the host's side of the
 scratch device: the backing file libvirt reports for it, read on the
 station with O_DIRECT, kept as scratch-host.img.zst beside the
 guest's scratch.img.zst, so the two can be compared block by block.
-The configuration file also accepts ssh_key and user since 2.3.44:
+The configuration file also accepts ssh_key and user since 2.3.45:
 the key and the account that open the nodes.
 .TP
 .B checkpoint

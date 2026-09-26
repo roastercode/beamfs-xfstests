@@ -402,7 +402,18 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str, tracing: bool)
      * verdicts, and a sweep over the known failures would have spent
      * three and a half hours compressing.
      */
-    let dumpfs = if std::env::var("XFSTESTS_KEEP_IMAGE").is_ok() { 1 } else { 0 };
+    // On by default since 2.3.45. _check_generic_filesystem remakes the
+    // test device when its own check fails, so the only image of that
+    // device as check found it is the one check keeps itself: with the
+    // dump off, generic/013 on 2026-09-26 came back with a frozen image
+    // of two inodes for a volume fsstress had just filled, and the one
+    // block fsck counted as damage was nowhere to be measured.
+    // XFSTESTS_KEEP_IMAGE=0 turns it off for a run that must not spend
+    // the disk.
+    let dumpfs = match std::env::var("XFSTESTS_KEEP_IMAGE") {
+        Ok(v) if v.trim() == "0" => 0,
+        _ => 1,
+    };
 
     let cmd = format!(
         // check and fsstress, not only xfs_io.

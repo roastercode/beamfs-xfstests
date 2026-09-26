@@ -81,16 +81,12 @@ export SCRATCH_DEV=/dev/$SCRATCH_DEV
 export SCRATCH_MNT=/mnt/scratch
 export MKFS_OPTIONS="$MKFS_OPTS"
 export MOUNT_OPTIONS=""
-# No image of the volume on every failure.
-#
-# DUMP_CORRUPT_FS makes the harness copy the whole device and
-# compress it when a check fails. On this node that is a
-# gigabyte through zstd: generic/013 took 56 seconds this
-# morning and 1875 this afternoon, all of it compression, and
-# the budget it blew was read as a filesystem that hangs.
-# The volume is kept by trace and by bench when they are asked
-# for it; a sweep wants the verdict.
-export DUMP_CORRUPT_FS=0
+# DUMP_CORRUPT_FS makes the harness copy the whole device it declared
+# inconsistent, compressed, next to the results, before it remakes the
+# test device. That copy is the only image of the test device as check
+# found it; on since 2.3.45, and local.config, written by prepare, has
+# the last word.
+export DUMP_CORRUPT_FS=1
 CFG
 
 # The harness dispatches on FSTYP through a long list of case statements
