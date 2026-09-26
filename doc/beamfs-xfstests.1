@@ -654,6 +654,12 @@ the device taken with O_DIRECT, past the page cache altogether, since
 flushbufs leaves a folio alone while a buffer on it is still held. The
 file ends with the three counts of undescribed indirect blocks and a
 VERDICT line saying whether the readings agree.
+Since 2.3.44 a failing test also freezes the host's side of the
+scratch device: the backing file libvirt reports for it, read on the
+station with O_DIRECT, kept as scratch-host.img.zst beside the
+guest's scratch.img.zst, so the two can be compared block by block.
+The configuration file also accepts ssh_key and user since 2.3.44:
+the key and the account that open the nodes.
 .TP
 .B checkpoint
 Say whether this repository, the layer, the image and the node still

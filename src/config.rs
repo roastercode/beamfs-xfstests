@@ -94,6 +94,19 @@ impl Config {
         if let Ok(v) = std::env::var("XFSTESTS_MKFS_OPTIONS") {
             c.mkfs_options = v;
         }
+        // The key and the user that open the nodes. Set in the
+        // configuration file as ssh_key and user; the release image is
+        // opened with the key committed in the layer.
+        if let Ok(v) = std::env::var("XFSTESTS_SSH_KEY") {
+            if !v.trim().is_empty() {
+                c.ssh_key = v.trim().to_string();
+            }
+        }
+        if let Ok(v) = std::env::var("XFSTESTS_USER") {
+            if !v.trim().is_empty() {
+                c.user = v.trim().to_string();
+            }
+        }
         if let Ok(v) = std::env::var("XFSTESTS_NODES") {
             // host:test_dev:scratch_dev, comma separated
             let nodes: Vec<Node> = v

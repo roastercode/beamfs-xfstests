@@ -619,6 +619,28 @@ pub fn freeze_volume(
     let mut kept = 0usize;
     let mut last_err = String::new();
 
+    // The host's side of the scratch device: the backing file libvirt
+    // gave the domain, read on this machine with O_DIRECT. beamfs
+    // 0.1.20 on 2026-09-25: every region write read back identical from
+    // inside the guest, no loss in memory at 196 608 later checks, and
+    // fsck reading zeros three ways -- through the page cache, after
+    // flushbufs, and from an O_DIRECT copy. What the guest sees and
+    // what the host stores are the two readings left to compare.
+    if let Some(path) = host_backing_file(node, &scratch) {
+        let out = case.dir.join("scratch-host.img.zst");
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "sudo dd if={path} bs=1M iflag=direct 2>/dev/null | zstd -3 -T0 -c > {out}",
+                out = out.display()
+            ))
+            .status();
+        match status {
+            Ok(s) if s.success() => println!("    host side of {scratch} frozen too: {}", out.display()),
+            _ => println!("    host side of {scratch} not frozen ({path})"),
+        }
+    }
+
     for dev in &devs {
         // scratch.img.zst for the scratch device, whatever its name, so
         // every tool that already reads that path keeps working. Other
@@ -674,6 +696,26 @@ pub fn freeze_volume(
         });
     }
     Ok(total)
+}
+
+/// The file on this machine that backs `dev` in the node's domain, as
+/// libvirt reports it: `virsh domblklist` names the target and its
+/// source. None when the domain or the target is unknown here.
+fn host_backing_file(node: &Node, dev: &str) -> Option<String> {
+    let domain = format!("beamfs-{}", node.name);
+    let out = std::process::Command::new("virsh")
+        .args(["-c", "qemu:///system", "domblklist", &domain])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let target = it.next()?;
+            let source = it.next()?;
+            (target == dev && source.starts_with('/')).then(|| source.to_string())
+        })
+        .next()
 }
 
 /// The images freeze_volume kept in a case, scratch first.
