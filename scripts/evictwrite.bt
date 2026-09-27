@@ -1,0 +1,173 @@
+#!/usr/bin/env bpftrace
+/*
+ * A deleted inode's last write, and every write of its table block
+ * after it.
+ *
+ * generic/013 on 2026-09-26, read with undeposited.bt: 28 of the 68
+ * inodes the test deleted are still on the medium after unmount, mode
+ * and size intact, most of their blocks freed. beamfs_evict_inode sets
+ * i_mode to 0 and calls beamfs_write_inode_raw, which marks the
+ * shared table buffer dirty (sb_bread, mark_buffer_dirty). Either that
+ * buffer never reached the device, or it did and a later write of the
+ * same block carried the old bytes: the scrubber rewrites what it
+ * corrects every 100 ms during a test, and the RS journal writes too.
+ *
+ * Kept: per inode, the table block beamfs_write_inode read just
+ * before it (__bread_gfp on the test device), the time and sync flag
+ * of its last write, its last mmb event (how, n, err); per block of
+ * the test devices, every write bio with its time, size and the stack
+ * that submitted it; per block, the frees with their stacks, so the
+ * evict is dated. evictwrite.py joins them with the inodes fsck still
+ * finds on the frozen image.
+ *
+ * BX_TEST_DEV and BX_SCRATCH_DEV are put in by beamfs-xfstests.
+ */
+
+BEGIN { printf("deleted inodes against writes of their table block\n"); }
+
+kprobe:__bread_gfp
+/((struct block_device *)arg0)->bd_dev == BX_TEST_DEV ||
+ ((struct block_device *)arg0)->bd_dev == BX_SCRATCH_DEV/
+{
+    @bread[tid] = arg1;
+}
+
+tracepoint:beamfs:beamfs_write_inode
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    @wi_n[args.ino] = count();
+    @wi_ns[args.ino] = nsecs;
+    @wi_sync[args.ino] = args.sync;
+    @wi_blk[args.ino] = @bread[tid];
+    @wi_stack[args.ino] = kstack;
+    @writes_inode = count();
+}
+
+tracepoint:beamfs:beamfs_mmb
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    @mmb_ns[args.ino] = nsecs;
+    @mmb_how[args.ino] = str(args.how);
+    @mmb_n[args.ino] = args.n;
+    @mmb_err[args.ino] = args.err;
+    @mmb_events[str(args.how)] = count();
+}
+
+tracepoint:beamfs:beamfs_block_alloc
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    @alloc[args.blk] = args.ino;
+}
+
+tracepoint:beamfs:beamfs_block_free
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    @free_ns[args.blk] = nsecs;
+    @free_ino[args.blk] = args.ino;
+    @free_stack[args.blk] = kstack;
+}
+
+/*
+ * Every write bio to the two devices, by its first 4 KiB block. The
+ * stack names who submitted it: the writeback of a dirty buffer, the
+ * module's own bio, the scrubber, the journal.
+ *
+ * For the metadata zone, blocks below 1100 (superblock, bitmaps,
+ * inode table), every write is also printed as it happens, with its
+ * stack: the maps keep the last write of a block, and on generic/013
+ * the last write of inode table block 1 was the unmount's, while the
+ * medium held an inode that write should have zeroed. What came
+ * after, or from which copy, is in the history.
+ */
+kprobe:submit_bio
+/(((struct bio *)arg0)->bi_bdev->bd_dev == BX_TEST_DEV ||
+  ((struct bio *)arg0)->bi_bdev->bd_dev == BX_SCRATCH_DEV) &&
+ (((struct bio *)arg0)->bi_opf & 0xff) == 1/
+{
+    $bio = (struct bio *)arg0;
+    $blk = $bio->bi_iter.bi_sector >> 3;
+    @w_n[$blk] = count();
+    @w_ns[$blk] = nsecs;
+    @w_size[$blk] = $bio->bi_iter.bi_size;
+    @w_stack[$blk] = kstack;
+    @writes = count();
+    @writes_by[kstack(4)] = count();
+    if ($blk < 1100) {
+        printf("W %llu %llu %u %s\n", nsecs, $blk, $bio->bi_iter.bi_size, kstack(6));
+    }
+    /*
+     * What the bio carries, for the first inode table blocks: the
+     * i_mode of the sixteen 256-byte inodes of the block, read from
+     * the page the bio points at. On generic/013 the unmount wrote
+     * block 1 after every evict of its inodes and the medium still
+     * held them alive: whether the write carried mode 0 decides
+     * between a buffer overwritten in memory and a device that did
+     * not keep what it was sent. The page's virtual address comes
+     * from its struct page: (page - vmemmap_base) / sizeof(struct
+     * page) is the frame, page_offset_base + frame * 4096 its
+     * address in the direct map (x86_64, 64-byte struct page).
+     */
+    if ($blk >= 1 && $blk <= 120) {
+        @inflight[(uint64)$bio] = $blk;
+        $bv = $bio->bi_io_vec;
+        $page = (uint64)$bv->bv_page;
+        $frame = ($page - *(uint64 *)kaddr("vmemmap_base")) / 64;
+        $va = *(uint64 *)kaddr("page_offset_base") + $frame * 4096 + (uint64)$bv->bv_offset;
+        printf("C %llu %llu %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n", nsecs, $blk,
+               *(uint16 *)($va + 0*256), *(uint16 *)($va + 1*256), *(uint16 *)($va + 2*256), *(uint16 *)($va + 3*256),
+               *(uint16 *)($va + 4*256), *(uint16 *)($va + 5*256), *(uint16 *)($va + 6*256), *(uint16 *)($va + 7*256),
+               *(uint16 *)($va + 8*256), *(uint16 *)($va + 9*256), *(uint16 *)($va + 10*256), *(uint16 *)($va + 11*256),
+               *(uint16 *)($va + 12*256), *(uint16 *)($va + 13*256), *(uint16 *)($va + 14*256), *(uint16 *)($va + 15*256));
+    }
+}
+
+/*
+ * The same page again when the write completes: what the device took
+ * is what the page held while the request was in flight, not what it
+ * held at submit_bio. A read of the same block completing into that
+ * page in between would put the old bytes back.
+ */
+kprobe:bio_endio
+/@inflight[(uint64)arg0] != 0/
+{
+    $bio = (struct bio *)arg0;
+    $blk = @inflight[(uint64)arg0];
+    delete(@inflight[(uint64)arg0]);
+    $bv = $bio->bi_io_vec;
+    $page = (uint64)$bv->bv_page;
+    $frame = ($page - *(uint64 *)kaddr("vmemmap_base")) / 64;
+    $va = *(uint64 *)kaddr("page_offset_base") + $frame * 4096 + (uint64)$bv->bv_offset;
+    printf("D %llu %llu %d %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n", nsecs, $blk, $bio->bi_status,
+           *(uint16 *)($va + 0*256), *(uint16 *)($va + 1*256), *(uint16 *)($va + 2*256), *(uint16 *)($va + 3*256),
+           *(uint16 *)($va + 4*256), *(uint16 *)($va + 5*256), *(uint16 *)($va + 6*256), *(uint16 *)($va + 7*256),
+           *(uint16 *)($va + 8*256), *(uint16 *)($va + 9*256), *(uint16 *)($va + 10*256), *(uint16 *)($va + 11*256),
+           *(uint16 *)($va + 12*256), *(uint16 *)($va + 13*256), *(uint16 *)($va + 14*256), *(uint16 *)($va + 15*256));
+}
+
+/*
+ * Every read of the metadata zone, with its stack: the scrubber, a
+ * lookup, fsck, dd.
+ */
+kprobe:submit_bio
+/(((struct bio *)arg0)->bi_bdev->bd_dev == BX_TEST_DEV ||
+  ((struct bio *)arg0)->bi_bdev->bd_dev == BX_SCRATCH_DEV) &&
+ (((struct bio *)arg0)->bi_opf & 0xff) == 0 &&
+ (((struct bio *)arg0)->bi_iter.bi_sector >> 3) < 120/
+{
+    $bio = (struct bio *)arg0;
+    printf("R %llu %llu %u %s\n", nsecs, $bio->bi_iter.bi_sector >> 3, $bio->bi_iter.bi_size, kstack(5));
+}
+
+/*
+ * Mount and unmount, dated, so a write of the metadata zone can be
+ * placed before or after them.
+ */
+kprobe:generic_shutdown_super { printf("U %llu unmount\n", nsecs); }
+kprobe:beamfs_fill_super { printf("M %llu mount\n", nsecs); }
+kprobe:beamfs_put_super { printf("P %llu put_super\n", nsecs); }
+
+END {
+    clear(@bread);
+    clear(@inflight);
+    printf("end\n");
+}

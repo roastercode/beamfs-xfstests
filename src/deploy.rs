@@ -226,7 +226,7 @@ fn diff_trees(a: &Path, b: &Path) -> Vec<String> {
 /// tool that will not start is indistinguishable from one that found
 /// nothing. A machine of another architecture gets the tools bitbake
 /// built for it, found under the build tree the deploy directory
-/// belongs to. Until 2.3.47 every machine got the static x86 build:
+/// belongs to. Until 2.3.48 every machine got the static x86 build:
 /// compute01 (aarch64) on 2026-09-26 carried an fsck.beamfs and an
 /// mkfs.beamfs that answered "cannot execute binary file", check -n
 /// died on its first mkfs, and the sweep said the harness listed no
@@ -555,6 +555,36 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
         println!();
         return Err("the node never answered".into());
     }
+
+    /*
+     * Answering is not ready.
+     *
+     * A node whose root filesystem came up read-only answers "true"
+     * over ssh like any other; the tools then land in /tmp, the
+     * install into /usr/sbin fails, and it is that step, or the sweep
+     * after it, that names the fault, each in its own words. The node
+     * is ready when it takes a write where the tools go; if it does
+     * not, what the kernel said about its root is printed and deploy
+     * stops here, before the pushes.
+     */
+    let rw = c.run("sudo sh -c 'echo bx > /usr/sbin/.bx-rw && rm -f /usr/sbin/.bx-rw' \
+                    && echo BX_RW",
+                   Duration::from_secs(20))
+        .unwrap_or_default();
+    if !rw.contains("BX_RW") {
+        let mounts = c.run("grep ' / ' /proc/mounts", Duration::from_secs(20))
+            .unwrap_or_default();
+        let dm = c.run("sudo dmesg | grep -i 'remount\\|read-only\\|fs error' | tail -5",
+                       Duration::from_secs(20))
+            .unwrap_or_default();
+        println!("  root    : {}", mounts.trim());
+        for l in dm.lines() {
+            println!("  dmesg   : {l}");
+        }
+        return Err("the node answers but its root filesystem does not take a write; \
+                    not deployed".into());
+    }
+    println!("  root    : writable");
 
     // rsync, and then the checksum: a transfer that reports success
     // and lands nowhere is what put a 2011 checker on the node.

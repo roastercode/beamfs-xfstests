@@ -402,7 +402,7 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str, tracing: bool)
      * verdicts, and a sweep over the known failures would have spent
      * three and a half hours compressing.
      */
-    // On by default since 2.3.47. _check_generic_filesystem remakes the
+    // On by default since 2.3.48. _check_generic_filesystem remakes the
     // test device when its own check fails, so the only image of that
     // device as check found it is the one check keeps itself: with the
     // dump off, generic/013 on 2026-09-26 came back with a frozen image

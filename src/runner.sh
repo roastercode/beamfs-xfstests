@@ -84,7 +84,7 @@ export MOUNT_OPTIONS=""
 # DUMP_CORRUPT_FS makes the harness copy the whole device it declared
 # inconsistent, compressed, next to the results, before it remakes the
 # test device. That copy is the only image of the test device as check
-# found it; on since 2.3.47, and local.config, written by prepare, has
+# found it; on since 2.3.48, and local.config, written by prepare, has
 # the last word.
 export DUMP_CORRUPT_FS=1
 CFG

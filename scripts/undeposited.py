@@ -72,6 +72,7 @@ def describe(b):
     if b in upd_stack:
         print("    depose par : " + " <- ".join(f.split('+')[0] for f in upd_stack[b][:8]))
 
+named_all = set()
 for img in sorted(glob.glob(os.path.join(case, '*.img.zst'))):
     if 'host' in os.path.basename(img):
         continue
@@ -80,8 +81,53 @@ for img in sorted(glob.glob(os.path.join(case, '*.img.zst'))):
     out = subprocess.run([fsck, '--check-only', '-v', raw], capture_output=True, text=True)
     bad = [int(x) for x in re.findall(r'indirect block (\d+) of inode \d+ holds \d+ pointer', out.stdout + out.stderr)]
     print(f"\n=== {os.path.basename(img)} : fsck rc={out.returncode}, {len(bad)} bloc(s) indirect(s) sans parite")
+    named_all |= set(bad)
     for b in sorted(bad):
         describe(b)
+
+# the check in the middle of the test: the unmount before the copy, dated
+marks = sorted((int(m.group(2)), m.group(1), m.group(3)) for m in re.finditer(r'^([UMP]) (\d+) (\S+)$', trace, flags=re.M))
+hist = collections.defaultdict(list)
+for m in re.finditer(r'^W (\d+) (\d+) (\d+) \n((?:[ \t]+\S[^\n]*\n)+)', trace, flags=re.M):
+    hist[int(m.group(2))].append((int(m.group(1)), int(m.group(3)), " <- ".join(f.strip().split('+')[0] for f in m.group(4).splitlines()[:6])))
+um = [t for t, k, w in marks if k == 'U']
+print(f"\n=== reperes : " + " ; ".join(f"{ms(t)} {w}" for t, k, w in marks))
+# the copy was taken after the unmount that is followed by the longest gap before the next mount
+gaps = []
+mts = [t for t, k, w in marks if k == 'M']
+for u in um:
+    nxt = [m for m in mts if m > u]
+    gaps.append(((nxt[0] - u) if nxt else 0, u))
+check_umount = max(gaps)[1] if gaps else 0
+print(f"=== demontage suivi du plus long arret (celui de check, avant la copie) : {ms(check_umount)}")
+DATA0, REG0, SLOTS = 18443, 1033, 14
+def region_of(b): return REG0 + (b - DATA0) // SLOTS
+deps_all = collections.defaultdict(list)
+for m in re.finditer(r'^S (\d+) (\d+) (\d+) (\d+) \n((?:[ \t]+\S[^\n]*\n)+)', trace, flags=re.M):
+    deps_all[int(m.group(2))].append((int(m.group(1)), int(m.group(3)), int(m.group(4)), " <- ".join(f.strip().split('+')[0] for f in m.group(5).splitlines()[1:4])))
+zw = collections.defaultdict(dict)
+for m in re.finditer(r'^Z (\d+) (\d+) (\d+)$', trace, flags=re.M):
+    zw[int(m.group(2))][int(m.group(1))] = int(m.group(3))
+print("=== pour chaque bloc nomme par fsck : tous ses depots, et les ecritures de sa region (mots non nuls / 32) avant ce demontage")
+for b in sorted(named_all):
+    r = dep_region.get(b) or region_of(b)
+    deps_b = dep_ns.get(b, 0)
+    ws = [(t, sz, st) for t, sz, st in hist.get(r, []) if t <= check_umount + 5e7]
+    stores = store_ns.get(b, 0)
+    dl = [d for d in deps_all.get(b, []) if d[0] <= check_umount]
+    print(f"  bloc {b} (region {r}) : dernier pointeur {ms(stores)} ; {len(dl)} depot(s) avant le demontage de check, {len(ws)} ecriture(s) de la region")
+    ev = [(t, f"DEPOT   nz={nz} par {st}") for t, reg, nz, st in dl] + [(t, f"ECRITURE region, {zw.get(r, {}).get(t, '?')}/32 mots non nuls, par {st}") for t, sz, st in ws]
+    for t, w in sorted(ev)[-14:]:
+        print(f"      {ms(t)} {w}")
+    last_dep = max([d[0] for d in dl] or [0]); last_w = max([w[0] for w in ws] or [0])
+    if last_dep and last_w < last_dep:
+        print(f"      => dernier depot {ms(last_dep)} sans ecriture de region ensuite avant le demontage {ms(check_umount)}")
+    elif last_dep:
+        print(f"      => la region a ete ecrite apres le dernier depot ({ms(last_w)}) ; ce qu'elle portait est ci-dessus")
+allw = sum(len(v) for v in hist.values()); regw = sum(len(v) for k, v in hist.items() if REG0 <= k < DATA0)
+print(f"=== ecritures zone metadonnees : {allw}, dont regions : {regw} ; piles des ecritures de regions :")
+for st, n in collections.Counter(st for k, v in hist.items() if REG0 <= k < DATA0 for t, sz, st in v).most_common(6):
+    print(f"      {n:6d}  {st}")
 
 print("\n=== piles d'allocation des blocs deposes (indirects surs), les plus frequentes :")
 sites_ok = collections.Counter(" <- ".join(f.split('+')[0] for f in stack[b][:7]) for b in alloc if dep.get(b,0) > 0 and b in stack)
