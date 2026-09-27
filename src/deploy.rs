@@ -226,7 +226,7 @@ fn diff_trees(a: &Path, b: &Path) -> Vec<String> {
 /// tool that will not start is indistinguishable from one that found
 /// nothing. A machine of another architecture gets the tools bitbake
 /// built for it, found under the build tree the deploy directory
-/// belongs to. Until 2.3.48 every machine got the static x86 build:
+/// belongs to. Until 2.3.49 every machine got the static x86 build:
 /// compute01 (aarch64) on 2026-09-26 carried an fsck.beamfs and an
 /// mkfs.beamfs that answered "cannot execute binary file", check -n
 /// died on its first mkfs, and the sweep said the harness listed no

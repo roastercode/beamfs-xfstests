@@ -402,7 +402,7 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str, tracing: bool)
      * verdicts, and a sweep over the known failures would have spent
      * three and a half hours compressing.
      */
-    // On by default since 2.3.48. _check_generic_filesystem remakes the
+    // On by default since 2.3.49. _check_generic_filesystem remakes the
     // test device when its own check fails, so the only image of that
     // device as check found it is the one check keeps itself: with the
     // dump off, generic/013 on 2026-09-26 came back with a frozen image
@@ -1550,7 +1550,9 @@ pub fn is_family(selection: &str) -> bool {
 /// to resolve: it is a directory, no group of that name exists, and
 /// ./check lists nothing. There the directory is read directly, which
 /// is also what the full-campaign runner does.
-fn enumerate_tests(c: &NodeConn, selection: &str) -> Result<Vec<String>, String> {
+fn enumerate_tests(c: &NodeConn, selection: &str, budget: Duration)
+    -> Result<Vec<String>, String>
+{
     let cmd = if is_family(selection) {
         format!(
             "ls /usr/xfstests/tests/{selection}/[0-9]*.out 2>/dev/null \
@@ -1559,8 +1561,8 @@ fn enumerate_tests(c: &NodeConn, selection: &str) -> Result<Vec<String>, String>
         format!("cd /usr/xfstests && sudo ./check -n {selection} 2>&1 || true")
     };
     let (out, _) = c
-        .run_rc(&cmd, Duration::from_secs(300))
-        .map_err(|e| e.to_string())?;
+        .run_rc(&cmd, budget)
+        .map_err(|e| format!("listing the selection: {e}"))?;
 
     let mut v: Vec<String> = out
         .split_whitespace()
@@ -1582,6 +1584,24 @@ fn enumerate_tests(c: &NodeConn, selection: &str) -> Result<Vec<String>, String>
     Ok(v)
 }
 
+/// How long the harness may take to list a selection.
+///
+/// ./check -n resolves every _requires of the selection on the node,
+/// 734 of them for the whole suite. That fits in the per-test budget
+/// on x86-01 and does not on compute01, where the aarch64 runs under
+/// emulation: on 2026-09-27 the aarch64 sweep ended at "did not finish
+/// within its 300s budget" before its first test, with nothing to say
+/// which step had run out. The listing is not a test; it gets the
+/// trial budget, XFSTESTS_TRIAL_TIMEOUT or 1900 s, and the error
+/// names it.
+fn listing_budget() -> Duration {
+    Duration::from_secs(
+        std::env::var("XFSTESTS_TRIAL_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1900))
+}
+
 /// Where the evidence for a campaign lives.
 fn evidence_root() -> std::path::PathBuf {
     store()
@@ -1590,12 +1610,6 @@ fn evidence_root() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp/beamfs-evidence"))
 }
 
-
-/// The domain to ask when a node stops answering.
-///
-/// One name because the x86 lab is one VM. A cluster would need this
-/// per node, and the day it does the node struct is where it belongs.
-const WEDGE_VM: &str = "beamfs-x86-01";
 
 /// Set when the stop file appears: the loop finishes its test and stops.
 ///
@@ -1758,8 +1772,10 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         Err(e) => return Err(format!("cannot prepare the node: {e}")),
     }
 
-    println!("  listing : asking the harness what this selection covers");
-    let tests = enumerate_tests(&c, selection)?;
+    let listing = listing_budget();
+    println!("  listing : asking the harness what this selection covers \
+(up to {} min)", listing.as_secs() / 60);
+    let tests = enumerate_tests(&c, selection, listing)?;
     println!("  tests   : {} to run", tests.len());
     arm_stop();
     println!("  stop    : touch {} to finish the current test and stop",
@@ -1868,7 +1884,12 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                 // one never will.
                 let dir = root.join(format!(
                     "wedged-{}", test.replace('/', "-")));
-                match wedge::capture_wedged(WEDGE_VM, &dir) {
+                // The node's own domain, named as deploy and recovery
+                // name it. This was "beamfs-x86-01" whatever the node,
+                // written when the x86 lab was the only one: a sweep on
+                // compute01 would have read the console of the machine
+                // beamfs-bench was measuring on.
+                match wedge::capture_wedged(&format!("beamfs-{}", node.name), &dir) {
                     Ok(n) => say!("    console kept: {} KiB in {}",
                                       n / 1024, dir.display()),
                     Err(e) => say!("    nothing captured: {e}"),
