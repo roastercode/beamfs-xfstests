@@ -402,7 +402,7 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str, tracing: bool)
      * verdicts, and a sweep over the known failures would have spent
      * three and a half hours compressing.
      */
-    // On by default since 2.3.49. _check_generic_filesystem remakes the
+    // On by default since 2.3.50. _check_generic_filesystem remakes the
     // test device when its own check fails, so the only image of that
     // device as check found it is the one check keeps itself: with the
     // dump off, generic/013 on 2026-09-26 came back with a frozen image
@@ -1560,9 +1560,93 @@ fn enumerate_tests(c: &NodeConn, selection: &str, budget: Duration)
     } else {
         format!("cd /usr/xfstests && sudo ./check -n {selection} 2>&1 || true")
     };
-    let (out, _) = c
-        .run_rc(&cmd, budget)
-        .map_err(|e| format!("listing the selection: {e}"))?;
+
+    /*
+     * Detached on the node, watched from here.
+     *
+     * One blocking ssh call with a deadline said, when the deadline
+     * came, "did not finish within its 1900s budget" and nothing else:
+     * not how far the harness had got, not which _requires it was in,
+     * not whether it was slow or stuck. On 2026-09-28 the aarch64
+     * sweep ended there twice, at 300 s and at 1900 s, and the
+     * question stayed open. The listing now runs under nohup with its
+     * output in a file; this side reads the line count and the last
+     * line every thirty seconds, says so every minute, stops it after
+     * ten minutes without a new line or at the budget, and keeps the
+     * output either way.
+     */
+    let started = c.run(
+        &format!(
+            "cat > /tmp/bx-listing.sh <<'BXEOF'\n{cmd}\nBXEOF\n\
+             chmod +x /tmp/bx-listing.sh; rm -f /tmp/bx-listing.out /tmp/bx-listing.rc; \
+             nohup sh -c '/tmp/bx-listing.sh; echo $? > /tmp/bx-listing.rc' \
+             > /tmp/bx-listing.out 2>&1 < /dev/null & echo started"),
+        Duration::from_secs(30))
+        .map_err(|e| format!("starting the listing on the node: {e}"))?;
+    if !started.contains("started") {
+        return Err(format!("the listing did not start: {}", started.trim()));
+    }
+
+    const STALL: Duration = Duration::from_secs(600);
+    let t0 = std::time::Instant::now();
+    let mut last_lines = 0usize;
+    let mut last_line = String::new();
+    let mut last_progress = std::time::Instant::now();
+    let mut last_said = std::time::Instant::now();
+    let mut done = false;
+    loop {
+        std::thread::sleep(Duration::from_secs(30));
+        let probe = c.run(
+            "test -f /tmp/bx-listing.rc && echo BX_DONE; \
+             wc -l < /tmp/bx-listing.out 2>/dev/null; \
+             tail -n 1 /tmp/bx-listing.out 2>/dev/null",
+            Duration::from_secs(20))
+            .unwrap_or_default();
+        let mut it = probe.lines();
+        let mut first = it.next().unwrap_or("").trim().to_string();
+        if first == "BX_DONE" {
+            done = true;
+            first = it.next().unwrap_or("").trim().to_string();
+        }
+        let lines: usize = first.parse().unwrap_or(last_lines);
+        let tail = it.next().unwrap_or("").trim().to_string();
+        if lines != last_lines || tail != last_line {
+            last_progress = std::time::Instant::now();
+        }
+        last_lines = lines;
+        if !tail.is_empty() {
+            last_line = tail;
+        }
+        if done {
+            break;
+        }
+        if last_said.elapsed() >= Duration::from_secs(60) {
+            println!("  listing : {} line(s) after {} min, last: {}",
+                     last_lines, t0.elapsed().as_secs() / 60,
+                     if last_line.is_empty() { "(nothing yet)" } else { last_line.as_str() });
+            last_said = std::time::Instant::now();
+        }
+        let why = if last_progress.elapsed() >= STALL {
+            Some(format!("no new line for {} min", STALL.as_secs() / 60))
+        } else if t0.elapsed() >= budget {
+            Some(format!("the {} s budget is spent", budget.as_secs()))
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            let _ = c.run("sudo pkill -f bx-listing.sh; sudo pkill -f './check -n'",
+                          Duration::from_secs(20));
+            let kept = keep_listing_output(c);
+            return Err(format!(
+                "listing the selection: {why}; {last_lines} line(s) resolved, \
+                 the last one: {}; output kept at {kept}",
+                if last_line.is_empty() { "(none)" } else { last_line.as_str() }));
+        }
+    }
+
+    let out = c.run("cat /tmp/bx-listing.out", Duration::from_secs(60))
+        .map_err(|e| format!("reading the listing: {e}"))?;
+    println!("  listing : done in {} s", t0.elapsed().as_secs());
 
     let mut v: Vec<String> = out
         .split_whitespace()
@@ -1579,9 +1663,29 @@ fn enumerate_tests(c: &NodeConn, selection: &str, budget: Duration)
     v.dedup();
 
     if v.is_empty() {
-        return Err("the harness listed no tests for this selection".into());
+        let kept = keep_listing_output(c);
+        return Err(format!("the harness listed no tests for this selection; \
+                            its output is kept at {kept}"));
     }
     Ok(v)
+}
+
+/// The node's listing output, brought here whole, as evidence.
+fn keep_listing_output(c: &NodeConn) -> String {
+    let dir = evidence_root().join("listing");
+    let _ = std::fs::create_dir_all(&dir);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let p = dir.join(format!("{}-{stamp}.out", crate::lab::machine()));
+    match c.run("cat /tmp/bx-listing.out 2>/dev/null", Duration::from_secs(60)) {
+        Ok(out) => {
+            let _ = std::fs::write(&p, out);
+            p.display().to_string()
+        }
+        Err(e) => format!("(not kept: {e})"),
+    }
 }
 
 /// How long the harness may take to list a selection.
