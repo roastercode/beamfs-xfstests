@@ -61,6 +61,9 @@ ev.sort(key=lambda e: e['ns'])
 t0 = ev[0]['ns'] if ev else 0
 def ts(ns): return f"{(ns - t0) / 1e9:10.3f}s"
 
+sf = os.path.join(case, 'seed')
+if os.path.exists(sf):
+    print(f"graine : {open(sf).read().strip()}")
 print(f"trace : {len(ev)} evenements ; " + ", ".join(
     f"{k} {v}" for k, v in sorted(collections.Counter(e['t'] for e in ev).items())))
 print(f"        test dev {test_dev}, scratch dev {scratch_dev}; montages : " +
@@ -75,7 +78,7 @@ for img, dev in (('vdb.img.zst', test_dev), ('scratch.img.zst', scratch_dev)):
         continue
     raw = '/tmp/nlink-' + img[:-4]
     subprocess.run(['zstd', '-dqf', p, '-o', raw], check=True)
-    out = subprocess.run([fsck, '--check-only', raw], capture_output=True, text=True)
+    out = subprocess.run([fsck, '--check-only', '-v', raw], capture_output=True, text=True)
     s = out.stdout + out.stderr
     found = [(int(a), int(b), int(c)) for a, b, c in
              re.findall(r'inode (\d+) records (\d+) link\(s\), (\d+) entr', s)]

@@ -50,6 +50,40 @@ impl Case {
         self.trial
     }
 
+    /// Move a previous run's directory for this test and trial aside.
+    ///
+    /// A case directory is named for the test and the trial number, so
+    /// a second bench of the same test lands in the first one's. The
+    /// sweep empties it; the bench did neither, and on 2026-09-28 a
+    /// bench of generic/083 left the sweep's frozen scratch image
+    /// beside its own trace, where a passing trial read as a failing
+    /// one. Moved rather than emptied: the previous run's evidence is
+    /// evidence too. Returns where it went.
+    pub fn fresh(&self) -> Option<PathBuf> {
+        if !self.dir.exists() {
+            return None;
+        }
+        let stamp = std::fs::metadata(&self.dir)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        let base = self.dir.file_name()?.to_string_lossy().to_string();
+        let mut to = self.dir.with_file_name(format!("{base}.prev-{stamp}"));
+        let mut k = 1;
+        while to.exists() {
+            to = self.dir.with_file_name(format!("{base}.prev-{stamp}-{k}"));
+            k += 1;
+        }
+        std::fs::rename(&self.dir, &to).ok()?;
+        Some(to)
+    }
+
+    /// Keep a short note in the case, such as the seed it ran with.
+    pub fn keep(&self, name: &str, body: &str) {
+        self.put(name, body);
+    }
+
     /// Write a piece of evidence, whole.
     ///
     /// This used to collapse repeats before writing, which made the
@@ -170,7 +204,10 @@ cp $T.orig $T
 # After the shebang and before anything runs. The seed is set first so
 # every RANDOM in the test draws from it.
 sed -i "2i RANDOM={seed}" $T
-sed -i "3i {ps4}" $T
+# fsstress and fsx seed themselves from the clock unless told, and the
+# tests pass FSSTRESS_AVOID and FSX_AVOID on to them.
+sed -i "3i export FSSTRESS_AVOID=\"\$FSSTRESS_AVOID -s {seed}\" FSX_AVOID=\"\$FSX_AVOID -S {seed}\"" $T
+sed -i "4i {ps4}" $T
 # Redirected, not printed.
 #
 # set -x writes to stderr, which check captures and compares
@@ -179,9 +216,9 @@ sed -i "3i {ps4}" $T
 # the instrumentation rather than on anything the filesystem did.
 # Sending fd 2 to a file leaves the comparison alone and keeps the
 # trace, which is the whole point of taking it.
-sed -i "4i exec 2>/tmp/beamfs-xtrace.\$\$" $T
-sed -i "5i set -x" $T
-head -8 $T'"#
+sed -i "5i exec 2>/tmp/beamfs-xtrace.\$\$" $T
+sed -i "6i set -x" $T
+head -9 $T'"#
             ),
             Duration::from_secs(60),
         )

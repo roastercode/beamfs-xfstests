@@ -850,6 +850,15 @@ write of an inode carried; scripts/nlink.py replays them for the inodes
 whose link count fsck disputes on the frozen images, from the last
 mount of their device, and says whether the count and the names parted
 in memory or only on the medium.
+.IP
+Since 2.3.55 the seed of a bench reaches fsstress and fsx as well as
+the test (FSSTRESS_AVOID and FSX_AVOID carry -s and -S); until then
+they seeded themselves from the clock and two trials did not run the
+same load. XFSTESTS_SEED=random draws a new seed for every trial,
+prints it and keeps it in the case as seed. A bench no longer writes
+into a previous run's case directory: that directory is moved aside
+as <case>.prev-<time>. scripts/nlink.py runs fsck with -v, which is
+when fsck names the inodes.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's

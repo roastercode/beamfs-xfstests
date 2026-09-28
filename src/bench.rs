@@ -873,6 +873,11 @@ pub fn run(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(20260910);
+    // XFSTESTS_SEED=random: a new seed for every trial, printed and
+    // kept in the case, so a failing trial can be run again with its
+    // own. A fixed seed makes trials comparable; a random one is what
+    // finds a race the fixed one happens to miss.
+    let random_seed = std::env::var("XFSTESTS_SEED").is_ok_and(|v| v == "random");
     // Only a single named test can be instrumented.
     //
     // The seed and the -x trace are edits to one test file. With an
@@ -891,7 +896,14 @@ pub fn run(
     let instrumented = single
         && match evidence::instrument(cfg, node, test, seed) {
         Ok(()) => {
-            println!("  seed    : {seed} (same load every trial, traced line by line)");
+            // Until 2.3.55 the seed reached the test's own RANDOM and
+            // not the load generators: fsstress and fsx seed from the
+            // clock unless told, so "same load every trial" was not.
+            if random_seed {
+                println!("  seed    : a new one every trial, given to the test, fsstress and fsx; traced line by line");
+            } else {
+                println!("  seed    : {seed}, given to the test, fsstress and fsx: the same load every trial; traced line by line");
+            }
             true
         }
         Err(e) => {
@@ -949,6 +961,16 @@ pub fn run(
     };
 
     for n in 1..=trials {
+        let trial_seed = if random_seed && instrumented {
+            let s = fresh_seed();
+            match evidence::instrument(cfg, node, test, s) {
+                Ok(()) => say!("  seed    : {s} for trial {n}"),
+                Err(e) => say!("  seed    : {s} not applied to trial {n}: {e}"),
+            }
+            s
+        } else {
+            seed
+        };
         let p = Progress::start(
             &format!("trial {n}/{trials}"),
             &cfg.ssh_key,
@@ -1045,6 +1067,14 @@ pub fn run(
         // reported over the last two days came from a stale file that
         // way.
         let case = Case::new(&evidence_root(), &r.test, n);
+        if let Some(prev) = case.fresh() {
+            say!("    a previous run's {} kept as {}",
+                 case.dir.file_name().unwrap_or_default().to_string_lossy(),
+                 prev.file_name().unwrap_or_default().to_string_lossy());
+        }
+        if instrumented {
+            case.keep("seed", &format!("{trial_seed}\n"));
+        }
         // The probe first: stopped before the checker runs, so what it
         // saw is the trial rather than the trial plus its verification.
         if let Some(pr) = probe.take() {
@@ -1726,6 +1756,14 @@ fn keep_listing_output(c: &NodeConn) -> String {
         }
         Err(e) => format!("(not kept: {e})"),
     }
+}
+
+/// A seed for one trial, from the kernel's generator.
+fn fresh_seed() -> u32 {
+    use std::io::Read;
+    let mut b = [0u8; 4];
+    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b));
+    u32::from_le_bytes(b) % 1_000_000_000 + 1
 }
 
 /// How long the harness may take to list a selection.
