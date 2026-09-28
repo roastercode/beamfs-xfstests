@@ -867,6 +867,11 @@ every allocation and free, and every pointer stored into an indirect
 block; scripts/scrubwb.py says, for each write-back, whether the block
 changed hands between the start of the walk and the write and whether
 it held pointers when it was written over.
+Since 2.3.57 it prints every check, and every confirming read the
+scrubber makes when a subblock does not decode, with the state bits
+the shared buffer had at that moment: the confirming read clears the
+buffer's uptodate bit and reads the medium into it again, and a buffer
+carrying changes not yet written loses them.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's

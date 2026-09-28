@@ -22,9 +22,17 @@
  *   AL, FR  every allocation and free;
  *   TS  every pointer stored into an indirect block (beamfs_tc_store).
  *
- * scripts/scrubwb.py says, for each write-back, whether the block
- * changed hands since the walk began and whether it held pointers
- * when it was written over.
+ * Since 2.3.57 every check is printed, not only those that corrected
+ * or failed, and so is the confirming read check_block makes when a
+ * subblock does not decode: it clears the uptodate bit of the shared
+ * buffer and reads the medium into it again, and a buffer that carried
+ * changes not yet written loses them to what the disk held. CR gives
+ * the block and the state bits the buffer had at that moment (bit 1,
+ * BH_Dirty: changes not yet on the medium).
+ *
+ * scripts/scrubwb.py says, for each write-back and each confirming
+ * read, whether the block changed hands since the walk began, whether
+ * it held pointers when it was touched, and whether it was dirty.
  *
  * BX_TEST_DEV and BX_SCRATCH_DEV are put in by beamfs-xfstests.
  */
@@ -46,19 +54,34 @@ kprobe:beamfs_scrub_check_block
     }
 }
 
+/*
+ * Inside a check: the first block read is the snapshot, and its buffer
+ * is kept; a second read of the same block is the confirming one.
+ */
+kretprobe:__bread_gfp /@sc_dev[tid] && !@sc_bh[tid]/
+{
+    @sc_bh[tid] = retval;
+}
+
+kprobe:__bread_gfp /@sc_dev[tid] && @sc_bh[tid]/
+{
+    $bh = (struct buffer_head *)@sc_bh[tid];
+    printf("CR %llu %d %u %llu %lu\n", nsecs, tid, @sc_dev[tid],
+           arg1, $bh->b_state);
+}
+
 kretprobe:beamfs_scrub_check_block /@sc_dev[tid]/
 {
     $c = *(uint32 *)@sc_corr[tid];
     $rc = (int32)retval;
     @checks = count();
-    if ($c > 0 || $rc != 0) {
-        printf("SC %llu %llu %d %u %llu %u %d\n", @sc_ns[tid], nsecs, tid,
-               @sc_dev[tid], @sc_phys[tid], $c, $rc);
-    }
+    printf("SC %llu %llu %d %u %llu %u %d\n", @sc_ns[tid], nsecs, tid,
+           @sc_dev[tid], @sc_phys[tid], $c, $rc);
     delete(@sc_dev[tid]);
     delete(@sc_phys[tid]);
     delete(@sc_corr[tid]);
     delete(@sc_ns[tid]);
+    delete(@sc_bh[tid]);
 }
 
 /*
@@ -105,5 +128,6 @@ END
     clear(@sc_phys);
     clear(@sc_corr);
     clear(@sc_ns);
+    clear(@sc_bh);
     printf("end\n");
 }

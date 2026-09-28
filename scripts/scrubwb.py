@@ -3,6 +3,10 @@
 
 usage: scrubwb.py <case dir>
 
+Since 2.3.57 every check is in the trace, and every confirming read (CR)
+with the state bits of the buffer it overwrote; a confirming read of a
+dirty buffer that had changed hands is reported like a write-back.
+
 Reads <case>/bpf-scrubwb.txt (scripts/scrubwb.bt) and, when present, the
 case's dmesg (treecheck LOST POINTER lines) and tree-detail.txt. For every
 check_block that corrected -- and therefore wrote its copy back -- or found
@@ -28,6 +32,7 @@ al = collections.defaultdict(list)     # (dev, blk) -> [(ns, ino, level)]
 fr = collections.defaultdict(list)     # (dev, blk) -> [(ns, ino)]
 ts = collections.defaultdict(list)     # (dev, parent) -> [(ns, slot, old, new, ino)]
 sc = []
+cr = []
 n = collections.Counter()
 for l in lines:
     f = l.split()
@@ -43,6 +48,9 @@ for l in lines:
             fr[(int(f[2]), int(f[3]))].append((int(f[1]), int(f[4])))
         elif t == 'TS':
             ts[(int(f[2]), int(f[3]))].append((int(f[1]), int(f[4]), int(f[5]), int(f[6]), int(f[7])))
+        elif t == 'CR':
+            cr.append(dict(t0=int(f[1]), t1=int(f[1]), tid=int(f[2]), dev=int(f[3]),
+                           blk=int(f[4]), state=int(f[5]), corr=0, rc=0, cr=True))
         elif t == 'SC':
             sc.append(dict(t0=int(f[1]), t1=int(f[2]), tid=int(f[3]), dev=int(f[4]),
                            blk=int(f[5]), corr=int(f[6]), rc=int(f[7])))
@@ -78,10 +86,12 @@ if unwritten:
 
 wb = [x for x in sc if x['corr'] > 0]
 unc = [x for x in sc if x['rc'] != 0]
-print(f"\nreecritures par le scrubber : {len(wb)} ; blocs declares incorrigibles : {len(unc)}")
+dirty_cr = [x for x in cr if (x['state'] >> 1) & 1]
+print(f"\nverifications : {len(sc)} ; reecritures : {len(wb)} ; incorrigibles : {len(unc)} ; "
+      f"relectures de confirmation : {len(cr)}, dont {len(dirty_cr)} sur un tampon sale")
 
 hits = collections.Counter()
-for x in sc:
+for x in sc + cr:
     key = (x['dev'], x['blk'])
     walk = [w for w in sw.get(x['tid'], []) if w[0] <= x['t0'] and w[3] == 1 and w[1] == x['dev']]
     parent = walk[-1] if walk else None
@@ -105,8 +115,18 @@ for x in sc:
     if x['blk'] in unwritten:
         marks.append("INDIRECT JAMAIS ECRIT selon tree-detail")
         hits['unwritten'] += 1
-    what = f"reecrit ({x['corr']} sous-bloc(s) corrige(s))" if x['corr'] > 0 else f"incorrigible (rc {x['rc']})"
-    if not marks and x['corr'] == 0:
+    if x.get('cr'):
+        dirty = (x['state'] >> 1) & 1
+        what = f"RELU DU DISQUE par la confirmation, tampon {'SALE' if dirty else 'propre'} (etat 0x{x['state']:x})"
+        if dirty and (moves or held):
+            hits['dirty_cr'] += 1
+    elif x['corr'] > 0:
+        what = f"reecrit ({x['corr']} sous-bloc(s) corrige(s))"
+    elif x['rc'] != 0:
+        what = f"incorrigible (rc {x['rc']})"
+    else:
+        what = "verifie, rien a corriger"
+    if not marks and x['corr'] == 0 and not x.get('cr'):
         continue
     print(f"\n  {s(x['t1'])} bloc {x['blk']} dev {x['dev']} : {what}")
     if parent:
@@ -119,7 +139,8 @@ for x in sc:
     for mk in marks:
         print(f"      <== {mk}")
 
-print(f"\nbilan : {len(wb)} reecriture(s), {len(unc)} incorrigible(s) ; "
+print(f"\nbilan : {len(wb)} reecriture(s), {len(unc)} incorrigible(s), {len(cr)} relecture(s) dont "
+      f"{hits['dirty_cr']} d'un tampon sale ayant change de mains ; "
       f"changes de mains pendant la marche : {hits['moved']} ; "
       f"portaient des pointeurs : {hits['held']} ; "
       f"parents d'un LOST POINTER : {hits['lost']} ; indirects jamais ecrits : {hits['unwritten']}")
