@@ -1592,7 +1592,7 @@ fn enumerate_tests(c: &NodeConn, selection: &str, budget: Duration)
      * output either way.
      *
      * Not under /tmp, and not named .out: the harness's _wrapup runs
-     * rm -f /tmp/*.out /tmp/*.err when check exits, and on 2026-09-28
+     * rm -f on the .out and .err files of /tmp when check exits, and on 2026-09-28
      * the listing on x86-01 finished within the first minute and took
      * its own output with it, while this side polled an absent file
      * for ten minutes (the probe ended in a tail that failed, so the
