@@ -22,11 +22,11 @@ on failure, written as it goes, so a run killed halfway keeps everything
 it measured.
 .IP
 Listing the selection (./check -n on the node) is given the trial
-budget, XFSTESTS_TRIAL_TIMEOUT or 1900 seconds, since 2.3.50; it had
+budget, XFSTESTS_TRIAL_TIMEOUT or 1900 seconds, since 2.3.49; it had
 the per-test budget of 300 seconds, which the whole suite does not fit
 on an emulated aarch64 node, and the sweep ended before its first
 test. The domain a sweep reads the console of when the node stops
-answering is beamfs-<node>, the node's own; until 2.3.50 it was the
+answering is beamfs-<node>, the node's own; until 2.3.49 it was the
 x86 lab's whatever node was named.
 .IP
 Since 2.3.50 the listing runs detached on the node and is watched from
@@ -35,6 +35,13 @@ has produced and the last one, and it stops the listing after ten
 minutes without a new line, or when the budget is spent, naming the
 last test resolved and keeping the harness's output under
 evidence/listing/. A listing that ends without a test also keeps it.
+.IP
+Since 2.3.51 the sweep's preparation writes this node's TEST_DEV and
+SCRATCH_DEV into the harness's local.config, and the sweep checks the
+header of the listing against the configuration before running a
+test. The image's local.config names /dev/vdc as the scratch device,
+which is x86-01's; on compute01 that is a USB slot of the bench, and
+every aarch64 sweep until 2.3.51 had the harness format it at start.
 .TP
 .B soak [seconds]
 Random 4 KiB O_DIRECT writes on the bare scratch device for the given
@@ -183,11 +190,11 @@ without any commit.
 The fsck.beamfs and mkfs.beamfs it pushes follow the machine's
 architecture. For a machine of this station's architecture they are
 built here, static; for any other they are the ones bitbake built for
-that machine, taken from its build tree. Until 2.3.50 every machine got
+that machine, taken from its build tree. Until 2.3.46 every machine got
 the station's build, and an aarch64 node carried tools that could not
 start.
 .IP
-Since 2.3.50 the node is ready when it takes a write under /usr/sbin,
+Since 2.3.48 the node is ready when it takes a write under /usr/sbin,
 where the tools go, not when it answers ssh: a root filesystem that
 came up read-only answers like any other, and every step after it then
 failed in its own words. When the write fails, deploy prints the
@@ -218,6 +225,12 @@ about the test volumes.
 Since 2.3.0. Safe during a campaign: it starts, kills and mounts
 nothing. Exit status is 1 if a node could not be reached, 0 otherwise --
 a node with concerns is still a node that answered.
+.IP
+.B nodes exec
+.I command
+runs one command on the first configured node through the tool's own
+connection and prints its output and exit code as they are, since
+2.3.51.
 .TP
 .B nodes failures
 Print, whole, what the runner kept on each node under
@@ -630,7 +643,7 @@ run.
 .B XFSTESTS_KEEP_IMAGE
 Whether check keeps a compressed copy of a volume it declared
 inconsistent (DUMP_CORRUPT_FS), as it found it, next to the results.
-On by default since 2.3.50; set it to 0 to spend no disk on it.
+On by default since 2.3.45; set it to 0 to spend no disk on it.
 .IP
 It was off, and the frozen image of a test device came from a
 .B dd
@@ -690,11 +703,11 @@ the device taken with O_DIRECT, past the page cache altogether, since
 flushbufs leaves a folio alone while a buffer on it is still held. The
 file ends with the three counts of undescribed indirect blocks and a
 VERDICT line saying whether the readings agree.
-Since 2.3.50 a failing test also freezes the host's side of the
+Since 2.3.45 a failing test also freezes the host's side of the
 scratch device: the backing file libvirt reports for it, read on the
 station with O_DIRECT, kept as scratch-host.img.zst beside the
 guest's scratch.img.zst, so the two can be compared block by block.
-The configuration file also accepts ssh_key and user since 2.3.50:
+The configuration file also accepts ssh_key and user since 2.3.45:
 the key and the account that open the nodes.
 .TP
 .B checkpoint
@@ -815,11 +828,11 @@ The script is taken as attached when it has printed a line of its
 own, which a script does from
 .BR BEGIN .
 bpftrace announces "Attaching N probes" before the probes are armed,
-and until 2.3.50 that announcement was the signal: a script slow to
+and until 2.3.47 that announcement was the signal: a script slow to
 arm missed the whole write phase of the test it was meant to watch.
 A script that prints nothing in BEGIN is given the full attach
 ceiling before the test starts. scripts/undeposited.bt, added in
-2.3.50, keeps every allocation, pointer store, parity deposit and
+2.3.47, keeps every allocation, pointer store, parity deposit and
 free of the test devices by block, with stacks and times, and
 scripts/undeposited.py joins them with the indirect blocks fsck names
 on the frozen images.

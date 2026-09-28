@@ -191,6 +191,8 @@ fn main() -> std::process::ExitCode {
         Some("soak") => do_soak(&cfg, args.get(2)),
         Some("sweep") => do_sweep(&cfg, &args[2..]),
         Some("deploy") => do_deploy(&cfg, args.get(2)),
+        Some("nodes") if args.get(2).map(String::as_str) == Some("exec") =>
+            nodes::exec(&cfg, &args[3..]),
         Some("nodes") => nodes::status(&cfg, args.get(2)),
         Some("checkpoint") => {
             checkpoint::report(&cfg, cfg.nodes.first());
@@ -278,6 +280,7 @@ deploy   put the newest image and this repo's tools on a node,\n\
                   deploy [node]       (default: the first configured)\n\
          nodes    say what each configured node is, and change nothing\n\
                   nodes status        one round trip per node\n\
+                  nodes exec <cmd>    one command on the first node, output and rc as they are\n\
          stop     kill the shards and release the mounts, and check\n\
                   that they are gone\n\
                   stop --hard         restart a node that will not let go\n\

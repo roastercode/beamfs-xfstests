@@ -388,6 +388,20 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str, tracing: bool)
         other => format!("mkfs.{other} -q -F {mkfs_opts}"),
     };
     /*
+     * The devices, from this node's configuration.
+     *
+     * local.config in the image names /dev/vdb and /dev/vdc, which is
+     * x86-01; on compute01 vdc is a 14.6 GiB USB slot of the bench and
+     * the scratch device is vdh. prepare rewrote MKFS_OPTIONS and FSTYP
+     * in that file and never the devices, so every aarch64 sweep had
+     * check format the USB slot at start, spend its listing budget in
+     * that mkfs, and leave a beamfs superblock the bench's pre-flight
+     * then found (2026-09-28: three listings ended in "did not finish",
+     * one slot declared dead twice).
+     */
+    let test_dev = c.node.test_dev.as_str();
+    let scratch_dev = c.node.scratch_dev.as_str();
+    /*
      * A copy of the volume on failure, only when it is asked for.
      *
      * DUMP_CORRUPT_FS makes the harness dd the whole device and run it
@@ -402,7 +416,7 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str, tracing: bool)
      * verdicts, and a sweep over the known failures would have spent
      * three and a half hours compressing.
      */
-    // On by default since 2.3.50. _check_generic_filesystem remakes the
+    // On by default since 2.3.45. _check_generic_filesystem remakes the
     // test device when its own check fails, so the only image of that
     // device as check found it is the one check keeps itself: with the
     // dump off, generic/013 on 2026-09-26 came back with a frozen image
@@ -446,6 +460,8 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str, tracing: bool)
          rm -f /usr/xfstests/results/generic/*.img /usr/xfstests/results/generic/*.img.*; \
          sed -i \"/^export DUMP_CORRUPT_FS=/d\" /usr/xfstests/local.config; \
          echo \"export DUMP_CORRUPT_FS={dumpfs}\" >> /usr/xfstests/local.config; \
+         sed -i \"s|^export TEST_DEV=.*|export TEST_DEV=/dev/{test_dev}|\" /usr/xfstests/local.config; \
+         sed -i \"s|^export SCRATCH_DEV=.*|export SCRATCH_DEV=/dev/{scratch_dev}|\" /usr/xfstests/local.config; \
          printf \"dumpfs={dumpfs}\\n\"; \
          sed -i \"s|^export MKFS_OPTIONS=.*|export MKFS_OPTIONS=\\\"{mkfs_opts}\\\"|\" /usr/xfstests/local.config; \
          sed -i \"s|^export FSTYP=.*|export FSTYP={fstyp}|\" /usr/xfstests/local.config; \
@@ -1647,6 +1663,22 @@ fn enumerate_tests(c: &NodeConn, selection: &str, budget: Duration)
     let out = c.run("cat /tmp/bx-listing.out", Duration::from_secs(60))
         .map_err(|e| format!("reading the listing: {e}"))?;
     println!("  listing : done in {} s", t0.elapsed().as_secs());
+
+    // What the harness will format is what this node's configuration
+    // names, or nothing is measured.
+    let want = format!("/dev/{}", c.node.scratch_dev);
+    for l in out.lines() {
+        if let Some(rest) = l.strip_prefix("MOUNT_OPTIONS") {
+            let dev = rest.trim_start_matches([' ', '-']).split_whitespace().next().unwrap_or("");
+            if dev != want {
+                return Err(format!(
+                    "the harness would format {dev} as its scratch device while this \
+                     node's configuration names {want}: local.config on the node \
+                     disagrees with the configuration; nothing measured"));
+            }
+            println!("  scratch : {dev}, as configured");
+        }
+    }
 
     let mut v: Vec<String> = out
         .split_whitespace()

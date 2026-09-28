@@ -192,6 +192,39 @@ pub fn failures(cfg: &Config) -> std::process::ExitCode {
 }
 
 /// Print what every configured node is, and stop there.
+/// One command on the first configured node, its output and exit code
+/// shown as they are.
+///
+/// For looking at a node through the tool's own connection when one of
+/// the tool's own commands misbehaves there: on 2026-09-28 the detached
+/// listing of 2.3.50 produced nothing on x86-01 and worked on compute01,
+/// and there was no way to ask x86-01 what it had done with it.
+pub fn exec(cfg: &Config, words: &[String]) -> std::process::ExitCode {
+    let Some(n) = cfg.nodes.first() else {
+        eprintln!("  no nodes configured");
+        return std::process::ExitCode::from(2);
+    };
+    if words.is_empty() {
+        eprintln!("  nodes exec <command>");
+        return std::process::ExitCode::from(2);
+    }
+    let c = NodeConn::new(n, cfg);
+    match c.run_rc(&words.join(" "), Duration::from_secs(120)) {
+        Ok((out, rc)) => {
+            print!("{out}");
+            if !out.ends_with('\n') {
+                println!();
+            }
+            println!("  rc={rc}");
+            if rc == 0 { std::process::ExitCode::SUCCESS } else { std::process::ExitCode::from(1) }
+        }
+        Err(e) => {
+            eprintln!("  {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 pub fn status(cfg: &Config, what: Option<&String>) -> std::process::ExitCode {
     if let Some(other) = what.map(String::as_str) {
         if other == "failures" {

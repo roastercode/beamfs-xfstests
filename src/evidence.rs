@@ -406,7 +406,7 @@ pub fn collect(cfg: &Config, node: &Node, case: &Case, check_output: &str) {
         // until 2.3.17 the only file in /tmp/xfs-failures this
         // collection did not bring back: generic/074 on 2026-09-22
         // came with the fsck of a mounted volume and nothing of this.
-        // Until 2.3.50 it was asked for under the test's name with its
+        // Until 2.3.45 it was asked for under the test's name with its
         // slash, generic/013.log, while the runner writes generic-013.log:
         // every failing case said "no runner log" and the log sat there.
         ("runner.log", "@runner".into()),
