@@ -1,0 +1,109 @@
+#!/usr/bin/env bpftrace
+/*
+ * What the scrubber writes back, against who owned the block by then.
+ *
+ * generic/083, seed 274870549, 2026-09-28: 5 failures in 16 trials
+ * with the scrubber at 100 ms, 0 in 8 with it stopped. The failures
+ * are pointers that vanish from indirect blocks (treecheck: held 7428,
+ * read as 0) and an indirect block holding a data file's bytes.
+ *
+ * beamfs_scrub_check_block copies a block under lock_buffer, drops the
+ * lock, decodes the copy, and when it corrected anything copies it
+ * back into the buffer and marks it dirty, without checking that the
+ * buffer still holds what it copied. beamfs_scrub_walk_level visits
+ * the leaves of an indirect block from a copy of its pointers taken at
+ * the start, sleeping the pace interval between leaves, and asks only
+ * whether each leaf is still allocated. This keeps, printed as it
+ * happens on the two test devices:
+ *
+ *   SC  every check_block that corrected (and so wrote back) or found
+ *       a subblock uncorrectable, with its start and end times;
+ *   SW  every indirect block the walk starts on;
+ *   AL, FR  every allocation and free;
+ *   TS  every pointer stored into an indirect block (beamfs_tc_store).
+ *
+ * scripts/scrubwb.py says, for each write-back, whether the block
+ * changed hands since the walk began and whether it held pointers
+ * when it was written over.
+ *
+ * BX_TEST_DEV and BX_SCRATCH_DEV are put in by beamfs-xfstests.
+ */
+
+BEGIN
+{
+    printf("scrub write-backs against block ownership\n");
+    printf("devs test %u scratch %u\n", BX_TEST_DEV, BX_SCRATCH_DEV);
+}
+
+kprobe:beamfs_scrub_check_block
+{
+    $sb = (struct super_block *)arg0;
+    if ($sb->s_dev == BX_TEST_DEV || $sb->s_dev == BX_SCRATCH_DEV) {
+        @sc_dev[tid] = $sb->s_dev;
+        @sc_phys[tid] = arg1;
+        @sc_corr[tid] = arg2;
+        @sc_ns[tid] = nsecs;
+    }
+}
+
+kretprobe:beamfs_scrub_check_block /@sc_dev[tid]/
+{
+    $c = *(uint32 *)@sc_corr[tid];
+    $rc = (int32)retval;
+    @checks = count();
+    if ($c > 0 || $rc != 0) {
+        printf("SC %llu %llu %d %u %llu %u %d\n", @sc_ns[tid], nsecs, tid,
+               @sc_dev[tid], @sc_phys[tid], $c, $rc);
+    }
+    delete(@sc_dev[tid]);
+    delete(@sc_phys[tid]);
+    delete(@sc_corr[tid]);
+    delete(@sc_ns[tid]);
+}
+
+/*
+ * The start of the walk over one indirect block. beamfs_scrub_walk_level
+ * is static and not traceable; the first thing it does with an indirect
+ * block is beamfs_ind_parity_verify_medium(sb, bh), and the last such
+ * call on a thread before a leaf is checked names the leaf's parent.
+ */
+kprobe:beamfs_ind_parity_verify_medium
+{
+    $sb = (struct super_block *)arg0;
+    $bh = (struct buffer_head *)arg1;
+    if ($sb->s_dev == BX_TEST_DEV || $sb->s_dev == BX_SCRATCH_DEV) {
+        printf("SW %llu %d %u %llu 1\n", nsecs, tid, $sb->s_dev,
+               $bh->b_blocknr);
+    }
+}
+
+tracepoint:beamfs:beamfs_block_alloc
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    printf("AL %llu %u %llu %llu %d\n", nsecs, args.dev, args.blk,
+           args.ino, args.level);
+}
+
+tracepoint:beamfs:beamfs_block_free
+/args.dev == BX_TEST_DEV || args.dev == BX_SCRATCH_DEV/
+{
+    printf("FR %llu %u %llu %llu\n", nsecs, args.dev, args.blk, args.ino);
+}
+
+kprobe:beamfs_tc_store
+{
+    $sb = (struct super_block *)arg0;
+    if ($sb->s_dev == BX_TEST_DEV || $sb->s_dev == BX_SCRATCH_DEV) {
+        printf("TS %llu %u %llu %u %llu %llu %llu\n", nsecs, $sb->s_dev,
+               arg2, (uint32)arg3, arg4, arg5, arg1);
+    }
+}
+
+END
+{
+    clear(@sc_dev);
+    clear(@sc_phys);
+    clear(@sc_corr);
+    clear(@sc_ns);
+    printf("end\n");
+}

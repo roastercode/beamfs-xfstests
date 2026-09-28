@@ -859,6 +859,14 @@ prints it and keeps it in the case as seed. A bench no longer writes
 into a previous run's case directory: that directory is moved aside
 as <case>.prev-<time>. scripts/nlink.py runs fsck with -v, which is
 when fsck names the inodes.
+.IP
+scripts/scrubwb.bt, added in 2.3.56, prints every check of a block by
+the scrubber that corrected it, and so wrote its copy back, or found it
+uncorrectable, every indirect block the scrubber's walk starts on,
+every allocation and free, and every pointer stored into an indirect
+block; scripts/scrubwb.py says, for each write-back, whether the block
+changed hands between the start of the walk and the write and whether
+it held pointers when it was written over.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's
