@@ -1,45 +1,39 @@
 #!/usr/bin/env bpftrace
 /*
- * What the scrubber writes back, against who owned the block by then.
+ * What the scrubber reads and writes back, against who owned the block.
  *
- * generic/083, seed 274870549, 2026-09-28: 5 failures in 16 trials
- * with the scrubber at 100 ms, 0 in 8 with it stopped. The failures
- * are pointers that vanish from indirect blocks (treecheck: held 7428,
- * read as 0) and an indirect block holding a data file's bytes.
+ * generic/083, seed 274870549, 2026-09-28: 7 failures in 36 trials
+ * with the scrubber at 100 ms, 0 in 8 with it parked. Up to beamfs
+ * 0.1.22 every write-back and every "uncorrectable" verdict of the
+ * sweep traced (17 of 17) was on a block freed and allocated to
+ * another file since the walk began (known-limitations 3.39).
  *
- * beamfs_scrub_check_block copies a block under lock_buffer, drops the
- * lock, decodes the copy, and when it corrected anything copies it
- * back into the buffer and marks it dirty, without checking that the
- * buffer still holds what it copied. beamfs_scrub_walk_level visits
- * the leaves of an indirect block from a copy of its pointers taken at
- * the start, sleeping the pace interval between leaves, and asks only
- * whether each leaf is still allocated. This keeps, printed as it
- * happens on the two test devices:
+ * beamfs 0.1.23 asks the file that owns a leaf, under its allocation
+ * mutex, before it reads the leaf and again before it writes it back,
+ * and returns -ESTALE (-116) when the leaf is no longer in that file.
+ * check_block takes the owner and the logical block as its fourth and
+ * fifth arguments (NULL and 0 from the wear step, which never writes).
+ * This keeps, printed as it happens on the two test devices:
  *
- *   SC  every check_block that corrected (and so wrote back) or found
- *       a subblock uncorrectable, with its start and end times;
- *   SW  every indirect block the walk starts on;
- *   AL, FR  every allocation and free;
+ *   SC  every check_block: start, end, thread, device, block,
+ *       subblocks corrected, return code, owner inode, logical block;
+ *   WB  every write-back: mark_buffer_dirty on the checked block,
+ *       from inside check_block;
+ *   CR  every confirming read of the medium (submit_bio_wait from
+ *       inside check_block);
+ *   SW  every indirect block a walk verifies;
+ *   AL, FR  every allocation and free, with the inode;
  *   TS  every pointer stored into an indirect block (beamfs_tc_store).
  *
- * Since 2.3.57 every check is printed, not only those that corrected
- * or failed, and so is the confirming read check_block makes when a
- * subblock does not decode: it clears the uptodate bit of the shared
- * buffer and reads the medium into it again, and a buffer that carried
- * changes not yet written loses them to what the disk held. CR gives
- * the block and the state bits the buffer had at that moment (bit 1,
- * BH_Dirty: changes not yet on the medium).
- *
- * scripts/scrubwb.py says, for each write-back and each confirming
- * read, whether the block changed hands since the walk began, whether
- * it held pointers when it was touched, and whether it was dirty.
+ * scripts/scrubwb.py says, for every block the scrubber decoded and
+ * every block it wrote, whether another inode held it at that moment.
  *
  * BX_TEST_DEV and BX_SCRATCH_DEV are put in by beamfs-xfstests.
  */
 
 BEGIN
 {
-    printf("scrub write-backs against block ownership\n");
+    printf("scrub reads and write-backs against block ownership, v3\n");
     printf("devs test %u scratch %u\n", BX_TEST_DEV, BX_SCRATCH_DEV);
 }
 
@@ -51,23 +45,31 @@ kprobe:beamfs_scrub_check_block
         @sc_phys[tid] = arg1;
         @sc_corr[tid] = arg2;
         @sc_ns[tid] = nsecs;
+        @sc_ib[tid] = arg4;
+        if (arg3 != 0) {
+            @sc_ino[tid] = ((struct inode *)arg3)->i_ino;
+        } else {
+            @sc_ino[tid] = 0;
+        }
     }
 }
 
 /*
- * Inside a check: the first block read is the snapshot, and its buffer
- * is kept; a second read of the same block is the confirming one.
+ * Inside a check, the checked block dirtied is the write-back; other
+ * buffers dirtied there (the RS journal, the budget) are not.
  */
-kretprobe:__bread_gfp /@sc_dev[tid] && !@sc_bh[tid]/
+kprobe:mark_buffer_dirty /@sc_dev[tid]/
 {
-    @sc_bh[tid] = retval;
+    $bh = (struct buffer_head *)arg0;
+    if ($bh->b_blocknr == @sc_phys[tid]) {
+        printf("WB %llu %d %u %llu\n", nsecs, tid, @sc_dev[tid],
+               $bh->b_blocknr);
+    }
 }
 
-kprobe:__bread_gfp /@sc_dev[tid] && @sc_bh[tid]/
+kprobe:submit_bio_wait /@sc_dev[tid]/
 {
-    $bh = (struct buffer_head *)@sc_bh[tid];
-    printf("CR %llu %d %u %llu %lu\n", nsecs, tid, @sc_dev[tid],
-           arg1, $bh->b_state);
+    printf("CR %llu %d %u %llu\n", nsecs, tid, @sc_dev[tid], @sc_phys[tid]);
 }
 
 kretprobe:beamfs_scrub_check_block /@sc_dev[tid]/
@@ -75,20 +77,21 @@ kretprobe:beamfs_scrub_check_block /@sc_dev[tid]/
     $c = *(uint32 *)@sc_corr[tid];
     $rc = (int32)retval;
     @checks = count();
-    printf("SC %llu %llu %d %u %llu %u %d\n", @sc_ns[tid], nsecs, tid,
-           @sc_dev[tid], @sc_phys[tid], $c, $rc);
+    printf("SC %llu %llu %d %u %llu %u %d %llu %llu\n", @sc_ns[tid], nsecs,
+           tid, @sc_dev[tid], @sc_phys[tid], $c, $rc, @sc_ino[tid],
+           @sc_ib[tid]);
     delete(@sc_dev[tid]);
     delete(@sc_phys[tid]);
     delete(@sc_corr[tid]);
     delete(@sc_ns[tid]);
-    delete(@sc_bh[tid]);
+    delete(@sc_ib[tid]);
+    delete(@sc_ino[tid]);
 }
 
 /*
- * The start of the walk over one indirect block. beamfs_scrub_walk_level
- * is static and not traceable; the first thing it does with an indirect
- * block is beamfs_ind_parity_verify_medium(sb, bh), and the last such
- * call on a thread before a leaf is checked names the leaf's parent.
+ * An indirect block the walk verifies. beamfs_scrub_walk_level is
+ * static and not traceable; it verifies each indirect block it walks,
+ * after asking the owner whether the block is still its own.
  */
 kprobe:beamfs_ind_parity_verify_medium
 {
@@ -128,6 +131,7 @@ END
     clear(@sc_phys);
     clear(@sc_corr);
     clear(@sc_ns);
-    clear(@sc_bh);
+    clear(@sc_ib);
+    clear(@sc_ino);
     printf("end\n");
 }

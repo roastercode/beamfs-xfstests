@@ -872,6 +872,14 @@ scrubber makes when a subblock does not decode, with the state bits
 the shared buffer had at that moment: the confirming read clears the
 buffer's uptodate bit and reads the medium into it again, and a buffer
 carrying changes not yet written loses them.
+Since 2.3.58 it follows beamfs 0.1.23, where the scrubber asks the file
+that owns a block before it reads it and again before it writes it
+back, and skips it with -ESTALE when the block is no longer that file's:
+every check is printed with the owner inode and the logical block,
+every write-back and every confirming read of the medium on their own
+lines, and scripts/scrubwb.py reports any block the scrubber decoded or
+wrote while its last allocation named another inode or after it was
+freed. Traces of 0.1.22 and earlier are read as before.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's
