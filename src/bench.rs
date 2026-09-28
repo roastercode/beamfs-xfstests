@@ -1590,13 +1590,21 @@ fn enumerate_tests(c: &NodeConn, selection: &str, budget: Duration)
      * line every thirty seconds, says so every minute, stops it after
      * ten minutes without a new line or at the budget, and keeps the
      * output either way.
+     *
+     * Not under /tmp, and not named .out: the harness's _wrapup runs
+     * rm -f /tmp/*.out /tmp/*.err when check exits, and on 2026-09-28
+     * the listing on x86-01 finished within the first minute and took
+     * its own output with it, while this side polled an absent file
+     * for ten minutes (the probe ended in a tail that failed, so the
+     * whole probe read as an error and said nothing). The probe now
+     * always exits 0.
      */
     let started = c.run(
         &format!(
-            "cat > /tmp/bx-listing.sh <<'BXEOF'\n{cmd}\nBXEOF\n\
-             chmod +x /tmp/bx-listing.sh; rm -f /tmp/bx-listing.out /tmp/bx-listing.rc; \
-             nohup sh -c '/tmp/bx-listing.sh; echo $? > /tmp/bx-listing.rc' \
-             > /tmp/bx-listing.out 2>&1 < /dev/null & echo started"),
+            "cat > /var/tmp/bx-listing.sh <<'BXEOF'\n{cmd}\nBXEOF\n\
+             chmod +x /var/tmp/bx-listing.sh; rm -f /var/tmp/bx-listing.txt /var/tmp/bx-listing.rc; \
+             nohup sh -c '/var/tmp/bx-listing.sh; echo $? > /var/tmp/bx-listing.rc' \
+             > /var/tmp/bx-listing.txt 2>&1 < /dev/null & echo started"),
         Duration::from_secs(30))
         .map_err(|e| format!("starting the listing on the node: {e}"))?;
     if !started.contains("started") {
@@ -1613,9 +1621,9 @@ fn enumerate_tests(c: &NodeConn, selection: &str, budget: Duration)
     loop {
         std::thread::sleep(Duration::from_secs(30));
         let probe = c.run(
-            "test -f /tmp/bx-listing.rc && echo BX_DONE; \
-             wc -l < /tmp/bx-listing.out 2>/dev/null; \
-             tail -n 1 /tmp/bx-listing.out 2>/dev/null",
+            "test -f /var/tmp/bx-listing.rc && echo BX_DONE; \
+             wc -l < /var/tmp/bx-listing.txt 2>/dev/null; \
+             tail -n 1 /var/tmp/bx-listing.txt 2>/dev/null; true",
             Duration::from_secs(20))
             .unwrap_or_default();
         let mut it = probe.lines();
@@ -1660,7 +1668,7 @@ fn enumerate_tests(c: &NodeConn, selection: &str, budget: Duration)
         }
     }
 
-    let out = c.run("cat /tmp/bx-listing.out", Duration::from_secs(60))
+    let out = c.run("cat /var/tmp/bx-listing.txt", Duration::from_secs(60))
         .map_err(|e| format!("reading the listing: {e}"))?;
     println!("  listing : done in {} s", t0.elapsed().as_secs());
 
@@ -1711,7 +1719,7 @@ fn keep_listing_output(c: &NodeConn) -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let p = dir.join(format!("{}-{stamp}.out", crate::lab::machine()));
-    match c.run("cat /tmp/bx-listing.out 2>/dev/null", Duration::from_secs(60)) {
+    match c.run("cat /var/tmp/bx-listing.txt 2>/dev/null", Duration::from_secs(60)) {
         Ok(out) => {
             let _ = std::fs::write(&p, out);
             p.display().to_string()
