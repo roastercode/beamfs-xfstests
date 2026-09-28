@@ -843,6 +843,13 @@ ceiling before the test starts. scripts/undeposited.bt, added in
 free of the test devices by block, with stacks and times, and
 scripts/undeposited.py joins them with the indirect blocks fsck names
 on the frozen images.
+scripts/nlink.bt, added in 2.3.54, prints every change of a link count
+on the test devices with the namespace operation it happened in, every
+directory entry added or removed with its result, and the count each
+write of an inode carried; scripts/nlink.py replays them for the inodes
+whose link count fsck disputes on the frozen images, from the last
+mount of their device, and says whether the count and the names parted
+in memory or only on the medium.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's

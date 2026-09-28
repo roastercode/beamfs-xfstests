@@ -1,0 +1,315 @@
+#!/usr/bin/env bpftrace
+/*
+ * Link counts against directory entries.
+ *
+ * generic/083 of the rc5 sweep of 2026-09-28: one inode, not a
+ * directory, records 2 links on the medium and 1 entry names it. The
+ * history of the saved runs has 083 failing in 18 of 32 and 241 in 7
+ * of 26, so this is old and intermittent. The error paths of link,
+ * unlink and rename, read, undo what they do; reading did not find it.
+ *
+ * Printed as it happens, on the two test devices only: every change of
+ * a link count (inc_nlink, drop_nlink, set_nlink, clear_nlink) with the
+ * namespace operation it happened in, every entry added or removed
+ * (beamfs_add_dirent, beamfs_del_dirent) with its result, every
+ * namespace operation with its names and its result, every inode
+ * handed to beamfs_write_inode_raw with the count it carried, and each
+ * mount. scripts/nlink.py replays them for the inodes fsck names on the
+ * frozen image, from the last mount of their device, and says whether
+ * the count and the names parted in memory or only on the medium.
+ *
+ * Names are printed up to bpftrace's string limit with their length
+ * beside them: fsstress pads its names with X, and the length is what
+ * tells two long names apart.
+ *
+ * BX_TEST_DEV and BX_SCRATCH_DEV are put in by beamfs-xfstests; the
+ * root filesystem of the node is beamfs too and would otherwise count.
+ */
+
+BEGIN
+{
+    printf("link counts against directory entries\n");
+    printf("devs test %u scratch %u\n", BX_TEST_DEV, BX_SCRATCH_DEV);
+}
+
+kprobe:beamfs_fill_super
+{
+    $sb = (struct super_block *)arg0;
+    if ($sb->s_dev == BX_TEST_DEV || $sb->s_dev == BX_SCRATCH_DEV) {
+        printf("MOUNT %llu %u\n", nsecs, $sb->s_dev);
+    }
+}
+
+/* Namespace operations. @ctx names the one a link count changes in. */
+
+kprobe:beamfs_link
+{
+    $od = (struct dentry *)arg0;
+    $dir = (struct inode *)arg1;
+    $nd = (struct dentry *)arg2;
+    $dev = $dir->i_sb->s_dev;
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        @ctx[tid] = 1;
+        @in_link[tid] = 1;
+        printf("OP %llu %d %u link %lu %lu %u %s\n", nsecs, tid, $dev,
+               $dir->i_ino, $od->d_inode->i_ino,
+               $nd->d_name.len, str($nd->d_name.name));
+    }
+}
+kretprobe:beamfs_link /@in_link[tid]/
+{
+    printf("OX %llu %d link %d\n", nsecs, tid, (int32)retval);
+    delete(@in_link[tid]);
+    delete(@ctx[tid]);
+}
+
+kprobe:beamfs_unlink
+{
+    $dir = (struct inode *)arg0;
+    $d = (struct dentry *)arg1;
+    $dev = $dir->i_sb->s_dev;
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        @ctx[tid] = 2;
+        @in_unlink[tid] = 1;
+        printf("OP %llu %d %u unlink %lu %lu %u %s\n", nsecs, tid, $dev,
+               $dir->i_ino, $d->d_inode->i_ino,
+               $d->d_name.len, str($d->d_name.name));
+    }
+}
+kretprobe:beamfs_unlink /@in_unlink[tid]/
+{
+    printf("OX %llu %d unlink %d\n", nsecs, tid, (int32)retval);
+    delete(@in_unlink[tid]);
+    delete(@ctx[tid]);
+}
+
+kprobe:beamfs_rmdir
+{
+    $dir = (struct inode *)arg0;
+    $d = (struct dentry *)arg1;
+    $dev = $dir->i_sb->s_dev;
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        @ctx[tid] = 6;
+        @in_rmdir[tid] = 1;
+        printf("OP %llu %d %u rmdir %lu %lu %u %s\n", nsecs, tid, $dev,
+               $dir->i_ino, $d->d_inode->i_ino,
+               $d->d_name.len, str($d->d_name.name));
+    }
+}
+kretprobe:beamfs_rmdir /@in_rmdir[tid]/
+{
+    printf("OX %llu %d rmdir %d\n", nsecs, tid, (int32)retval);
+    delete(@in_rmdir[tid]);
+    delete(@ctx[tid]);
+}
+
+kprobe:beamfs_rename
+{
+    $odir = (struct inode *)arg1;
+    $od = (struct dentry *)arg2;
+    $ndir = (struct inode *)arg3;
+    $nd = (struct dentry *)arg4;
+    $dev = $odir->i_sb->s_dev;
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        @ctx[tid] = 3;
+        @in_rename[tid] = 1;
+        $ni = (uint64)$nd->d_inode;
+        $nino = (uint64)0;
+        if ($ni != 0) {
+            $nino = ((struct inode *)$ni)->i_ino;
+        }
+        printf("RN %llu %d %u %lu %lu %lu %llu %u %s %u %s\n", nsecs, tid, $dev,
+               $odir->i_ino, $od->d_inode->i_ino, $ndir->i_ino, $nino,
+               $od->d_name.len, str($od->d_name.name),
+               $nd->d_name.len, str($nd->d_name.name));
+    }
+}
+kretprobe:beamfs_rename /@in_rename[tid]/
+{
+    printf("OX %llu %d rename %d\n", nsecs, tid, (int32)retval);
+    delete(@in_rename[tid]);
+    delete(@ctx[tid]);
+}
+
+kprobe:beamfs_create
+{
+    $dir = (struct inode *)arg1;
+    $d = (struct dentry *)arg2;
+    $dev = $dir->i_sb->s_dev;
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        @ctx[tid] = 4;
+        @in_create[tid] = 1;
+        printf("OP %llu %d %u create %lu 0 %u %s\n", nsecs, tid, $dev,
+               $dir->i_ino, $d->d_name.len, str($d->d_name.name));
+    }
+}
+kretprobe:beamfs_create /@in_create[tid]/
+{
+    printf("OX %llu %d create %d\n", nsecs, tid, (int32)retval);
+    delete(@in_create[tid]);
+    delete(@ctx[tid]);
+}
+
+kprobe:beamfs_mkdir
+{
+    $dir = (struct inode *)arg1;
+    $d = (struct dentry *)arg2;
+    $dev = $dir->i_sb->s_dev;
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        @ctx[tid] = 5;
+        @in_mkdir[tid] = 1;
+        printf("OP %llu %d %u mkdir %lu 0 %u %s\n", nsecs, tid, $dev,
+               $dir->i_ino, $d->d_name.len, str($d->d_name.name));
+    }
+}
+kretprobe:beamfs_mkdir /@in_mkdir[tid]/
+{
+    /* mkdir returns a dentry pointer or an error pointer */
+    printf("OX %llu %d mkdir %lld\n", nsecs, tid, (int64)retval);
+    delete(@in_mkdir[tid]);
+    delete(@ctx[tid]);
+}
+
+kprobe:beamfs_symlink
+{
+    $dir = (struct inode *)arg1;
+    $d = (struct dentry *)arg2;
+    $dev = $dir->i_sb->s_dev;
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        @ctx[tid] = 7;
+        @in_symlink[tid] = 1;
+        printf("OP %llu %d %u symlink %lu 0 %u %s\n", nsecs, tid, $dev,
+               $dir->i_ino, $d->d_name.len, str($d->d_name.name));
+    }
+}
+kretprobe:beamfs_symlink /@in_symlink[tid]/
+{
+    printf("OX %llu %d symlink %d\n", nsecs, tid, (int32)retval);
+    delete(@in_symlink[tid]);
+    delete(@ctx[tid]);
+}
+
+/* Directory entries, with the result each call returned. */
+
+kprobe:beamfs_add_dirent
+{
+    $dir = (struct inode *)arg0;
+    $dev = $dir->i_sb->s_dev;
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        $q = (struct qstr *)arg1;
+        @ad_dev[tid] = $dev;
+        @ad_dir[tid] = $dir->i_ino;
+        @ad_ino[tid] = arg2;
+        @ad_len[tid] = $q->len;
+        @ad_name[tid] = str($q->name);
+    }
+}
+kretprobe:beamfs_add_dirent /@ad_dev[tid]/
+{
+    printf("AD %llu %d %u %lu %lu %d %u %s\n", nsecs, tid, @ad_dev[tid],
+           @ad_dir[tid], @ad_ino[tid], (int32)retval,
+           @ad_len[tid], @ad_name[tid]);
+    delete(@ad_dev[tid]);
+    delete(@ad_dir[tid]);
+    delete(@ad_ino[tid]);
+    delete(@ad_len[tid]);
+    delete(@ad_name[tid]);
+}
+
+kprobe:beamfs_del_dirent
+{
+    $dir = (struct inode *)arg0;
+    $dev = $dir->i_sb->s_dev;
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        $q = (struct qstr *)arg1;
+        @dd_dev[tid] = $dev;
+        @dd_dir[tid] = $dir->i_ino;
+        @dd_len[tid] = $q->len;
+        @dd_name[tid] = str($q->name);
+    }
+}
+kretprobe:beamfs_del_dirent /@dd_dev[tid]/
+{
+    printf("DD %llu %d %u %lu %d %u %s\n", nsecs, tid, @dd_dev[tid],
+           @dd_dir[tid], (int32)retval, @dd_len[tid], @dd_name[tid]);
+    delete(@dd_dev[tid]);
+    delete(@dd_dir[tid]);
+    delete(@dd_len[tid]);
+    delete(@dd_name[tid]);
+}
+
+/* Link counts: the value before the change, and the operation around it. */
+
+kprobe:inc_nlink
+{
+    $i = (struct inode *)arg0;
+    $dev = $i->i_sb->s_dev;
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        printf("NL %llu %d %u %lu inc %u 0 %d\n", nsecs, tid, $dev,
+               $i->i_ino, $i->i_nlink, @ctx[tid]);
+    }
+}
+
+kprobe:drop_nlink
+{
+    $i = (struct inode *)arg0;
+    $dev = $i->i_sb->s_dev;
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        printf("NL %llu %d %u %lu drop %u 0 %d\n", nsecs, tid, $dev,
+               $i->i_ino, $i->i_nlink, @ctx[tid]);
+    }
+}
+
+kprobe:clear_nlink
+{
+    $i = (struct inode *)arg0;
+    $dev = $i->i_sb->s_dev;
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        printf("NL %llu %d %u %lu clear %u 0 %d\n", nsecs, tid, $dev,
+               $i->i_ino, $i->i_nlink, @ctx[tid]);
+    }
+}
+
+kprobe:set_nlink
+{
+    $i = (struct inode *)arg0;
+    $dev = $i->i_sb->s_dev;
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        printf("NL %llu %d %u %lu set %u %u %d\n", nsecs, tid, $dev,
+               $i->i_ino, $i->i_nlink, (uint32)arg1, @ctx[tid]);
+    }
+}
+
+/* What reaches the inode table: the count each write carried. */
+
+kprobe:beamfs_write_inode_raw
+{
+    $i = (struct inode *)arg0;
+    $dev = $i->i_sb->s_dev;
+    if ($dev == BX_TEST_DEV || $dev == BX_SCRATCH_DEV) {
+        printf("WI %llu %d %u %lu %u %d\n", nsecs, tid, $dev,
+               $i->i_ino, $i->i_nlink, @ctx[tid]);
+    }
+}
+
+END
+{
+    clear(@ctx);
+    clear(@in_link);
+    clear(@in_unlink);
+    clear(@in_rmdir);
+    clear(@in_rename);
+    clear(@in_create);
+    clear(@in_mkdir);
+    clear(@in_symlink);
+    clear(@ad_dev);
+    clear(@ad_dir);
+    clear(@ad_ino);
+    clear(@ad_len);
+    clear(@ad_name);
+    clear(@dd_dev);
+    clear(@dd_dir);
+    clear(@dd_len);
+    clear(@dd_name);
+    printf("end\n");
+}
