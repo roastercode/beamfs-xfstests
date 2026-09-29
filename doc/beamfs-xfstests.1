@@ -880,6 +880,18 @@ every write-back and every confirming read of the medium on their own
 lines, and scripts/scrubwb.py reports any block the scrubber decoded or
 wrote while its last allocation named another inode or after it was
 freed. Traces of 0.1.22 and earlier are read as before.
+.IP
+Since 2.3.59 a bench records with its result the load its trials ran
+under: the seed (a number, random, or none when the test could not be
+instrumented), the scrubber interval the node reported, and the
+bpftrace script attached. A run is compared only with the last run of
+the same test under the same load; with none, it is the baseline for
+that load. Until then the last run of the test was taken whatever its
+load, and two runs of the same commit, one with a fixed seed and one
+with random seeds, were called a regression. Runs recorded before
+2.3.59 carry no load and are compared with nothing. Pruning leaves the
+directories set aside by hand, kept-*, alone, and names every image it
+removes.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's

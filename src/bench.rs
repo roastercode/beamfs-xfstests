@@ -75,6 +75,9 @@ pub struct Run {
     pub aborted: usize,
     /// Blocks lost per failing trial, in order.
     pub lost: Vec<usize>,
+    /// What the trials ran under: seed, scrubber interval, bpftrace
+    /// script. Empty for a run recorded before 2.3.59.
+    pub load: String,
 }
 
 impl Run {
@@ -92,7 +95,7 @@ impl Run {
     }
 
     fn line(&self) -> String {
-        format!(
+        let mut s = format!(
             "{} {} {} {} {} {}",
             self.commit,
             self.test,
@@ -104,7 +107,15 @@ impl Run {
                 .map(|l| l.to_string())
                 .collect::<Vec<_>>()
                 .join(","),
-        )
+        );
+        // The load last and named: a run with no loss writes an empty
+        // sixth field, and a seventh field read by position would slide
+        // into its place.
+        if !self.load.is_empty() {
+            s.push_str(" load=");
+            s.push_str(&self.load);
+        }
+        s
     }
 
     fn parse(s: &str) -> Option<Run> {
@@ -116,16 +127,23 @@ impl Run {
         if f.len() < 5 || !f[1].contains('/') {
             return None;
         }
+        let rest = &f[5..];
         Some(Run {
             commit: f[0].into(),
             test: f[1].into(),
             passed: f[2].parse().ok()?,
             failed: f[3].parse().ok()?,
             aborted: f[4].parse().ok()?,
-            lost: f
-                .get(5)
+            lost: rest
+                .iter()
+                .find(|w| !w.starts_with("load="))
                 .map(|s| s.split(',').filter_map(|v| v.parse().ok()).collect())
                 .unwrap_or_default(),
+            load: rest
+                .iter()
+                .find_map(|w| w.strip_prefix("load="))
+                .unwrap_or_default()
+                .to_string(),
         })
     }
 }
@@ -174,11 +192,18 @@ fn load_baseline(test: &str) -> Option<Baseline> {
 }
 
 /// The last stored run of `test`, whatever revision it was.
-fn previous(test: &str) -> Option<Run> {
+/// The last run of this test under the same load.
+///
+/// Taken whatever its load, the last run set a fixed seed against
+/// random ones and the scrubber parked against the scrubber at 100 ms:
+/// on 2026-09-28 two runs of the same commit whose only difference was
+/// the seed were called "REGRESSION ... revert". A run recorded before
+/// 2.3.59 carries no load and matches nothing.
+fn previous(test: &str, load: &str) -> Option<Run> {
     let body = std::fs::read_to_string(store()).ok()?;
     body.lines()
         .filter_map(Run::parse)
-        .rfind(|r| r.test == test)
+        .rfind(|r| r.test == test && r.load == load)
 }
 
 fn append(r: &Run) -> std::io::Result<()> {
@@ -951,6 +976,30 @@ pub fn run(
             println!("  profile : kernel function counts armed");
         }
     }
+    // What the trials run under, recorded with the result: a run is
+    // compared only with one under the same load. The scrubber interval
+    // is the one the node reports, not the one asked for: without
+    // XFSTESTS_SCRUB_MS the node keeps whatever the last run set.
+    let load = {
+        let seed_s = if !instrumented {
+            "none".to_string()
+        } else if random_seed {
+            "random".to_string()
+        } else {
+            seed.to_string()
+        };
+        let scrub = state
+            .split_whitespace()
+            .find_map(|w| w.strip_prefix("scrub=param:"))
+            .unwrap_or("unknown");
+        let bpf = std::env::var("XFSTESTS_BPF")
+            .ok()
+            .map(|v| v.trim().replace(char::is_whitespace, "_"))
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "none".into());
+        format!("seed:{seed_s},scrub:{scrub},bpf:{bpf}")
+    };
+    println!("  load    : {load}");
     let mut r = Run {
         commit: rev,
         test: test.into(),
@@ -958,6 +1007,7 @@ pub fn run(
         failed: 0,
         aborted: 0,
         lost: Vec::new(),
+        load,
     };
 
     for n in 1..=trials {
@@ -1241,7 +1291,7 @@ pub fn run(
     // spread on unchanged code rather than against nothing. Without a
     // baseline it says so instead of inventing a verdict -- which is
     // what happened on 2026-09-09, three times.
-    if let Some(prev) = previous(&r.test) {
+    if let Some(prev) = previous(&r.test, &r.load) {
         let before = Series {
             commit: prev.commit.clone(),
             trials: (0..prev.passed)
@@ -1429,9 +1479,9 @@ fn report(r: &Run) {
         );
     }
 
-    let Some(prev) = previous(&r.test) else {
+    let Some(prev) = previous(&r.test, &r.load) else {
         println!();
-        println!("  no earlier run to compare against; this one is the baseline");
+        println!("  no earlier run of this test under this load; this one is the baseline for it");
         return;
     };
     if prev.commit == r.commit {
@@ -2615,7 +2665,27 @@ mod tests {
 
     fn r(p: usize, f: usize, a: usize) -> Run {
         Run { commit: "abc".into(), test: "generic/464".into(),
-              passed: p, failed: f, aborted: a, lost: vec![] }
+              passed: p, failed: f, aborted: a, lost: vec![], load: String::new() }
+    }
+
+    #[test]
+    fn a_load_survives_the_stored_line() {
+        let mut x = r(5, 3, 0);
+        x.load = "seed:274870549,scrub:100,bpf:scrubwb".into();
+        let y = Run::parse(&x.line()).expect("parses");
+        assert_eq!(y.load, x.load);
+        assert!(y.lost.is_empty());
+        x.lost = vec![18];
+        let y = Run::parse(&x.line()).expect("parses");
+        assert_eq!(y.lost, vec![18]);
+        assert_eq!(y.load, x.load);
+    }
+
+    #[test]
+    fn a_line_from_before_the_load_has_none() {
+        let y = Run::parse("abc generic/083 7 1 0 18").expect("parses");
+        assert_eq!(y.lost, vec![18]);
+        assert!(y.load.is_empty());
     }
 
     #[test]

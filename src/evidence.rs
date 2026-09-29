@@ -1036,6 +1036,13 @@ pub fn prune(root: &Path, keep: usize) -> usize {
     let mut imgs: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     let Ok(rd) = std::fs::read_dir(root) else { return 0 };
     for e in rd.flatten() {
+        // A case set aside by hand is out of reach. On 2026-09-28 the
+        // image of the one generic/083 failure with a link count wrong
+        // was pruned out of kept-sweep-1790599549-generic-083-001, and
+        // the report said "2 pruned" and nothing else.
+        if e.file_name().to_string_lossy().starts_with("kept") {
+            continue;
+        }
         let img = e.path().join("scratch.img.zst");
         if let Ok(m) = std::fs::metadata(&img) {
             if let Ok(t) = m.modified() {
@@ -1047,10 +1054,39 @@ pub fn prune(root: &Path, keep: usize) -> usize {
     let mut removed = 0;
     for (_, p) in imgs.into_iter().skip(keep) {
         if std::fs::remove_file(&p).is_ok() {
+            println!("  pruned {}", p.display());
             removed += 1;
         }
     }
     removed
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::prune;
+
+    #[test]
+    fn a_case_set_aside_is_not_pruned() {
+        let root = std::env::temp_dir().join(format!("bx-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let t0 = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for (i, d) in ["kept-sweep-1-generic-083-001", "generic-083-001", "generic-083-002"]
+            .iter()
+            .enumerate()
+        {
+            let dir = root.join(d);
+            std::fs::create_dir_all(&dir).expect("dir");
+            let f = std::fs::File::create(dir.join("scratch.img.zst")).expect("img");
+            f.set_modified(t0 + std::time::Duration::from_secs(i as u64 * 60)).expect("mtime");
+        }
+        // The oldest image is the one set aside; keeping one, the other
+        // ordinary case goes and the kept one stays.
+        assert_eq!(prune(&root, 1), 1);
+        assert!(root.join("kept-sweep-1-generic-083-001/scratch.img.zst").exists());
+        assert!(root.join("generic-083-002/scratch.img.zst").exists());
+        assert!(!root.join("generic-083-001/scratch.img.zst").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 
