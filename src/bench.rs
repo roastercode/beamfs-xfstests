@@ -811,6 +811,13 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
             .collect::<Vec<_>>()
             .join(" | ")
     };
+    // The harness's words without its tally: "Failures:" is on every
+    // failure and says nothing about this one.
+    let harness: String = complaint
+        .split(" | ")
+        .filter(|s| !s.is_empty() && !s.starts_with("Failures:"))
+        .collect::<Vec<_>>()
+        .join(" | ");
 
     if !failed_names.is_empty() {
         println!();
@@ -836,7 +843,14 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
             format!(
                 "the test did not reach its own fsck ({}s) -- not a leak: {}",
                 t0.elapsed().as_secs(),
-                out.lines().rev().take(4).collect::<Vec<_>>().join(" | ")
+                // What the harness said, when it said anything: generic/361
+                // failed on "_check_dmesg: something found in dmesg", and
+                // the reason gave "Failed 1 of 1 tests | Ran: generic/361".
+                if harness.is_empty() {
+                    out.lines().rev().take(4).collect::<Vec<_>>().join(" | ")
+                } else {
+                    harness
+                }
             )
         } else if complaint.is_empty() {
             out.lines()
@@ -997,7 +1011,11 @@ pub fn run(
             .map(|v| v.trim().replace(char::is_whitespace, "_"))
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "none".into());
-        format!("seed:{seed_s},scrub:{scrub},bpf:{bpf}")
+        // And where. compute01 runs generic/361 in 546 s and x86-01 in
+        // 80, and on 2026-10-01 a bench on one was compared with the last
+        // bench on the other: "REGRESSION ... revert" between two runs of
+        // the same commit on two architectures.
+        format!("node:{},seed:{seed_s},scrub:{scrub},bpf:{bpf}", node.name)
     };
     println!("  load    : {load}");
     let mut r = Run {
@@ -2018,6 +2036,11 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     let mut passed = 0usize;
     let mut failed: Vec<(String, usize)> = Vec::new();
     let mut aborted: Vec<String> = Vec::new();
+    // Why, for each of them. Every test without a verdict was recorded as
+    // "the node would not prepare", including four aarch64 tests that on
+    // 2026-10-01 had run their whole 3600 s budget.
+    let mut why_not_run: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let t_start = std::time::Instant::now();
 
     let mut unreachable_run = 0usize;
@@ -2097,6 +2120,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         if let Err(e) = prepare(&c, &cfg.mkfs_options, &cfg.fstyp, tracing_wanted()) {
             p.finish(&format!("cannot prepare the node: {e}"));
             aborted.push(test.clone());
+            why_not_run.insert(test.clone(), format!("cannot prepare the node: {e}"));
             unreachable_run += 1;
 
             if *test == refused_test {
@@ -2256,6 +2280,11 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             Err(e) => {
                 p.finish(&format!("error: {e}"));
                 aborted.push(test.clone());
+                if e.contains("did not finish within") {
+                    // A budget spent is a hang, with the time it took.
+                    secs_of.insert(test.clone(), budget);
+                }
+                why_not_run.insert(test.clone(), format!("error: {e}"));
                 continue;
             }
         };
@@ -2263,6 +2292,20 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         if t.aborted {
             p.finish(&format!("skipped ({}s)", t.trial.secs));
             aborted.push(test.clone());
+            why_not_run.insert(
+                test.clone(),
+                format!(
+                    "xfstests would not run it ({}s): {}",
+                    t.trial.secs,
+                    t.output
+                        .lines()
+                        .rev()
+                        .filter(|l| !l.trim().is_empty())
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                ),
+            );
             continue;
         }
 
@@ -2494,7 +2537,13 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     }
     if !aborted.is_empty() {
         println!();
-        println!("  not run ({}): {}", aborted.len(), aborted.join(" "));
+        println!("  no verdict ({}):", aborted.len());
+        for t in &aborted {
+            println!(
+                "    {t}: {}",
+                why_not_run.get(t).map_or("no reason recorded", String::as_str)
+            );
+        }
     }
 
     // Prune here rather than per test: a sweep that fails often would
@@ -2525,12 +2574,20 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             });
         }
         for name in &aborted {
+            let why = why_not_run
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| "no reason recorded".into());
             all.push(crate::result::TestResult {
                 name: name.clone(),
-                outcome: crate::result::Outcome::NotRun,
+                outcome: if why.contains("did not finish within") {
+                    crate::result::Outcome::Hang
+                } else {
+                    crate::result::Outcome::NotRun
+                },
                 seconds: secs_of.get(name).copied().unwrap_or(0),
                 node: node.name.clone(),
-                reason: "the node would not prepare".into(),
+                reason: why,
             });
         }
         // Passes are the tests the sweep was asked for that did not

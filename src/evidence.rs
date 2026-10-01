@@ -287,6 +287,14 @@ fn remade_after(full: &str, fsck: &str) -> Option<(u64, u64)> {
 }
 
 pub fn speak(case: &Case) {
+    /*
+     * Through say::note, which the indicator also uses, not println.
+     *
+     * Printed with println while the indicator was turning, the last of
+     * these lines was lost: on 2026-10-01 x86-01 showed "the kernel said,
+     * during this test:" with nothing under it, and compute01 five of the
+     * six kinds its dmesg held.
+     */
     let read = |name: &str| -> String {
         std::fs::read_to_string(case.dir.join(name)).unwrap_or_default()
     };
@@ -345,23 +353,23 @@ pub fn speak(case: &Case) {
     }
 
     if !kernel.is_empty() {
-        println!("    the kernel said, during this test:");
+        crate::say::note("    the kernel said, during this test:");
         for (n, k) in kernel.iter().take(6).enumerate() {
             let _ = n;
-            println!("      {}", k.trim());
+            crate::say::note(&format!("      {}", k.trim()));
         }
         if kernel.len() > 6 {
-            println!("      and {} more kind(s), in dmesg", kernel.len() - 6);
+            crate::say::note(&format!("      and {} more kind(s), in dmesg", kernel.len() - 6));
         }
     }
 
     if !caught.is_empty() {
-        println!("    the filesystem's own checker caught it happening:");
+        crate::say::note("    the filesystem's own checker caught it happening:");
         for c in caught.iter().take(6) {
-            println!("      {c}");
+            crate::say::note(&format!("      {c}"));
         }
         if caught.len() > 6 {
-            println!("      and {} more, in dmesg", caught.len() - 6);
+            crate::say::note(&format!("      and {} more, in dmesg", caught.len() - 6));
         }
     }
 
@@ -385,9 +393,9 @@ pub fn speak(case: &Case) {
     let fsck = Case::collapse(&read("fsck.verbose"));
     let full = Case::collapse(&read("full"));
     if let Some((during, after)) = remade_after(&full, &fsck) {
-        println!("    fsck.verbose describes a volume that was remade \
+        crate::say::note(&format!("    fsck.verbose describes a volume that was remade \
                   after the test: {after} inode(s) against {during} \
-                  during it -- the verdict is the one in full");
+                  during it -- the verdict is the one in full"));
     }
     let mut named: Vec<&str> = Vec::new();
     for line in fsck.lines() {
@@ -416,14 +424,14 @@ pub fn speak(case: &Case) {
             };
             *kinds.entry(k.to_string()).or_insert(0) += 1;
         }
-        println!("    the checker named:");
+        crate::say::note("    the checker named:");
         for (k, n) in &kinds {
-            println!("      {n} {k}");
+            crate::say::note(&format!("      {n} {k}"));
         }
         if let Some(first) = named.first() {
-            println!("      first: {first}");
+            crate::say::note(&format!("      first: {first}"));
         }
-        println!("      all of them in fsck.verbose");
+        crate::say::note("      all of them in fsck.verbose");
     }
 }
 

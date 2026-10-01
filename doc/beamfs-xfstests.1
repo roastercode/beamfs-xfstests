@@ -892,6 +892,18 @@ with random seeds, were called a regression. Runs recorded before
 2.3.59 carry no load and are compared with nothing. Pruning leaves the
 directories set aside by hand, kept-*, alone, and names every image it
 removes.
+.IP
+Since 2.3.60 the load a bench is compared under includes the node it ran
+on: a bench on compute01 is no longer compared with one on x86-01. A
+trial that fails before its own fsck gives the harness's own words as its
+reason (_check_dmesg, output mismatch) when there are any. What the
+kernel said during a trial goes through the channel the indicator
+shares, which no longer overwrites the last of those lines. In a sweep
+every test without a verdict is listed with its own reason, in the
+results as on screen, and one whose budget ran out before the node gave
+the command back is recorded as a hang, not as a test that could not
+run. A deploy refused for a stale image names bitbake -C rootfs for the
+case where bitbake finds nothing to rebuild.
 .TP
 .B XFSTESTS_BPF_SCRIPTS
 Where the scripts are read from. Defaults to the repository's

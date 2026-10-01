@@ -403,8 +403,9 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
             println!();
             println!("  {l}");
         }
-        return Err("the image predates the code it is meant to carry: run bitbake first, \
-                    or set XFSTESTS_FORCE=1 to deploy it anyway".into());
+        return Err("the image predates the code it is meant to carry: run bitbake \
+                    first (bitbake -C rootfs <image> when it finds nothing to \
+                    rebuild), or set XFSTESTS_FORCE=1 to deploy it anyway".into());
     }
 
     // What the chain held before this deploy. Between two campaigns
@@ -441,7 +442,7 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
     for line in commits_after_image(Path::new(&image)) {
         println!();
         println!("  {line}");
-        println!("  run bitbake first");
+        println!("  run bitbake first (bitbake -C rootfs <image> when it finds nothing to rebuild)");
         println!();
     }
 
