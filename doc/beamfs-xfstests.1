@@ -743,6 +743,13 @@ verdict is reached; the whole output of check for every test; the
 saved results; and copies of the archive, trace and digest written to
 /tmp. A kernel taint that differs between the start and the end is
 reported. The saved run is named for the start of the sweep.
+
+Since 2.4.1 meta.txt names the beamfs module the node runs. beamfs
+exposes no srcversion, and the field 2.4.0 asked for came back empty;
+the record now carries whether the module is loaded, the file modinfo
+resolves and its sha256 (or "(builtin)"), its version and vermagic,
+/proc/version, and on this side the sha256 of the kernel image in the
+deploy directory.
 .TP
 .B checkpoint
 Say whether this repository, the layer, the image and the node still

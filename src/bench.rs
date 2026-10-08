@@ -1989,6 +1989,34 @@ fn keep_in_record(p: &std::path::Path, record: &std::path::Path) {
     }
 }
 
+/// What the node is asked about itself, at the start and the end of a
+/// sweep.
+///
+/// beamfs exposes no srcversion: /sys/module/beamfs/srcversion came back
+/// empty on x86-01 on 2026-10-08. So the module is named by what the
+/// node can say of it -- loaded or not, the file modinfo resolves and its
+/// sha256, or "(builtin)" when it is part of the kernel, its version and
+/// vermagic -- and the kernel by /proc/version.
+fn meta_probe(test_dev: &str, scratch_dev: &str) -> String {
+    format!(
+        "echo \"uname=$(uname -r) $(uname -v)\"; \
+         echo \"proc_version=$(cat /proc/version)\"; \
+         echo \"tainted=$(cat /proc/sys/kernel/tainted)\"; \
+         echo \"uptime=$(awk '{{print $1}}' /proc/uptime)\"; \
+         echo \"beamfs_loaded=$(grep -c '^beamfs ' /proc/modules)\"; \
+         echo \"beamfs_srcversion=$(cat /sys/module/beamfs/srcversion 2>/dev/null)\"; \
+         m=$(modinfo -n beamfs 2>/dev/null); echo \"beamfs_module=$m\"; \
+         if [ -f \"$m\" ]; then echo \"beamfs_module_sha256=$(sha256sum \"$m\" | awk '{{print $1}}')\"; fi; \
+         echo \"beamfs_version=$(modinfo -F version beamfs 2>/dev/null)\"; \
+         echo \"beamfs_vermagic=$(modinfo -F vermagic beamfs 2>/dev/null)\"; \
+         echo \"check_sha256=$(sha256sum /usr/xfstests/check 2>/dev/null | awk '{{print $1}}')\"; \
+         grep -E '^export (FSTYP|TEST_DEV|SCRATCH_DEV|MKFS_OPTIONS|MOUNT_OPTIONS)=' \
+         /usr/xfstests/local.config 2>/dev/null; \
+         lsblk -b -d -n -o NAME,SIZE,SERIAL,MODEL /dev/{test_dev} /dev/{scratch_dev} 2>/dev/null \
+         | sed 's/^/device=/'; true"
+    )
+}
+
 /// What this sweep ran against, written at its start and again at its
 /// end.
 ///
@@ -2001,27 +2029,24 @@ fn keep_in_record(p: &std::path::Path, record: &std::path::Path) {
 fn write_meta(c: &NodeConn, cfg: &Config, node: &Node, selection: &str,
               tests: usize, record: &std::path::Path, when: &str) -> String {
     let probe = c
-        .run(
-            &format!(
-                "echo \"uname=$(uname -r) $(uname -v)\"; \
-                 echo \"tainted=$(cat /proc/sys/kernel/tainted)\"; \
-                 echo \"uptime=$(awk '{{print $1}}' /proc/uptime)\"; \
-                 echo \"beamfs_srcversion=$(cat /sys/module/beamfs/srcversion 2>/dev/null)\"; \
-                 echo \"check_sha256=$(sha256sum /usr/xfstests/check 2>/dev/null | awk '{{print $1}}')\"; \
-                 grep -E '^export (FSTYP|TEST_DEV|SCRATCH_DEV|MKFS_OPTIONS|MOUNT_OPTIONS)=' \
-                 /usr/xfstests/local.config 2>/dev/null; \
-                 lsblk -b -d -n -o NAME,SIZE,SERIAL,MODEL /dev/{} /dev/{} 2>/dev/null \
-                 | sed 's/^/device=/'; true",
-                node.test_dev, node.scratch_dev
-            ),
-            Duration::from_secs(30),
-        )
+        .run(&meta_probe(&node.test_dev, &node.scratch_dev), Duration::from_secs(30))
         .unwrap_or_else(|e| format!("probe failed: {e}\n"));
+    // The kernel the deploy directory holds, by its hash: the seal names
+    // the root image and not the kernel booted beside it.
+    let kimg = {
+        let p = std::path::Path::new(crate::lab::kernel_image());
+        format!(
+            "{} {}",
+            p.display(),
+            crate::chain::sha256_file(p).unwrap_or_else(|| "absent".into())
+        )
+    };
     let seal = std::fs::read_to_string(crate::chain::seal_path())
         .unwrap_or_else(|_| "absent\n".into());
     let body = format!(
         "=== {when} ===\nat={}\nbx_version={}\nbeamfs_commit={}\nnode={} {}\n\
-         fstyp={}\nmkfs_options={}\nselection={}\ntests={tests}\n{probe}\
+         fstyp={}\nmkfs_options={}\nselection={}\ntests={tests}\n\
+         kernel_image={kimg}\n{probe}\
          --- seal ---\n{seal}\n",
         unix_now(),
         env!("CARGO_PKG_VERSION"),
@@ -3025,6 +3050,20 @@ mod tests {
     fn a_not_run_without_a_reason_still_says_so() {
         let out = "Ran: generic/999\nNot run: generic/999\nPassed all 1 tests\n";
         assert_eq!(not_run_reason(out).as_deref(), Some("no reason given"));
+    }
+
+    #[test]
+    fn the_meta_probe_is_valid_shell_and_names_the_module() {
+        let p = meta_probe("vdb", "vdc");
+        let st = std::process::Command::new("sh")
+            .args(["-n", "-c", &p])
+            .status()
+            .expect("sh");
+        assert!(st.success(), "{p}");
+        for want in ["modinfo -n beamfs", "beamfs_module_sha256=", "proc_version=",
+                     "beamfs_loaded=", "/dev/vdb /dev/vdc"] {
+            assert!(p.contains(want), "{want} missing from {p}");
+        }
     }
 
     #[test]
