@@ -261,7 +261,9 @@ fn usage() -> std::process::ExitCode {
          control  run one test against beamfs and a sound filesystem,\n\
          \x20        same devices, and say which is implicated\n\
          \x20        control [test] [trials] [fstyp,fstyp]\n\
-         sweep    run every test of a selection once, one verdict each\n\
+         sweep    run every test of a selection once, one verdict each:\n\
+         \x20        passed, failed, not run by xfstests (with its reason)\n\
+         \x20        or no verdict; each sweep kept whole in sweeps/<tag>/\n\
          soak     random writes on the bare scratch device, read back now and later
                   sweep [selection]   (default: the whole suite)\n\
                   a selection is written, not looped over:\n\

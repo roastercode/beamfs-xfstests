@@ -64,6 +64,9 @@ struct Attempt {
     /// Everything check printed, kept whole rather than filtered: the
     /// question asked of it changes and the output does not come back.
     output: String,
+    /// xfstests declined the test, and the reason it gave. None when the
+    /// test ran.
+    notrun: Option<String>,
 }
 
 /// A run of trials against one revision.
@@ -652,6 +655,41 @@ fn watch_node(cfg: &Config, node: &Node, quiet_limit: u32)
     (stop, wedged, seen)
 }
 
+/// The reason xfstests gave for running none of the selection.
+///
+/// "Ran:" names every test check tried and "Not run:" the ones that
+/// declined, so a selection was not run when the two lists hold the
+/// same tests. A group in which some tests ran and some declined is a
+/// verdict on the ones that ran, and gets None.
+fn not_run_reason(out: &str) -> Option<String> {
+    let list = |prefix: &str| -> Vec<String> {
+        out.lines()
+            .find_map(|l| l.strip_prefix(prefix))
+            .map(|r| r.split_whitespace().map(String::from).collect())
+            .unwrap_or_default()
+    };
+    let mut ran = list("Ran:");
+    let mut declined = list("Not run:");
+    if declined.is_empty() {
+        return None;
+    }
+    ran.sort();
+    declined.sort();
+    if ran != declined {
+        return None;
+    }
+    let why: Vec<String> = out
+        .lines()
+        .filter_map(|l| l.split_once("[not run]").map(|(_, w)| w.trim().to_string()))
+        .filter(|w| !w.is_empty())
+        .collect();
+    Some(if why.is_empty() {
+        "no reason given".to_string()
+    } else {
+        why.join(" | ")
+    })
+}
+
 fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, String> {
     let t0 = Instant::now();
     // run_rc, not run: a failing test exits non-zero and that is the
@@ -728,9 +766,17 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
     // "Passed all N" for any N, not just one: a group of ninety tests
     // that all passed says "Passed all 90", and matching only the
     // single-test wording scored every group run as a failure.
-    let passed = out
-        .lines()
-        .any(|l| l.starts_with("Passed all ") && !l.contains(" 0 "));
+    // xfstests' own "not run". A test that decides it cannot run here --
+    // reflink, quotas, O_DIRECT, a dm target the image lacks -- prints
+    // "[not run]", lists itself under "Not run:", and is still counted
+    // in "Passed all 1 tests". Until 2.4.0 that line was the verdict:
+    // 611 of the 734 tests of the aarch64 sweep of 2026-10-05 were
+    // saved as PASS without having run.
+    let notrun = not_run_reason(&out);
+    let passed = notrun.is_none()
+        && out
+            .lines()
+            .any(|l| l.starts_with("Passed all ") && !l.contains(" 0 "));
     // How many ran and how many failed, for a selection larger than one.
     let ran = out
         .lines()
@@ -831,10 +877,13 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
         aborted,
         killed,
         output: out.clone(),
+        notrun: notrun.clone(),
         // Carried rather than printed: the indicator owns the current
         // line until finish() clears it, and a println here lands on
         // top of it. The caller prints this after finishing.
-        reason: if passed || aborted {
+        reason: if let Some(why) = &notrun {
+            format!("not run by xfstests: {why}")
+        } else if passed || aborted {
             String::new()
         } else if !checked {
             // The single most useful thing to know about a short
@@ -1113,6 +1162,17 @@ pub fn run(
                 continue;
             }
         };
+        if let Some(why) = &t.notrun {
+            // Declined by xfstests: no verdict, like an abort, and said
+            // as what it is rather than as a pass.
+            r.aborted += 1;
+            if let Some(pr) = probe.take() {
+                let _ = pr.stop_into(&c, std::path::Path::new("/tmp"));
+            }
+            p.finish(&format!("not run by xfstests ({}s): {why} -- not a verdict",
+                              t.trial.secs));
+            continue;
+        }
         if t.aborted {
             r.aborted += 1;
             if let Some(pr) = probe.take() {
@@ -1874,6 +1934,129 @@ fn evidence_root_for(node: &str) -> std::path::PathBuf {
     evidence_root().join(node)
 }
 
+/// Seconds since the epoch, for the names of records.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Where one sweep keeps its own record: sweeps/<tag>/, beside the
+/// saved runs.
+///
+/// The evidence of a test lived only in its case directory, named for
+/// the test, and the next run of that test emptied it: the x86 sweep of
+/// 2026-10-02 lost every check output to the aarch64 sweep of
+/// 2026-10-05, and generic/476 of that sweep to the run of 476 alone
+/// that followed. The archive that should have held them was written to
+/// /tmp, which is gone at the next boot. A record nothing else writes
+/// into is the only one a result can be cited from afterwards.
+fn record_dir(tag: &str) -> std::path::PathBuf {
+    crate::history::History::default_root().join("sweeps").join(tag)
+}
+
+/// One line per test, written as its verdict is reached, and the whole
+/// output of check beside it.
+///
+/// Written as it goes, so that a sweep stopped halfway still says what
+/// it measured; with the output, so that a verdict can be checked
+/// against what check printed rather than taken on trust.
+fn keep_verdict(record: &std::path::Path, test: &str, verdict: &str, secs: u64,
+                reason: &str, output: Option<&str>) {
+    if let Some(o) = output {
+        let _ = std::fs::write(
+            record.join(format!("{}.check.out", test.replace('/', "-"))), o);
+    }
+    let line = format!("{test} {verdict} {secs} {}\n", reason.replace('\n', " "));
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(record.join("verdicts.txt"))
+    {
+        use std::io::Write;
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// A copy, in the record, of a file this sweep wrote elsewhere.
+fn keep_in_record(p: &std::path::Path, record: &std::path::Path) {
+    if let Some(name) = p.file_name() {
+        match std::fs::copy(p, record.join(name)) {
+            Ok(_) => println!("  kept in the record: {}", record.join(name).display()),
+            Err(e) => println!("  not kept in the record: {}: {e}", p.display()),
+        }
+    }
+}
+
+/// What this sweep ran against, written at its start and again at its
+/// end.
+///
+/// A verdict is a statement about a filesystem built from given
+/// sources, on a given kernel, on given devices. The saved run named
+/// none of them, so a results file could be quoted against code it
+/// never measured. The node is asked again at the end: a kernel whose
+/// taint changed during the sweep warned or oopsed while it ran, which
+/// no single verdict says.
+fn write_meta(c: &NodeConn, cfg: &Config, node: &Node, selection: &str,
+              tests: usize, record: &std::path::Path, when: &str) -> String {
+    let probe = c
+        .run(
+            &format!(
+                "echo \"uname=$(uname -r) $(uname -v)\"; \
+                 echo \"tainted=$(cat /proc/sys/kernel/tainted)\"; \
+                 echo \"uptime=$(awk '{{print $1}}' /proc/uptime)\"; \
+                 echo \"beamfs_srcversion=$(cat /sys/module/beamfs/srcversion 2>/dev/null)\"; \
+                 echo \"check_sha256=$(sha256sum /usr/xfstests/check 2>/dev/null | awk '{{print $1}}')\"; \
+                 grep -E '^export (FSTYP|TEST_DEV|SCRATCH_DEV|MKFS_OPTIONS|MOUNT_OPTIONS)=' \
+                 /usr/xfstests/local.config 2>/dev/null; \
+                 lsblk -b -d -n -o NAME,SIZE,SERIAL,MODEL /dev/{} /dev/{} 2>/dev/null \
+                 | sed 's/^/device=/'; true",
+                node.test_dev, node.scratch_dev
+            ),
+            Duration::from_secs(30),
+        )
+        .unwrap_or_else(|e| format!("probe failed: {e}\n"));
+    let seal = std::fs::read_to_string(crate::chain::seal_path())
+        .unwrap_or_else(|_| "absent\n".into());
+    let body = format!(
+        "=== {when} ===\nat={}\nbx_version={}\nbeamfs_commit={}\nnode={} {}\n\
+         fstyp={}\nmkfs_options={}\nselection={}\ntests={tests}\n{probe}\
+         --- seal ---\n{seal}\n",
+        unix_now(),
+        env!("CARGO_PKG_VERSION"),
+        commit(),
+        node.name,
+        node.host,
+        cfg.fstyp,
+        cfg.mkfs_options,
+        if selection.is_empty() {
+            "(none: the harness's default, the auto group)"
+        } else {
+            selection
+        },
+    );
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(record.join("meta.txt"))
+    {
+        use std::io::Write;
+        let _ = f.write_all(body.as_bytes());
+    }
+    probe
+}
+
+/// The kernel's taint mask out of a node probe, as printed.
+fn taint_of(probe: &str) -> String {
+    probe
+        .lines()
+        .find_map(|l| l.strip_prefix("tainted="))
+        .unwrap_or("unknown")
+        .trim()
+        .to_string()
+}
+
 
 /// Set when the stop file appears: the loop finishes its test and stops.
 ///
@@ -2044,12 +2227,30 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     arm_stop();
     println!("  stop    : touch {} to finish the current test and stop",
              stop_path().display());
+
+    // This sweep's own record, named for its start and written as it
+    // goes, apart from every other run's evidence.
+    let tag = format!("sweep-{}", unix_now());
+    let record = record_dir(&tag);
+    if let Err(e) = std::fs::create_dir_all(&record) {
+        return Err(format!("cannot create the record {}: {e}", record.display()));
+    }
+    let meta_start = write_meta(&c, cfg, node, selection, tests.len(), &record, "start");
+    println!("  record  : {}", record.display());
     println!();
 
     let root = evidence_root_for(&node.name);
     let mut passed = 0usize;
     let mut failed: Vec<(String, usize)> = Vec::new();
     let mut aborted: Vec<String> = Vec::new();
+    // Tests xfstests itself declined, kept apart from the ones that got
+    // no verdict: a feature missing is scope, a node that would not
+    // prepare is the apparatus.
+    let mut not_run: Vec<String> = Vec::new();
+    // The tests that passed, by name. The saved run listed as PASS every
+    // test asked for that did not fail or abort, which took in the
+    // declined tests and the ones a sweep stopped before reaching.
+    let mut passed_tests: Vec<String> = Vec::new();
     // Why, for each of them. Every test without a verdict was recorded as
     // "the node would not prepare", including four aarch64 tests that on
     // 2026-10-01 had run their whole 3600 s budget.
@@ -2135,6 +2336,8 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             p.finish(&format!("cannot prepare the node: {e}"));
             aborted.push(test.clone());
             why_not_run.insert(test.clone(), format!("cannot prepare the node: {e}"));
+            keep_verdict(&record, test, "NOVERDICT", 0,
+                         &format!("cannot prepare the node: {e}"), None);
             unreachable_run += 1;
 
             if *test == refused_test {
@@ -2299,6 +2502,9 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                     secs_of.insert(test.clone(), budget);
                 }
                 why_not_run.insert(test.clone(), format!("error: {e}"));
+                keep_verdict(&record, test, "NOVERDICT",
+                             secs_of.get(test).copied().unwrap_or(0),
+                             &format!("error: {e}"), None);
                 continue;
             }
         };
@@ -2320,14 +2526,25 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                         .join(" | ")
                 ),
             );
+            keep_verdict(&record, test, "NOVERDICT", t.trial.secs,
+                         why_not_run.get(test).map_or("", String::as_str),
+                         Some(t.output.as_str()));
             continue;
         }
 
         secs_of.insert(test.clone(), t.trial.secs);
-        if t.trial.passed {
+        if let Some(why) = &t.notrun {
+            not_run.push(test.clone());
+            why_not_run.insert(test.clone(), why.clone());
+            p.finish(&format!("not run ({}s): {why}", t.trial.secs));
+            keep_verdict(&record, test, "NOTRUN", t.trial.secs, why, Some(t.output.as_str()));
+        } else if t.trial.passed {
             passed += 1;
+            passed_tests.push(test.clone());
             p.finish(&format!("pass ({}s)", t.trial.secs));
+            keep_verdict(&record, test, "PASS", t.trial.secs, "", Some(t.output.as_str()));
         } else {
+            keep_verdict(&record, test, "FAIL", t.trial.secs, &t.reason, Some(t.output.as_str()));
             failed.push((test.clone(), t.trial.lost));
             p.finish(&format!(
                 "FAIL ({}s, {} blocks lost)",
@@ -2436,7 +2653,11 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
             killed_tests.push(test.clone());
         }
 
-        crate::history::losses::record(test, t.trial.lost);
+        // A test that did not run lost nothing because it did nothing;
+        // recorded as a zero it would read as a clean run in trend.
+        if t.notrun.is_none() {
+            crate::history::losses::record(test, t.trial.lost);
+        }
 
 
 
@@ -2454,7 +2675,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                       so what the checker finds in it is the interruption");
         }
 
-        if !t.trial.passed {
+        if !t.trial.passed && t.notrun.is_none() {
             if !t.reason.is_empty() {
                 say!("    reason: {}", t.reason);
             }
@@ -2518,25 +2739,39 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         }
     }
 
-    let done = passed + failed.len() + aborted.len();
+    let done = passed + failed.len() + aborted.len() + not_run.len();
     println!();
+    // Four counts, never one: "733 of 734 passed" was printed over a
+    // sweep in which 611 tests had not run at all (compute01,
+    // 2026-10-05).
+    println!(
+        "  === {} test(s) in {} minutes: {} ran ({} passed, {} failed), \
+         {} not run by xfstests, {} without a verdict ===",
+        tests.len(),
+        t_start.elapsed().as_secs() / 60,
+        passed + failed.len(),
+        passed,
+        failed.len(),
+        not_run.len(),
+        aborted.len()
+    );
     if done < tests.len() {
-        println!(
-            "  === {} of {} passed, {} of {} run, in {} minutes ===",
-            passed,
-            done,
-            done,
-            tests.len(),
-            t_start.elapsed().as_secs() / 60
-        );
         println!("  {} test(s) never started", tests.len() - done);
-    } else {
-        println!(
-            "  === {} of {} passed in {} minutes ===",
-            passed,
-            tests.len(),
-            t_start.elapsed().as_secs() / 60
-        );
+    }
+    if !not_run.is_empty() {
+        let mut by: std::collections::BTreeMap<&str, usize> =
+            std::collections::BTreeMap::new();
+        for t in &not_run {
+            *by.entry(why_not_run.get(t).map_or("no reason recorded", String::as_str))
+                .or_insert(0) += 1;
+        }
+        let mut v: Vec<(&str, usize)> = by.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        println!();
+        println!("  not run by xfstests ({}), by the reason it gave:", not_run.len());
+        for (why, n) in v {
+            println!("    {n:4}  {why}");
+        }
     }
     if !failed.is_empty() {
         println!();
@@ -2558,6 +2793,15 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                 why_not_run.get(t).map_or("no reason recorded", String::as_str)
             );
         }
+    }
+
+    // The node after the sweep, asked the same questions as before it.
+    let meta_end = write_meta(&c, cfg, node, selection, tests.len(), &record, "end");
+    let (taint_start, taint_end) = (taint_of(&meta_start), taint_of(&meta_end));
+    if taint_start != taint_end {
+        println!();
+        println!("  kernel taint {taint_start} at the start, {taint_end} at the end: \
+                  the kernel warned during this sweep, whatever the verdicts say");
     }
 
     // Prune here rather than per test: a sweep that fails often would
@@ -2604,27 +2848,40 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                 reason: why,
             });
         }
-        // Passes are the tests the sweep was asked for that did not
-        // fail or abort: a results file listing only failures cannot
-        // tell a fix from a test that stopped running.
-        for t in &tests {
-            if !failed.iter().any(|(n, _)| n == t) && !aborted.contains(t) {
-                all.push(crate::result::TestResult {
-                    name: t.clone(),
-                    outcome: crate::result::Outcome::Pass,
-                    seconds: secs_of.get(t).copied().unwrap_or(0),
-                    node: node.name.clone(),
-                    reason: String::new(),
-                });
-            }
+        // Passes are the tests that passed, by name. They were "every
+        // test asked for that did not fail or abort", which saved as
+        // PASS the tests xfstests declined and the tests a sweep never
+        // reached when it stopped early.
+        for t in &passed_tests {
+            all.push(crate::result::TestResult {
+                name: t.clone(),
+                outcome: crate::result::Outcome::Pass,
+                seconds: secs_of.get(t).copied().unwrap_or(0),
+                node: node.name.clone(),
+                reason: String::new(),
+            });
+        }
+        // Declined by xfstests: NOTRUN, with the reason it gave.
+        for t in &not_run {
+            all.push(crate::result::TestResult {
+                name: t.clone(),
+                outcome: crate::result::Outcome::NotRun,
+                seconds: secs_of.get(t).copied().unwrap_or(0),
+                node: node.name.clone(),
+                reason: format!(
+                    "not run by xfstests: {}",
+                    why_not_run.get(t).map_or("no reason recorded", String::as_str)
+                ),
+            });
         }
         all.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let tag = format!("sweep-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs()).unwrap_or(0));
+        // Named for the start of the sweep, as its record is.
         match hist.save(&tag, &all) {
-            Ok(_) => println!("  saved as {tag}; compare it with: beamfs-xfstests compare"),
+            Ok(p) => {
+                keep_in_record(&p, &record);
+                println!("  saved as {tag}; compare it with: beamfs-xfstests compare");
+            }
             Err(e) => println!("  could not save this run: {e}"),
         }
     }
@@ -2685,17 +2942,26 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     // keeping and wrong for reading: a reader opens the one they
     // expect and concludes from the sixteen they did not.
     match crate::runpack::trace(&kept) {
-        Ok(p) => println!("  and whole, nothing dropped: {}", p.display()),
+        Ok(p) => {
+            println!("  and whole, nothing dropped: {}", p.display());
+            keep_in_record(&p, &record);
+        }
         Err(e) => println!("  could not write the trace: {e}"),
     }
 
     match crate::runpack::digest(&kept) {
-        Ok(p) => println!("  and as one file to read: {}", p.display()),
+        Ok(p) => {
+            println!("  and as one file to read: {}", p.display());
+            keep_in_record(&p, &record);
+        }
         Err(e) => println!("  could not write the digest: {e}"),
     }
 
     match runpack::pack_run(&kept, &format!("{stamp}")) {
-        Some((path, size)) => runpack::announce(&path, size),
+        Some((path, size)) => {
+            runpack::announce(&path, size);
+            keep_in_record(&path, &record);
+        }
         None if kept.is_empty() => {}
         None => println!("  the archive could not be written"),
     }
@@ -2724,6 +2990,48 @@ mod tests {
         assert!(super::cannot_make("dumpfs=0\ntracing=1\n").is_none());
     }
     use super::*;
+
+    #[test]
+    fn a_test_xfstests_did_not_run_is_not_a_pass() {
+        // The output of generic/161 on compute01, 2026-10-05.
+        let out = "FSTYP         -- beamfs\n\
+                   generic/161       [not run] Reflink not supported by scratch filesystem type: beamfs\n\
+                   Ran: generic/161\n\
+                   Not run: generic/161\n\
+                   Passed all 1 tests\n";
+        assert_eq!(
+            not_run_reason(out).as_deref(),
+            Some("Reflink not supported by scratch filesystem type: beamfs")
+        );
+    }
+
+    #[test]
+    fn a_test_that_ran_has_no_not_run_reason() {
+        let out = "generic/001 19s ...  19s\nRan: generic/001\nPassed all 1 tests\n";
+        assert!(not_run_reason(out).is_none());
+    }
+
+    #[test]
+    fn a_group_partly_run_is_a_verdict_on_what_ran() {
+        let out = "generic/001 5s\n\
+                   generic/161       [not run] Reflink not supported\n\
+                   Ran: generic/001 generic/161\n\
+                   Not run: generic/161\n\
+                   Passed all 2 tests\n";
+        assert!(not_run_reason(out).is_none());
+    }
+
+    #[test]
+    fn a_not_run_without_a_reason_still_says_so() {
+        let out = "Ran: generic/999\nNot run: generic/999\nPassed all 1 tests\n";
+        assert_eq!(not_run_reason(out).as_deref(), Some("no reason given"));
+    }
+
+    #[test]
+    fn the_taint_is_read_from_the_probe() {
+        assert_eq!(taint_of("uname=7.3.0-rc5 #1\ntainted=4096\nuptime=12.3\n"), "4096");
+        assert_eq!(taint_of("probe failed: timeout\n"), "unknown");
+    }
 
     #[test]
     fn a_family_is_not_a_group() {

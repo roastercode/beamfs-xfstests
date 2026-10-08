@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: GPL-2.0-only
-.TH BEAMFS-XFSTESTS 1 "2026-09-23" "beamfs-xfstests" "beamfs development tools"
+.TH BEAMFS-XFSTESTS 1 "2026-10-08" "beamfs-xfstests" "beamfs development tools"
 
 .TP
 .B sweep \fR[\fIselection\fR]
@@ -722,6 +722,27 @@ made directly under evidence/, the same name whichever node ran it: a
 chain sweeping x86-01 then compute01 had the second sweep overwrite
 what the first had kept. Directories written before 2.3.61 stay at the
 top of evidence/. Pruning keeps its count of volume images per node.
+
+Since 2.4.0 a sweep tells a test xfstests did not run from one that
+passed. check prints "[not run]" for a test that declines and still
+counts it in "Passed all 1 tests"; that line was the verdict, and a
+sweep saved as PASS every test that declined for want of reflink,
+quotas, O_DIRECT or a device-mapper target, and every test it stopped
+before reaching. A declined test is now NOTRUN in the saved run, with
+the reason check gave; the summary gives four counts (passed, failed,
+not run by xfstests, without a verdict) and lists the reasons. A
+group in which some tests ran and some declined is a verdict on the
+ones that ran.
+
+Each sweep also keeps its own record in sweeps/<tag>/ beside the saved
+runs, named for its start: meta.txt, written at the start and again at
+the end (this tool's version, the beamfs commit, the node, its kernel
+and taint, the beamfs module's srcversion, the sha256 of check, the
+devices, the seal); verdicts.txt, one line per test written as the
+verdict is reached; the whole output of check for every test; the
+saved results; and copies of the archive, trace and digest written to
+/tmp. A kernel taint that differs between the start and the end is
+reported. The saved run is named for the start of the sweep.
 .TP
 .B checkpoint
 Say whether this repository, the layer, the image and the node still
