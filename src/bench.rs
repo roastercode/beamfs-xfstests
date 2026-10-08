@@ -1134,7 +1134,7 @@ pub fn run(
         // the fact belongs to whichever trial ran last. Every number
         // reported over the last two days came from a stale file that
         // way.
-        let case = Case::new(&evidence_root(), &r.test, n);
+        let case = Case::new(&evidence_root_for(&node.name), &r.test, n);
         if let Some(prev) = case.fresh() {
             say!("    a previous run's {} kept as {}",
                  case.dir.file_name().unwrap_or_default().to_string_lossy(),
@@ -1267,7 +1267,7 @@ pub fn run(
     // same seed they ran the same script over the same files, so the
     // first line that differs is the divergence itself rather than a
     // hypothesis about it.
-    let root = evidence_root();
+    let root = evidence_root_for(&node.name);
     let first = |want_pass: bool| -> Option<std::path::PathBuf> {
         records
             .iter()
@@ -1860,6 +1860,20 @@ fn evidence_root() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp/beamfs-evidence"))
 }
 
+/// Where one node's trials keep their evidence: evidence/<node>/.
+///
+/// A trial's directory is named for the test and the trial number, and
+/// was made directly under evidence/, the same name whichever node ran
+/// it. A chain that sweeps x86-01 then compute01 had the second sweep
+/// overwrite the first: on 2026-10-03 generic/202, 203 and 204 held
+/// compute01's trials where x86-01's had been, and the directories
+/// counted 627 x86 and 225 aarch64, the first falling as the aarch64
+/// sweep went on. The directories written before 2.3.61 stay where
+/// they are, at the top of evidence/.
+fn evidence_root_for(node: &str) -> std::path::PathBuf {
+    evidence_root().join(node)
+}
+
 
 /// Set when the stop file appears: the loop finishes its test and stops.
 ///
@@ -2032,7 +2046,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
              stop_path().display());
     println!();
 
-    let root = evidence_root();
+    let root = evidence_root_for(&node.name);
     let mut passed = 0usize;
     let mut failed: Vec<(String, usize)> = Vec::new();
     let mut aborted: Vec<String> = Vec::new();

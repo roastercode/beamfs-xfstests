@@ -716,6 +716,12 @@ station with O_DIRECT, kept as scratch-host.img.zst beside the
 guest's scratch.img.zst, so the two can be compared block by block.
 The configuration file also accepts ssh_key and user since 2.3.45:
 the key and the account that open the nodes.
+Since 2.3.61 each node keeps its trials under evidence/<node>/. A
+trial's directory is named for the test and the trial number, and was
+made directly under evidence/, the same name whichever node ran it: a
+chain sweeping x86-01 then compute01 had the second sweep overwrite
+what the first had kept. Directories written before 2.3.61 stay at the
+top of evidence/. Pruning keeps its count of volume images per node.
 .TP
 .B checkpoint
 Say whether this repository, the layer, the image and the node still
