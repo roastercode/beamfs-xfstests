@@ -688,7 +688,9 @@ test whose disks have stopped. Raise it for a test that ends near the
 ceiling under a probe -- generic/476 took 1751 seconds on 2026-09-23
 with nothing attached -- so the kill does not throw the probe's capture
 away with the domain. The budget line at the start of a sweep prints
-the value in force; before 2.3.29 it printed 1900 regardless.
+the value in force; before 2.3.29 it printed 1900 regardless. Since
+2.5.1 it is also written to meta.txt, as budget=, at the start and the
+end of the sweep.
 .TP
 .B XFSTESTS_SEED
 Seed for the load, so two trials of one test do the same work and can be
@@ -766,6 +768,15 @@ the record now carries whether the module is loaded, the file modinfo
 resolves and its sha256 (or "(builtin)"), its version and vermagic,
 /proc/version, and on this side the sha256 of the kernel image in the
 deploy directory.
+
+Since 2.5.1 meta.txt carries budget=, the seconds a test was allowed
+(XFSTESTS_TRIAL_TIMEOUT or 1900), and at the end recoveries=, how many
+times the sweep recovered the node and after which test. The x86 sweep
+of 2026-10-08 ran under the default 1900 s, killed generic/476 at 1883 s
+when it had taken 2317 s alone on the same image, and its record said
+neither; the node was restarted after the kill, and the taint read at
+the end would have come from the fresh boot. After a recovery the end
+taint says nothing of the tests before it, and the sweep says so.
 .TP
 .B checkpoint
 Say whether this repository, the layer, the image and the node still

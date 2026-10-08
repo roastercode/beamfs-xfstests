@@ -2050,7 +2050,7 @@ fn write_meta(c: &NodeConn, cfg: &Config, node: &Node, selection: &str,
     let body = format!(
         "=== {when} ===\nat={}\nbx_version={}\nbeamfs_commit={}\nnode={} {}\n\
          fstyp={}\nmkfs_options={}\nselection={}\ntests={tests}\n\
-         kernel_image={kimg}\n{probe}\
+         budget={}\nkernel_image={kimg}\n{probe}\
          --- seal ---\n{seal}\n",
         unix_now(),
         env!("CARGO_PKG_VERSION"),
@@ -2064,6 +2064,7 @@ fn write_meta(c: &NodeConn, cfg: &Config, node: &Node, selection: &str,
         } else {
             selection
         },
+        trial_budget(),
     );
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -2074,6 +2075,20 @@ fn write_meta(c: &NodeConn, cfg: &Config, node: &Node, selection: &str,
         let _ = f.write_all(body.as_bytes());
     }
     probe
+}
+
+/// Seconds a test may run in a sweep before the shell kills it:
+/// XFSTESTS_TRIAL_TIMEOUT, or 1900.
+///
+/// Written to meta.txt since 2.5.1. The x86 sweep of 2026-10-08 ran
+/// under the default, killed generic/476 at 1883 s when it had taken
+/// 2317 s alone on the same image, and its record did not say which
+/// budget had been in force.
+fn trial_budget() -> u64 {
+    std::env::var("XFSTESTS_TRIAL_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1900)
 }
 
 /// One line added to meta.txt.
@@ -2355,6 +2370,11 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     // escalates on it: a node killed twice and still blocked is
     // restarted rather than killed a third time.
     let mut wedge_attempts = 0u32;
+    // Every recovery of the node during the sweep, and the test it came
+    // with. The taint read at the end dates from the last of them: the
+    // x86 sweep of 2026-10-08 restarted x86-01 after generic/476, and its
+    // end taint would have been read off the fresh boot.
+    let mut recoveries: Vec<String> = Vec::new();
 
     // Whether this kernel carries a sanitizer.
     //
@@ -2464,6 +2484,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                 let outcome = rec.recover_into(&c, &dom, wedge_attempts,
                                                &mut jr, Some(&dir));
                 wedge_attempts += 1;
+                recoveries.push(format!("{test} (refused, attempt {wedge_attempts})"));
                 say!("    recovery: {}", outcome.as_str());
                 if outcome.usable() {
                     unreachable_run = 0;
@@ -2785,6 +2806,8 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                           hold the device, and the next test must not format under it");
             }
             let mut jr = crate::journal::Journal::create(&std::env::temp_dir());
+            recoveries.push(format!("{test} ({})",
+                                    if wedged { "wedged" } else { "killed by the budget" }));
             let outcome = r.recover(&c, &domain, 2, &mut jr);
             say!("    {}", outcome.as_str());
             if !outcome.usable() {
@@ -2853,6 +2876,13 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
 
     // The node after the sweep, asked the same questions as before it.
     let meta_end = write_meta(&c, cfg, node, selection, tests.len(), &record, "end");
+    meta_note(&record, &format!("recoveries={} {}", recoveries.len(), recoveries.join(", ")));
+    if !recoveries.is_empty() {
+        println!();
+        println!("  the node was recovered {} time(s) during this sweep ({}): the taint \
+                  at the end is read after the last of them",
+                 recoveries.len(), recoveries.join(", "));
+    }
     let (taint_start, taint_end) = (taint_of(&meta_start), taint_of(&meta_end));
     if taint_start != taint_end {
         println!();
@@ -3095,6 +3125,18 @@ mod tests {
                      "beamfs_loaded=", "/dev/vdb /dev/vdc", "tool=$t", "last_mount="] {
             assert!(p.contains(want), "{want} missing from {p}");
         }
+    }
+
+    #[test]
+    fn the_trial_budget_is_the_environment_or_1900() {
+        let _g = crate::env_lock();
+        unsafe { std::env::remove_var("XFSTESTS_TRIAL_TIMEOUT") };
+        assert_eq!(trial_budget(), 1900);
+        unsafe { std::env::set_var("XFSTESTS_TRIAL_TIMEOUT", "14400") };
+        assert_eq!(trial_budget(), 14400);
+        unsafe { std::env::set_var("XFSTESTS_TRIAL_TIMEOUT", "not a number") };
+        assert_eq!(trial_budget(), 1900);
+        unsafe { std::env::remove_var("XFSTESTS_TRIAL_TIMEOUT") };
     }
 
     #[test]
