@@ -15,7 +15,8 @@ Absolute paths must stay under `~/yocto/...` or sstate signatures break.
     user        hpcadmin, key ~/.ssh/hpclab_admin, NOPASSWD sudo
     ssh config  no entry; connect by IP
 
-    vda   6.1G  rootfs, beamfs   /var/lib/libvirt/images/x86/beamfs-x86-01.beamfs
+    vda   6.1G  rootfs, beamfs   sudo virsh domblklist beamfs-x86-01 (moved 2026-09-21
+                                 to a chattr +C directory; deploy asks virsh)
     vdb   1G    TEST_DEV
     vdc   1G    SCRATCH_DEV
 
@@ -62,18 +63,19 @@ hold it.
     machine     qemux86-64
     distro      poky-beamfs
     image       beamfs-research-image
-    kernel      linux-mainline 7.3-rc3
+    kernel      linux-mainline 7.3-rc5 (PREFERRED_VERSION in conf/local.conf)
     layer       ~/git/yocto-beamfs          (outside ~/yocto)
 
 The kernel takes beamfs sources from
-`~/git/yocto-beamfs/recipes-kernel/beamfs/files/beamfs-0.1.3/`, not from
+`~/git/yocto-beamfs/recipes-kernel/beamfs/files/beamfs-<version>/` (0.1.26 at
+1bf151d), not from
 `~/git/beamfs`. rsync the repo into it before bitbake or the change is
 simply not in the build.
 
 vmlinux with symbols:
 
     ~/yocto/poky/build-qemux86/tmp/work/qemux86_64-poky-linux/\
-      linux-mainline/7.3-rc3/build/vmlinux
+      linux-mainline/7.3-rc5/build/vmlinux
 
 kallsyms rounds a function's size up (0x20cc prints as 0x20d0), which is
 how to tell which build an offset in a stack trace belongs to.

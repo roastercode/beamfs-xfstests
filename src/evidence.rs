@@ -399,9 +399,14 @@ pub fn speak(case: &Case) {
     }
     let mut named: Vec<&str> = Vec::new();
     for line in fsck.lines() {
-        if line.contains("never described")
-            || line.contains("beyond correction")
-            || line.contains("out-of-range")
+        // The per-finding lines of fsck 0.1.8, not its summaries: pass
+        // 6's summary also says "beyond correction" and pass 3's says
+        // "out-of-range", and each was counted as one more finding.
+        // "never described" is what fsck said before 0.1.8.
+        if line.contains("and no parity describes it;")
+            || line.contains("never described")
+            || line.contains("is beyond correction;")
+            || line.contains(" out of [")
             || line.contains("marked used but unreferenced")
         {
             named.push(line.trim());
@@ -413,12 +418,12 @@ pub fn speak(case: &Case) {
         let mut kinds: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
         for l in &named {
-            let k = if l.contains("never described") {
+            let k = if l.contains("no parity describes it") || l.contains("never described") {
                 "indirect blocks with no parity ever written"
-            } else if l.contains("beyond correction") {
-                "indirect blocks whose parity disagrees"
-            } else if l.contains("out-of-range") {
-                "pointers outside the device"
+            } else if l.contains("is beyond correction;") {
+                "indirect blocks beyond correction"
+            } else if l.contains(" out of [") {
+                "pointers outside the data area"
             } else {
                 "blocks marked used that nothing references"
             };

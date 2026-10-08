@@ -197,7 +197,7 @@ echo 0 > $T/tracing_on
 # good case: the loop was clean. Without the guard every clean loop is
 # reported as a failed one.
 echo fsck > /tmp/beamfs-step
-fsck.beamfs -v {dev} 2>&1 > /var/tmp/beamfs-fsck.log
+fsck.beamfs -v {dev} > /var/tmp/beamfs-fsck.log 2>&1
 grep -oE '[0-9]+ referenced-but-free' /var/tmp/beamfs-fsck.log | grep -oE '^[0-9]+' | head -1 | sed 's/^/DANGLING /' || true
 grep -oE 'block [0-9]+ marked' /var/tmp/beamfs-fsck.log | grep -oE '[0-9]+' || true
 exit 0

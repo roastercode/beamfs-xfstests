@@ -4,7 +4,23 @@
 .TP
 .B sweep \fR[\fIselection\fR]
 Run every test of a selection once and report one verdict per test. With
-no argument, the whole suite.
+no argument, or all, what
+.B ./check
+runs when given nothing: the auto group, generic and shared tests (734 on
+the image of 2026-10-02). sweep generic lists tests/generic/[0-9]*.out
+instead.
+.IP
+Since 2.5.0 the sweep compares the node's fsck.beamfs with the one built in
+the beamfs tree (BEAMFS_TREE, else ~/git/beamfs) and says so when there is
+none to compare with; it was looked for beside this tool's sources, which
+for an installed build do not exist, and the check compared nothing.
+meta.txt names the node's mkfs.beamfs and fsck.beamfs (path, sha256, -V),
+the kernel's last "mounted v5 (... feat=...)" line, which gives the
+features of the volumes formatted, and what the tool check compared. The
+parity audit of frozen volumes reads region slots out of the region's
+payload (IND_PARITY_FEC) and no longer stops on a CRC volume; the summary
+of fsck findings follows the wording of fsck 0.1.8; trace and matrix read
+fsck's findings again; scenario writes 3808-byte capsules.
 .IP
 This is what a whole-suite run should be. Passing an empty selection to
 .B ./check
@@ -556,9 +572,9 @@ names the inode. With that inode
 .PP
 .RS
 .nf
-grep -c "beamfs_inode_dirty: ino=I "  trace.txt   # times dirtied
-grep -c "beamfs_write_inode: ino=I "  trace.txt   # times written
-grep    "beamfs_slot_store: ino=I "   trace.txt   # its tree changes
+grep -c "beamfs_inode_dirty: dev=[^ ]* ino=I "  trace.txt   # times dirtied
+grep -c "beamfs_write_inode: dev=[^ ]* ino=I "  trace.txt   # times written
+grep    "beamfs_slot_store: dev=[^ ]* ino=I "   trace.txt   # its tree changes
 grep    "writeback_.*ino=I "          trace.txt   # what the VFS did
 .fi
 .RE

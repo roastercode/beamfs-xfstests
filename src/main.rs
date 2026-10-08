@@ -265,7 +265,7 @@ fn usage() -> std::process::ExitCode {
          \x20        passed, failed, not run by xfstests (with its reason)\n\
          \x20        or no verdict; each sweep kept whole in sweeps/<tag>/\n\
          soak     random writes on the bare scratch device, read back now and later
-                  sweep [selection]   (default: the whole suite)\n\
+                  sweep [selection]   (default: the auto group, as ./check runs bare)\n\
                   a selection is written, not looped over:\n\
                     generic/013            one test\n\
                     generic/001-014        a range\n\

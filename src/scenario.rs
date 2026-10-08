@@ -61,10 +61,13 @@ pub fn partial_write(cfg: &Config, node: &Node, blocks: u64, keep: u64)
 
     // One file, one write, one truncate: nothing else touches the
     // volume, so every block it owns afterwards is accounted for.
-    let bytes = blocks * 3824;      // INLINE payload per block
-    let kept = keep * 3824;
+    // Data per block: a capsule holds 3808 bytes since RS_INTERLEAVE
+    // (format v5, the mkfs default); it was 3824 in the alternating
+    // layout, and a write sized by that spilled into the next block.
+    let bytes = blocks * 3808;
+    let kept = keep * 3808;
     c.run(&format!("sudo sh -c 'dd if=/dev/urandom of=/mnt/scratch/f \
-                    bs=3824 count={blocks} 2>/dev/null; \
+                    bs=3808 count={blocks} 2>/dev/null; \
                     truncate -s {kept} /mnt/scratch/f; sync'"),
           Duration::from_secs(120))
         .map_err(|e| format!("cannot write: {e:?}"))?;

@@ -408,8 +408,8 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str, tracing: bool)
     }
     /*
      * mkfs.ext2 needs -q -F to run unattended on a device that already
-     * holds a filesystem; mkfs.beamfs needs neither and does not know
-     * them. -N 16384 is understood by both.
+     * holds a filesystem; mkfs.beamfs accepts both and needs neither on
+     * an unmounted device. -N 16384 is understood by both.
      */
     let mkfs = match fstyp {
         "beamfs" => format!("mkfs.beamfs {mkfs_opts}"),
@@ -2010,6 +2010,10 @@ fn meta_probe(test_dev: &str, scratch_dev: &str) -> String {
          echo \"beamfs_version=$(modinfo -F version beamfs 2>/dev/null)\"; \
          echo \"beamfs_vermagic=$(modinfo -F vermagic beamfs 2>/dev/null)\"; \
          echo \"check_sha256=$(sha256sum /usr/xfstests/check 2>/dev/null | awk '{{print $1}}')\"; \
+         for t in mkfs.beamfs fsck.beamfs; do p=$(command -v $t); \
+         if [ -n \"$p\" ]; then echo \"tool=$t $p $(sha256sum \"$p\" | awk '{{print $1}}') $($t -V 2>&1 | head -n 1)\"; \
+         else echo \"tool=$t absent\"; fi; done; \
+         echo \"last_mount=$(sudo dmesg 2>/dev/null | grep -o 'beamfs: mounted v.*' | tail -n 1)\"; \
          grep -E '^export (FSTYP|TEST_DEV|SCRATCH_DEV|MKFS_OPTIONS|MOUNT_OPTIONS)=' \
          /usr/xfstests/local.config 2>/dev/null; \
          lsblk -b -d -n -o NAME,SIZE,SERIAL,MODEL /dev/{test_dev} /dev/{scratch_dev} 2>/dev/null \
@@ -2070,6 +2074,18 @@ fn write_meta(c: &NodeConn, cfg: &Config, node: &Node, selection: &str,
         let _ = f.write_all(body.as_bytes());
     }
     probe
+}
+
+/// One line added to meta.txt.
+fn meta_note(record: &std::path::Path, line: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(record.join("meta.txt"))
+    {
+        use std::io::Write;
+        let _ = f.write_all(format!("{line}\n").as_bytes());
+    }
 }
 
 /// The kernel's taint mask out of a node probe, as printed.
@@ -2159,15 +2175,27 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
     //
     // A wrong checker does not fail. It answers, and the answer is
     // taken for a finding.
+    let mut tools_note: String;
     {
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
+        // The checker this station built, where deploy builds it: the
+        // beamfs tree, BEAMFS_TREE or ~/git/beamfs, as commit() reads it.
+        // It was looked for beside this tool's own sources, which for an
+        // installed build is the package manager's work directory; the
+        // file was never there, tools_match skips a reference it cannot
+        // read, and the check printed "checking" while comparing nothing.
+        let tree = std::env::var("BEAMFS_TREE").unwrap_or_else(|_| {
+            format!("{}/git/beamfs", std::env::var("HOME").unwrap_or_default())
+        });
+        let fsck_ref = std::path::Path::new(&tree).join("tools/fsck.beamfs/fsck.beamfs");
+        tools_note = if fsck_ref.is_file() {
+            format!("fsck.beamfs compared with {}", fsck_ref.display())
+        } else {
+            println!("  tools   : no {} to compare the node's fsck.beamfs with -- not compared",
+                     fsck_ref.display());
+            format!("fsck.beamfs NOT compared: {} absent", fsck_ref.display())
+        };
         let local = vec![
-            ("fsck.beamfs".to_string(),
-             repo.join("beamfs/tools/fsck.beamfs/fsck.beamfs")
-                 .to_string_lossy().into_owned()),
+            ("fsck.beamfs".to_string(), fsck_ref.to_string_lossy().into_owned()),
         ];
         // And the rest of what the run is about to assert: that the
         // kernel on the node is the one built here, and that nothing
@@ -2201,6 +2229,8 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
 
         let wrong = if fresh {
             println!("  node    : verified by the last deploy, same boot");
+            tools_note = format!("{tools_note}; not compared again: \
+                                  verified by the last deploy, same boot");
             Vec::new()
         } else {
             c.ready_to_measure(&local, built)
@@ -2261,6 +2291,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         return Err(format!("cannot create the record {}: {e}", record.display()));
     }
     let meta_start = write_meta(&c, cfg, node, selection, tests.len(), &record, "start");
+    meta_note(&record, &format!("tools_check={tools_note}"));
     println!("  record  : {}", record.display());
     println!();
 
@@ -3061,7 +3092,7 @@ mod tests {
             .expect("sh");
         assert!(st.success(), "{p}");
         for want in ["modinfo -n beamfs", "beamfs_module_sha256=", "proc_version=",
-                     "beamfs_loaded=", "/dev/vdb /dev/vdc"] {
+                     "beamfs_loaded=", "/dev/vdb /dev/vdc", "tool=$t", "last_mount="] {
             assert!(p.contains(want), "{want} missing from {p}");
         }
     }

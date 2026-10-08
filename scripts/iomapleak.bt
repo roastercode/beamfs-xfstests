@@ -29,8 +29,8 @@ kprobe:beamfs_inline_iomap_begin
 kretprobe:beamfs_inline_iomap_begin
 /@len[tid]/
 {
-    /* 3824 bytes of payload per 4096-byte block. */
-    @length_asked = hist(@len[tid] / 3824);
+    /* 3808 bytes of file data per 4096-byte capsule (3824 before RS_INTERLEAVE). */
+    @length_asked = hist(@len[tid] / 3808);
     if (@flags[tid] & 1) {
         @write_begins = count();
         @write_len = hist(@len[tid]);

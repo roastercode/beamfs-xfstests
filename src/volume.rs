@@ -506,6 +506,23 @@ fn parity_slot(geo: &Geometry, blk: u64) -> Option<(u64, u32, usize)> {
     Some((region_blk, off, stride))
 }
 
+/// BEAMFS_FEATURE_INCOMPAT_IND_PARITY_FEC (beamfs_format.h).
+const IND_PARITY_FEC: u64 = 1 << 17;
+
+/// A slot of the parity region, as the kernel reads it.
+///
+/// Since IND_PARITY_FEC (on by default) a region block carries its own
+/// FEC: sixteen codewords of 239 payload bytes and 16 parity bytes, and
+/// payload byte q sits at (q / 239) * 255 + q % 239 -- the kernel's
+/// ind_slot_gather (indparity.c), and parity.bt in this repository. The
+/// audit read the slot at its raw offset, mixing payload with codeword
+/// parity, and reported written parity as missing or wrong.
+fn slot_bytes(region: &[u8], off: usize, stride: usize, fec: bool) -> Vec<u8> {
+    (off..off + stride)
+        .map(|q| if fec { region[(q / 239) * 255 + q % 239] } else { region[q] })
+        .collect()
+}
+
 /// Read one indirect block and say what its parity does or does not
 /// describe.
 ///
@@ -517,9 +534,15 @@ fn audit_parity(
     blk: u64,
 ) -> Option<ParityCheck> {
     let (region_block, region_offset, stride) = parity_slot(geo, blk)?;
+    // RS only: a CRC slot is a 64-byte checksum, and the subblock loop
+    // below reads 256 bytes of it -- it panicked on a crc volume.
+    if stride != 256 {
+        return None;
+    }
     let raw = read_at(f, blk * BLOCK, BLOCK as usize).ok()?;
     let region = read_at(f, region_block * BLOCK, BLOCK as usize).ok()?;
-    let slot = &region[region_offset as usize..region_offset as usize + stride];
+    let fec = geo.feat_incompat & IND_PARITY_FEC != 0;
+    let slot = slot_bytes(&region, region_offset as usize, stride, fec);
 
     let mut out = ParityCheck {
         block: blk,
@@ -841,6 +864,21 @@ pub fn inspect_compressed(path: &Path) -> std::io::Result<VolumeReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_slot_is_read_out_of_the_region_payload() {
+        let region: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let s = slot_bytes(&region, 0, 256, true);
+        assert_eq!(&s[..239], &region[..239]);
+        // Payload byte 239 is the first byte of the second codeword, past
+        // the first codeword's sixteen parity bytes.
+        assert_eq!(&s[239..], &region[255..272]);
+        let raw = slot_bytes(&region, 0, 256, false);
+        assert_eq!(&raw[..], &region[..256]);
+        // The last slot of a region block stays inside the block.
+        let last = slot_bytes(&region, 13 * 256, 256, true);
+        assert_eq!(last.len(), 256);
+    }
 
     fn geo() -> Geometry {
         Geometry {

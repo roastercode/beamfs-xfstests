@@ -575,7 +575,7 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
     if !rw.contains("BX_RW") {
         let mounts = c.run("grep ' / ' /proc/mounts", Duration::from_secs(20))
             .unwrap_or_default();
-        let dm = c.run("sudo dmesg | grep -i 'remount\\|read-only\\|fs error' | tail -5",
+        let dm = c.run("sudo dmesg | grep -i 'remount\\|read-only\\|fs error\\|volume failed' | tail -5",
                        Duration::from_secs(20))
             .unwrap_or_default();
         println!("  root    : {}", mounts.trim());
