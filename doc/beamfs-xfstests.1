@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: GPL-2.0-only
-.TH BEAMFS-XFSTESTS 1 "2026-10-08" "beamfs-xfstests" "beamfs development tools"
+.TH BEAMFS-XFSTESTS 1 "2026-10-10" "beamfs-xfstests" "beamfs development tools"
 
 .TP
 .B sweep \fR[\fIselection\fR]
@@ -692,6 +692,14 @@ the value in force; before 2.3.29 it printed 1900 regardless. Since
 2.5.1 it is also written to meta.txt, as budget=, at the start and the
 end of the sweep.
 .TP
+.B XFSTESTS_KNOWN_FAILURES
+The failures a sweep may report and still exit 0. One test per line,
+then why it fails and what reproduces it; # starts a comment. A line
+with no reason is refused, and its test fails the sweep like any
+other. Defaults to tests/known-failures in the beamfs tree
+(BEAMFS_TREE, else ~/git/beamfs); without that file, every failure
+fails the sweep. Since 2.5.2.
+.TP
 .B XFSTESTS_SEED
 Seed for the load, so two trials of one test do the same work and can be
 compared line by line. generic/464 picks its files and write sizes at
@@ -777,6 +785,42 @@ when it had taken 2317 s alone on the same image, and its record said
 neither; the node was restarted after the kill, and the taint read at
 the end would have come from the fresh boot. After a recovery the end
 taint says nothing of the tests before it, and the sweep says so.
+.PP
+Since 2.5.2 a sweep ends with a verdict on itself, and its exit status
+says it: 0 when the verdicts are clean, 4 when they are not, 1 when the
+sweep could not run. They are not clean when a test failed and is not
+a known failure (see
+.BR XFSTESTS_KNOWN_FAILURES ),
+when a test has no verdict or was never started, when the kernel was
+tainted before the sweep by a machine check, a bad page, a death, a
+warning or a soft lockup, when its taint changed during the sweep,
+when the node had to be recovered, when lockdep was not on at the
+start or switched itself off (debug_locks, in /proc/lockdep_stats),
+or when the apparatus failed. meta.txt carries debug_locks= and
+kmemleak= at the start and at the end, known_failures= with the path
+and the sha256 of the list used, and gate= with its reasons. Until
+2.5.2 a sweep exited 0 whatever it found, and nothing stopped a chain,
+or a publication, on its verdicts.
+.PP
+A test passes when check says it passed and the kernel said nothing,
+while it ran, that names an incident: BUG:, WARNING:, Oops, call trace,
+uncorrectable or corrupt, read case aside, and LOST POINTER as written,
+since the tree checker says "no lost pointer seen" at every unmount.
+An RS event line counts whatever its uncorrectable= says: with no
+injection, a correction during xfstests is one beamfs should not have
+had to make. These are the words the shard runner of
+.B run
+fails a passed test on, and one list holds them for both. check's own
+_check_dmesg catches the generic reports, not what beamfs says when it
+finds damage; until 2.5.2 sweep and bench took the line "Passed all"
+alone. Such a failure gives as its reason "passed by xfstests, but the
+kernel said", with the first lines, and keeps its volume like any
+other failure.
+.PP
+The test device is the one the node's configuration names. The
+preparation of sweep and bench, the load of trace and the conditions
+of matrix formatted and mounted /dev/vdb whatever the node: the test
+device of x86-01, and of no other node.
 .TP
 .B checkpoint
 Say whether this repository, the layer, the image and the node still
@@ -1163,9 +1207,14 @@ XFSTESTS_LOAD_PROCS=32 XFSTESTS_LOAD_FILES=50 \\
 .RE
 
 .SH EXIT STATUS
-0 if the command completed, whatever the tests found; non-zero if it
-could not run \(em no node reachable, no test suite on the node, no
-room for the captures.
+.B sweep
+exits 0 when its verdicts are clean, 4 when they are not, and 1 when
+it could not run; the reasons are printed at its end and kept in
+meta.txt as gate=.
+.PP
+Every other command exits 0 if it completed, whatever the tests found,
+and non-zero if it could not run: no node reachable, no test suite on
+the node, no room for the captures.
 
 .SH SEE ALSO
 .BR fsck.beamfs (8),

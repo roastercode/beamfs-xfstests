@@ -39,7 +39,9 @@ fi
 [ "$RESUME" = "1" ] || : > $R
 touch $R
 
-# KCSAN is compiled in but not enabled at boot: CONFIG_KCSAN_EARLY_ENABLE
+# KCSAN, in a kernel built with BEAMFS_KCSAN=1 in the layer (the default
+# build has none since 7.3-rc3), is compiled in but not enabled at boot:
+# CONFIG_KCSAN_EARLY_ENABLE
 # is off, because watching from the first instruction means the whole of
 # init runs at a fraction of speed before anything worth watching
 # happens. The file exists only on a kernel built with CONFIG_KCSAN, so
@@ -270,9 +272,17 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
     # uncorrectable block. The harness does not look, so the run reports
     # a green test over a filesystem that just corrupted something.
     # Same trap as dmesg_for_test: from the LAST marker.
+    # The words are INCIDENT_WORDS of bench.rs, which a test holds
+    # identical: run and sweep fail a passed test on one list.
     INC=$(dmesg_for_test "$t" \
           | grep -ciE "BUG:|WARNING:|Oops|call trace|uncorrectable|corrupt" 2>/dev/null)
     INC=${INC:-0}
+    # LOST POINTER read as written, not case aside: the tree checker
+    # also says "no lost pointer seen" at every unmount, and that is
+    # the good news. INCIDENT_EXACT of bench.rs, held identical by a
+    # test.
+    LOST=$(dmesg_for_test "$t" | grep -c "LOST POINTER" 2>/dev/null)
+    INC=$(( INC + ${LOST:-0} ))
 
     # And fsck after every test, not only after failures. beamfs has a
     # checker that found four real defects in a day; a test that passes

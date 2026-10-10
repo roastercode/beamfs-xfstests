@@ -83,7 +83,7 @@ impl Condition {
     /// rather than assuming what the previous condition left behind: a
     /// cell that inherits a mount from the cell before it measures the
     /// wrong thing, and there is no way to tell from its result.
-    fn setup(self) -> String {
+    fn setup(self, test_dev: &str) -> String {
         let common = "pkill -9 xfs_io 2>/dev/null\n\
                       umount -l /mnt/scratch /mnt/test 2>/dev/null\n\
                       sleep 1\n\
@@ -92,13 +92,13 @@ impl Condition {
             Condition::ScratchOnly => common.to_string(),
             Condition::SecondBeamfs => format!(
                 "{common}\
-                 mkfs.beamfs -N 16384 /dev/vdb >/dev/null 2>&1\n\
-                 mount -t beamfs /dev/vdb /mnt/test || echo 'SETUP: second mount failed' >&2\n"
+                 mkfs.beamfs -N 16384 {test_dev} >/dev/null 2>&1\n\
+                 mount -t beamfs {test_dev} /mnt/test || echo 'SETUP: second mount failed' >&2\n"
             ),
             Condition::SecondBeamfsNoScrub => format!(
                 "{common}\
-                 mkfs.beamfs -N 16384 /dev/vdb >/dev/null 2>&1\n\
-                 mount -t beamfs /dev/vdb /mnt/test || echo 'SETUP: second mount failed' >&2\n\
+                 mkfs.beamfs -N 16384 {test_dev} >/dev/null 2>&1\n\
+                 mount -t beamfs {test_dev} /mnt/test || echo 'SETUP: second mount failed' >&2\n\
                  # There is no enabled attribute; interval is what is\n\
                  # writable, and a day between passes is a stopped sweep\n\
                  # for a run measured in minutes. The cursor is reported\n\
@@ -109,8 +109,8 @@ impl Condition {
             ),
             Condition::SecondExt2 => format!(
                 "{common}\
-                 mkfs.ext2 -q -F /dev/vdb 2>/dev/null\n\
-                 mount -t ext2 /dev/vdb /mnt/test || echo 'SETUP: ext2 mount failed' >&2\n"
+                 mkfs.ext2 -q -F {test_dev} 2>/dev/null\n\
+                 mount -t ext2 {test_dev} /mnt/test || echo 'SETUP: ext2 mount failed' >&2\n"
             ),
             Condition::MemoryPressure => format!(
                 "{common}\
@@ -189,7 +189,7 @@ pub fn run_cell(
     let c = NodeConn::new(node, cfg);
 
     let out = c
-        .run(&format!("sudo sh -c {}", quote(&format!("{}\n{}", cond.setup(), cond.check()))),
+        .run(&format!("sudo sh -c {}", quote(&format!("{}\n{}", cond.setup(&format!("/dev/{}", node.test_dev)), cond.check()))),
              Duration::from_secs(180))
         .map_err(|e| format!("setup: {e}"))?;
     let state: String = out
@@ -340,8 +340,15 @@ mod tests {
 
     #[test]
     fn a_second_mount_condition_mounts_something() {
-        assert!(Condition::SecondBeamfs.setup().contains("mount -t beamfs /dev/vdb"));
-        assert!(Condition::SecondExt2.setup().contains("mount -t ext2 /dev/vdb"));
+        assert!(Condition::SecondBeamfs.setup("/dev/vdb").contains("mount -t beamfs /dev/vdb"));
+        assert!(Condition::SecondExt2.setup("/dev/vdb").contains("mount -t ext2 /dev/vdb"));
+    }
+
+    #[test]
+    fn a_second_mount_uses_the_node_s_test_device() {
+        let s = Condition::SecondBeamfs.setup("/dev/sda");
+        assert!(s.contains("mount -t beamfs /dev/sda /mnt/test"), "{s}");
+        assert!(!s.contains("/dev/vdb"), "{s}");
     }
 
     #[test]
@@ -358,19 +365,19 @@ mod tests {
     fn no_leak_anywhere_means_the_load_is_not_enough() {
         assert_eq!(verdict(4, 0),
                    "no condition leaked: the load alone does not reproduce it");
-        assert!(!Condition::ScratchOnly.setup().contains("mount -t"));
+        assert!(!Condition::ScratchOnly.setup("/dev/vdb").contains("mount -t"));
     }
 
     #[test]
     fn every_condition_unmounts_what_the_last_one_left() {
         for c in Condition::all() {
-            assert!(c.setup().contains("umount -l /mnt/scratch /mnt/test"));
+            assert!(c.setup("/dev/vdb").contains("umount -l /mnt/scratch /mnt/test"));
         }
     }
 
     #[test]
     fn the_no_scrub_condition_reports_the_cursor() {
-        let s = Condition::SecondBeamfsNoScrub.setup();
+        let s = Condition::SecondBeamfsNoScrub.setup("/dev/vdb");
         assert!(s.contains("interval"));
         assert!(s.contains("cursors"));
     }

@@ -300,7 +300,11 @@ deploy   put the newest image and this repo's tools on a node,\n\
          \x20 XFSTESTS_NO_RESUME      start over instead of resuming\n\
          \x20 BEAMFS_NO_BELL          same as --no-bell, for a whole shell\n\
          \x20 XFSTESTS_BPF            a script from --probes, attached per test\n\
-         \x20 XFSTESTS_BPF_SCRIPTS    where to look for them\n"
+         \x20 XFSTESTS_BPF_SCRIPTS    where to look for them\n\
+         \x20 XFSTESTS_KNOWN_FAILURES failures a sweep may report and still exit 0\n\
+         \n\
+         a sweep exits 0 when its verdicts are clean, 4 when they are not,\n\
+         1 when it could not run\n"
     );
     std::process::ExitCode::from(2)
 }
@@ -1781,7 +1785,12 @@ fn do_sweep(cfg: &Config, selection: &[String]) -> std::process::ExitCode {
         x => x,
     };
     match bench::sweep(cfg, node, sel) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(true) => std::process::ExitCode::SUCCESS,
+        // It ran, and its verdicts are not clean: a failure outside
+        // the known list, a test without a verdict, a kernel that
+        // warned or switched lockdep off. 1 stays for a sweep that
+        // could not run.
+        Ok(false) => std::process::ExitCode::from(4),
         Err(e) => {
             eprintln!("sweep: {e}");
             std::process::ExitCode::FAILURE

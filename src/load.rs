@@ -111,7 +111,7 @@ pub struct LoopResult {
 /// the body needs $RANDOM, command substitution and its own variables,
 /// and every layer between here and the remote shell is one more chance
 /// to lose a quote.
-fn script(l: &Load, dev: &str, mnt: &str, mkfs_opts: &str, fresh: bool) -> String {
+fn script(l: &Load, test_dev: &str, dev: &str, mnt: &str, mkfs_opts: &str, fresh: bool) -> String {
     let mut s = String::with_capacity(2048);
     let _ = write!(
         s,
@@ -142,9 +142,9 @@ mkdir -p {mnt}
 # more than one beamfs superblock being live at once, so a reproducer
 # that mounts one measures nothing.
 [ "{no_test_mount}" = "1" ] || mount | grep -q ' /mnt/test ' || {{
-  mkfs.beamfs {mkfs_opts} /dev/vdb >/dev/null 2>&1
+  mkfs.beamfs {mkfs_opts} {test_dev} >/dev/null 2>&1
   mkdir -p /mnt/test
-  mount -t beamfs /dev/vdb /mnt/test 2>/dev/null
+  mount -t beamfs {test_dev} /mnt/test 2>/dev/null
 }}
 mount -t beamfs {dev} {mnt} || {{ echo 'MOUNT FAILED' >&2; exit 1; }}
 
@@ -223,7 +223,9 @@ pub fn run_loop(
     fresh: bool,
     deadline: Duration,
 ) -> Result<LoopResult, String> {
-    let body = script(l, dev, mnt, mkfs_opts, fresh);
+    // The node's own test device. This was /dev/vdb, the test device
+    // of x86-01 and of no other node.
+    let body = script(l, &format!("/dev/{}", c.node.test_dev), dev, mnt, mkfs_opts, fresh);
     let tmp = std::env::temp_dir().join("beamfs-load-loop.sh");
     std::fs::write(&tmp, &body).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     c.push(tmp.to_str().unwrap_or_default(), "/tmp/beamfs-load-loop.sh")
@@ -278,8 +280,8 @@ mod tests {
     #[test]
     fn a_fresh_loop_formats_the_scratch_and_a_continuing_one_does_not() {
         let l = Load::default();
-        let with = script(&l, "/dev/vdc", "/mnt/scratch", "-N 16384", true);
-        let without = script(&l, "/dev/vdc", "/mnt/scratch", "-N 16384", false);
+        let with = script(&l, "/dev/vdb", "/dev/vdc", "/mnt/scratch", "-N 16384", true);
+        let without = script(&l, "/dev/vdb", "/dev/vdc", "/mnt/scratch", "-N 16384", false);
         // The scratch volume is what the fresh flag governs. The test
         // volume is made once if absent, on every loop, because it has
         // to be mounted for the leak to reproduce at all.
@@ -289,14 +291,21 @@ mod tests {
 
     #[test]
     fn the_test_volume_is_mounted_alongside_the_scratch() {
-        let s = script(&Load::default(), "/dev/vdc", "/mnt/scratch", "-N 16384", false);
+        let s = script(&Load::default(), "/dev/vdb", "/dev/vdc", "/mnt/scratch", "-N 16384", false);
         assert!(s.contains("/mnt/test"));
         assert!(s.contains("/dev/vdb"));
     }
 
     #[test]
+    fn the_test_volume_is_the_node_s_own() {
+        let s = script(&Load::default(), "/dev/sda", "/dev/sdb", "/mnt/scratch", "", false);
+        assert!(s.contains("mount -t beamfs /dev/sda /mnt/test"), "{s}");
+        assert!(!s.contains("/dev/vdb"), "{s}");
+    }
+
+    #[test]
     fn the_stop_flag_is_removed_with_the_writers() {
-        let s = script(&Load::default(), "/dev/vdc", "/mnt/scratch", "", false);
+        let s = script(&Load::default(), "/dev/vdb", "/dev/vdc", "/mnt/scratch", "", false);
         assert!(s.contains("D=$(mktemp -d)"));
         assert!(s.contains("rm -rf $D"));
     }

@@ -493,8 +493,8 @@ fn prepare(c: &NodeConn, mkfs_opts: &str, fstyp: &str, tracing: bool)
          printf \"dumpfs={dumpfs}\\n\"; \
          sed -i \"s|^export MKFS_OPTIONS=.*|export MKFS_OPTIONS=\\\"{mkfs_opts}\\\"|\" /usr/xfstests/local.config; \
          sed -i \"s|^export FSTYP=.*|export FSTYP={fstyp}|\" /usr/xfstests/local.config; \
-         {mkfs} /dev/vdb >/dev/null 2>&1; \
-         mount -t {fstyp} /dev/vdb /mnt/test; \
+         {mkfs} /dev/{test_dev} >/dev/null 2>&1; \
+         mount -t {fstyp} /dev/{test_dev} /mnt/test; \
          if [ -e /sys/kernel/debug/kcsan ]; then echo on > /sys/kernel/debug/kcsan; fi; \
          if [ -n \"{scrub_ms}\" ]; then \
            P=/sys/module/beamfs/parameters/scrub_interval_ms; \
@@ -690,6 +690,121 @@ fn not_run_reason(out: &str) -> Option<String> {
     })
 }
 
+/// What the kernel may not say during a test that is to count as passed.
+///
+/// check's own _check_dmesg fails a test on the generic reports (BUG:,
+/// WARNING:, Oops:, lockdep, RCU, UBSAN). It does not know what beamfs
+/// says when it finds damage: uncorrectable, corrupt, a stack dumped
+/// without a WARNING line. The shard runner of `run` fails a passed
+/// test on these words, read case aside; sweep and bench took the line
+/// "Passed all" alone until 2.5.2, and a test passed over a filesystem
+/// that had just reported damage. One list, read here and grepped by
+/// runner.sh, which a test below holds identical.
+///
+/// An RS event line counts whatever its uncorrectable= says: with no
+/// injection, a correction during xfstests is one beamfs should not
+/// have had to make.
+const INCIDENT_WORDS: [&str; 6] =
+    ["BUG:", "WARNING:", "Oops", "call trace", "uncorrectable", "corrupt"];
+
+/// The tree checker's report, read as written and not case aside: the
+/// same checker says "no lost pointer seen" at every unmount, and that
+/// is the good news.
+const INCIDENT_EXACT: &str = "LOST POINTER";
+
+/// The lines of a kernel log that name an incident.
+fn kernel_incidents(dmesg: &str) -> Vec<String> {
+    let words: Vec<String> = INCIDENT_WORDS.iter().map(|w| w.to_lowercase()).collect();
+    dmesg
+        .lines()
+        .filter(|l| {
+            let low = l.to_lowercase();
+            l.contains(INCIDENT_EXACT) || words.iter().any(|w| low.contains(w.as_str()))
+        })
+        .map(|l| l.trim().to_string())
+        .collect()
+}
+
+/// Whether lockdep was still on, out of a node probe: "1" or "0" as
+/// /proc/lockdep_stats says, "absent" for a kernel without lockdep,
+/// "unread" when the probe did not say.
+///
+/// lockdep reports the first problem it finds and then turns itself
+/// off for the rest of the boot. check catches that first report; the
+/// tests after it run without lockdep, and nothing said so.
+fn debug_locks_of(probe: &str) -> String {
+    probe
+        .lines()
+        .find_map(|l| l.strip_prefix("debug_locks="))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("unread")
+        .to_string()
+}
+
+/// The taint flags that make a kernel's verdicts suspect, out of the
+/// mask /proc/sys/kernel/tainted prints: M (machine check), B (bad
+/// page), D (died), W (warned), L (soft lockup). None when it carries
+/// none of them, "unread" when the mask is not a number. O, an
+/// out-of-tree module such as emufi, and E, an unsigned one, say
+/// nothing about the filesystem.
+fn bad_taint(mask: &str) -> Option<String> {
+    let Ok(v) = mask.trim().parse::<u64>() else {
+        return Some("unread".into());
+    };
+    let mut flags = String::new();
+    for (bit, c) in [(4u32, 'M'), (5, 'B'), (7, 'D'), (9, 'W'), (14, 'L')] {
+        if v & (1u64 << bit) != 0 {
+            flags.push(c);
+        }
+    }
+    if flags.is_empty() {
+        None
+    } else {
+        Some(flags)
+    }
+}
+
+/// Where the failures a sweep may report and still exit 0 are listed:
+/// XFSTESTS_KNOWN_FAILURES, else tests/known-failures in the beamfs
+/// tree (BEAMFS_TREE, else ~/git/beamfs), beside the reproducers.
+fn known_failures_path() -> PathBuf {
+    if let Ok(p) = std::env::var("XFSTESTS_KNOWN_FAILURES") {
+        return PathBuf::from(p);
+    }
+    let tree = std::env::var("BEAMFS_TREE").unwrap_or_else(|_| {
+        format!("{}/git/beamfs", std::env::var("HOME").unwrap_or_default())
+    });
+    PathBuf::from(tree).join("tests/known-failures")
+}
+
+/// The list of known failures: one test per line, then why it fails
+/// and what reproduces it; # starts a comment. A known failure with no
+/// reason is a failure nobody can account for: it is refused, and its
+/// test fails the sweep like any other.
+fn parse_known_failures(text: &str)
+    -> (std::collections::BTreeMap<String, String>, Vec<String>) {
+    let mut known = std::collections::BTreeMap::new();
+    let mut refused = Vec::new();
+    for line in text.lines() {
+        let line = match line.find('#') {
+            Some(i) => &line[..i],
+            None => line,
+        }
+        .trim();
+        if line.is_empty() {
+            continue;
+        }
+        match line.split_once(char::is_whitespace) {
+            Some((t, why)) if !why.trim().is_empty() => {
+                known.insert(t.to_string(), why.trim().to_string());
+            }
+            _ => refused.push(line.to_string()),
+        }
+    }
+    (known, refused)
+}
+
 fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, String> {
     let t0 = Instant::now();
     // run_rc, not run: a failing test exits non-zero and that is the
@@ -773,7 +888,9 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
     // 611 of the 734 tests of the aarch64 sweep of 2026-10-05 were
     // saved as PASS without having run.
     let notrun = not_run_reason(&out);
-    let passed = notrun.is_none()
+    // What check said. Whether the test passed also depends on what the
+    // kernel said while it ran, read once the counts below are in.
+    let harness_passed = notrun.is_none()
         && out
             .lines()
             .any(|l| l.starts_with("Passed all ") && !l.contains(" 0 "));
@@ -832,6 +949,21 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0);
 
+    // A test passes when check says so and the kernel said nothing,
+    // while it ran, that names an incident (INCIDENT_WORDS,
+    // INCIDENT_EXACT). The ring was cleared before check started, so
+    // all of it is this test's. A log that cannot be read is not a
+    // clean one.
+    let incidents: Vec<String> = if harness_passed {
+        match c.run("sudo dmesg", Duration::from_secs(30)) {
+            Ok(d) => kernel_incidents(&d),
+            Err(e) => vec![format!("the kernel log could not be read: {e}")],
+        }
+    } else {
+        Vec::new()
+    };
+    let passed = harness_passed && incidents.is_empty();
+
     // What the harness objected to, when it was not a leak. Trial 1 of
     // the last campaign failed with fsck reporting nothing, and the
     // reason was thrown away with the output.
@@ -885,6 +1017,12 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
             format!("not run by xfstests: {why}")
         } else if passed || aborted {
             String::new()
+        } else if harness_passed {
+            // check was satisfied; the kernel was not.
+            format!(
+                "passed by xfstests, but the kernel said: {}",
+                incidents.iter().take(3).cloned().collect::<Vec<_>>().join(" | ")
+            )
         } else if !checked {
             // The single most useful thing to know about a short
             // failure: the filesystem was never checked, so whatever
@@ -2002,6 +2140,8 @@ fn meta_probe(test_dev: &str, scratch_dev: &str) -> String {
         "echo \"uname=$(uname -r) $(uname -v)\"; \
          echo \"proc_version=$(cat /proc/version)\"; \
          echo \"tainted=$(cat /proc/sys/kernel/tainted)\"; \
+         if [ -e /proc/lockdep_stats ]; then echo \"debug_locks=$(sudo awk '/debug_locks:/ {{print $2}}' /proc/lockdep_stats 2>/dev/null)\"; else echo debug_locks=absent; fi; \
+         echo \"kmemleak=$(sudo sh -c 'test -e /sys/kernel/debug/kmemleak' && echo present || echo absent)\"; \
          echo \"uptime=$(awk '{{print $1}}' /proc/uptime)\"; \
          echo \"beamfs_loaded=$(grep -c '^beamfs ' /proc/modules)\"; \
          echo \"beamfs_srcversion=$(cat /sys/module/beamfs/srcversion 2>/dev/null)\"; \
@@ -2157,11 +2297,14 @@ fn stopping() -> bool {
 
 /// Run every test of a selection once, and report what failed.
 ///
+/// Ok(true) when its verdicts are clean, Ok(false) when they are not,
+/// as the verdict at its end decides; Err when it could not run.
+///
 /// This is what a whole-suite run should always have been. Each test is
 /// its own trial: its own archive, its own frozen volume on failure,
 /// its own block count. A campaign that dies halfway still has
 /// everything it measured up to that point, written as it went.
-pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
+pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String> {
     let c = NodeConn::new(node, cfg);
 
     println!("  node    : {}", node.name);
@@ -2890,6 +3033,86 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
                   the kernel warned during this sweep, whatever the verdicts say");
     }
 
+    // The verdict on the sweep as a whole, and the exit status with it.
+    //
+    // Until 2.5.2 a sweep exited 0 whatever it found and printed its
+    // findings for whoever read them: nothing stopped a chain, or a
+    // publication, on a failure, a test without a verdict or a kernel
+    // that warned. Each reason below is a fact the record carries.
+    let known_path = known_failures_path();
+    let (known, refused) = match std::fs::read_to_string(&known_path) {
+        Ok(t) => parse_known_failures(&t),
+        Err(_) => (std::collections::BTreeMap::new(), Vec::new()),
+    };
+    let mut blocking: Vec<String> = Vec::new();
+    let mut known_seen: Vec<String> = Vec::new();
+    for (t, _) in &failed {
+        match known.get(t) {
+            Some(why) => known_seen.push(format!("{t}: {why}")),
+            None => blocking.push(format!("{t} failed and is not a known failure")),
+        }
+    }
+    for t in &aborted {
+        blocking.push(format!("{t} has no verdict"));
+    }
+    if done < tests.len() {
+        blocking.push(format!("{} test(s) never started", tests.len() - done));
+    }
+    if let Some(f) = bad_taint(&taint_start) {
+        blocking.push(format!("the kernel was tainted before the sweep: {taint_start} ({f})"));
+    }
+    if taint_end != taint_start {
+        blocking.push(format!("the kernel taint went from {taint_start} to {taint_end}"));
+    }
+    if !recoveries.is_empty() {
+        blocking.push(format!(
+            "the node was recovered {} time(s): what the end of the sweep reads \
+             does not describe the tests before",
+            recoveries.len()
+        ));
+    }
+    let (locks_start, locks_end) = (debug_locks_of(&meta_start), debug_locks_of(&meta_end));
+    match locks_start.as_str() {
+        "absent" => println!("  lockdep : not in this kernel"),
+        "1" if locks_end == "1" => {}
+        "1" => blocking.push(format!(
+            "lockdep switched itself off during the sweep \
+             (debug_locks 1 at the start, {locks_end} at the end)"
+        )),
+        other => blocking.push(format!("lockdep was not on at the start (debug_locks {other})")),
+    }
+    for a in &apparatus {
+        blocking.push(format!("the apparatus failed: {a}"));
+    }
+    println!();
+    for r in &refused {
+        println!("  known failures: refused, no reason given: {r}");
+    }
+    if known_path.is_file() {
+        println!("  known failures: {} listed in {}", known.len(), known_path.display());
+        keep_in_record(&known_path, &record);
+    } else {
+        println!("  known failures: no {}, every failure counts", known_path.display());
+    }
+    for k in &known_seen {
+        say!("    known: {k}");
+    }
+    meta_note(&record, &format!(
+        "known_failures={} {}",
+        known_path.display(),
+        crate::chain::sha256_file(&known_path).unwrap_or_else(|| "absent".into())
+    ));
+    if blocking.is_empty() {
+        println!("  === sweep verdict: clean ===");
+        meta_note(&record, "gate=clean");
+    } else {
+        println!("  === sweep verdict: NOT CLEAN, {} reason(s) ===", blocking.len());
+        for b in &blocking {
+            say!("    {b}");
+        }
+        meta_note(&record, &format!("gate=not-clean {}", blocking.join("; ")));
+    }
+
     // Prune here rather than per test: a sweep that fails often would
     // otherwise keep one image per failure and fill the disk it is
     // running on.
@@ -3051,7 +3274,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<(), String> {
         None if kept.is_empty() => {}
         None => println!("  the archive could not be written"),
     }
-    Ok(())
+    Ok(blocking.is_empty())
 }
 
 #[cfg(test)]
@@ -3143,6 +3366,63 @@ mod tests {
     fn the_taint_is_read_from_the_probe() {
         assert_eq!(taint_of("uname=7.3.0-rc5 #1\ntainted=4096\nuptime=12.3\n"), "4096");
         assert_eq!(taint_of("probe failed: timeout\n"), "unknown");
+    }
+
+    #[test]
+    fn run_and_sweep_fail_a_pass_on_the_same_words() {
+        let runner = include_str!("runner.sh");
+        let words = format!("grep -ciE \"{}\"", INCIDENT_WORDS.join("|"));
+        let exact = format!("grep -c \"{INCIDENT_EXACT}\"");
+        assert!(runner.contains(&words), "runner.sh does not read: {words}");
+        assert!(runner.contains(&exact), "runner.sh does not read: {exact}");
+    }
+
+    #[test]
+    fn a_pass_over_reported_damage_is_found() {
+        let d = "[   12.0] run fstests generic/013 at 2026-10-10 09:00:00\n\
+                 [   13.1] beamfs: directory block 812 uncorrectable\n\
+                 [   13.2] beamfs/treecheck: LOST POINTER parent=97 slot=4 held 812\n\
+                 [   14.0] beamfs/treecheck: no lost pointer seen\n\
+                 [   14.1] beamfs: mounted v5 (scheme 2)\n";
+        let found = kernel_incidents(d);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[1].contains("LOST POINTER"), "{found:?}");
+        assert!(kernel_incidents("[ 1.0] run fstests generic/001 at 2026-10-10\n").is_empty());
+    }
+
+    #[test]
+    fn a_known_failure_needs_a_reason() {
+        let (known, refused) = parse_known_failures(
+            "# beamfs 0.1.26\n\
+             generic/476 R3-2, tests/xfstests/001  # past EOF\n\
+             generic/013\n\
+             \n",
+        );
+        assert_eq!(known.get("generic/476").map(String::as_str),
+                   Some("R3-2, tests/xfstests/001"));
+        assert!(!known.contains_key("generic/013"));
+        assert_eq!(refused, vec!["generic/013".to_string()]);
+    }
+
+    #[test]
+    fn lockdep_is_read_from_the_probe() {
+        assert_eq!(debug_locks_of("tainted=0\ndebug_locks=1\n"), "1");
+        assert_eq!(debug_locks_of("debug_locks=absent\n"), "absent");
+        assert_eq!(debug_locks_of("debug_locks=\n"), "unread");
+        assert_eq!(debug_locks_of("probe failed: timeout\n"), "unread");
+        let p = meta_probe("vdb", "vdc");
+        assert!(p.contains("/proc/lockdep_stats"), "{p}");
+        assert!(p.contains("kmemleak="), "{p}");
+    }
+
+    #[test]
+    fn a_kernel_that_warned_is_a_bad_taint() {
+        assert!(bad_taint("0").is_none());
+        // O: an out-of-tree module, emufi. It says nothing of beamfs.
+        assert!(bad_taint("4096").is_none());
+        assert_eq!(bad_taint("512").as_deref(), Some("W"));
+        assert_eq!(bad_taint("640").as_deref(), Some("DW"));
+        assert_eq!(bad_taint("unknown").as_deref(), Some("unread"));
     }
 
     #[test]
