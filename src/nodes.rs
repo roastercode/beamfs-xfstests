@@ -144,7 +144,7 @@ pub fn concerns(m: &BTreeMap<String, String>) -> Vec<String> {
 /// domain.
 #[must_use]
 fn domstate(domain: &str) -> String {
-    match Command::new("virsh").arg("domstate").arg(domain).output() {
+    match Command::new("virsh").args(["-c", "qemu:///system", "domstate"]).arg(domain).output() {
         Ok(o) if o.status.success() => {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if s.is_empty() { "unknown".into() } else { s }

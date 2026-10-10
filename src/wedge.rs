@@ -43,7 +43,7 @@ pub fn capture_wedged(vm: &str, dir: &Path) -> Result<u64, String> {
     // produced, and a reader attached afterwards gets whatever the pty
     // buffer still holds, which is not all of it.
     let mut reader = Command::new("sudo")
-        .args(["virsh", "console", vm, "--force"])
+        .args(["virsh", "-c", "qemu:///system", "console", vm, "--force"])
         .stdin(std::process::Stdio::null())
         .stdout(out.try_clone().map_err(|e| e.to_string())?)
         .stderr(std::process::Stdio::null())
@@ -59,7 +59,7 @@ pub fn capture_wedged(vm: &str, dir: &Path) -> Result<u64, String> {
     ] {
         println!("    asking the node for {what}");
         let _ = Command::new("sudo")
-            .args(["virsh", "send-key", vm, "KEY_LEFTALT", "KEY_SYSRQ", key])
+            .args(["virsh", "-c", "qemu:///system", "send-key", vm, "KEY_LEFTALT", "KEY_SYSRQ", key])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();

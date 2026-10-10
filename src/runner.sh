@@ -65,10 +65,10 @@ dmesg_for_test() {
 	# credited with the kernel messages of every test that came after
 	# it. Whole runs came back with the same "incidents=12" on every
 	# test and not one of those failures was real.
-	_d=$(sudo dmesg | awk -v m="BEGIN generic/$1" \
+	_d=$(sudo dmesg -x | awk -v m="BEGIN generic/$1" \
 		'index($0, m) { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }')
 	if [ -z "$_d" ]; then
-		sudo dmesg | tail -60
+		sudo dmesg -x | tail -60
 	else
 		echo "$_d"
 	fi
@@ -272,10 +272,10 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
     # uncorrectable block. The harness does not look, so the run reports
     # a green test over a filesystem that just corrupted something.
     # Same trap as dmesg_for_test: from the LAST marker.
-    # The words are INCIDENT_WORDS of bench.rs, which a test holds
-    # identical: run and sweep fail a passed test on one list.
+    # The levels are INCIDENT_LEVELS of bench.rs, which a test holds
+    # identical: run and sweep fail a passed test on one definition.
     INC=$(dmesg_for_test "$t" \
-          | grep -ciE "BUG:|WARNING:|Oops|call trace|uncorrectable|corrupt" 2>/dev/null)
+          | grep -cE '^kern +:(emerg|alert|crit|err|warn) +:' 2>/dev/null)
     INC=${INC:-0}
     # LOST POINTER read as written, not case aside: the tree checker
     # also says "no lost pointer seen" at every unmount, and that is
@@ -283,6 +283,11 @@ for t in $(ls /usr/xfstests/tests/generic/[0-9]*.out 2>/dev/null \
     # test.
     LOST=$(dmesg_for_test "$t" | grep -c "LOST POINTER" 2>/dev/null)
     INC=$(( INC + ${LOST:-0} ))
+    # A correction by beamfs, at whatever level: with no injection,
+    # beamfs repaired what it had written. INCIDENT_CORRECTED of
+    # bench.rs.
+    CORR=$(dmesg_for_test "$t" | grep -cE 'beamfs.* corrected' 2>/dev/null)
+    INC=$(( INC + ${CORR:-0} ))
 
     # And fsck after every test, not only after failures. beamfs has a
     # checker that found four real defects in a day; a test that passes

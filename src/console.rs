@@ -124,7 +124,7 @@ impl ConsoleSet {
 
     fn pty_of(domain: &str) -> Option<String> {
         let out = Command::new("sudo")
-            .args(["virsh", "ttyconsole", domain])
+            .args(["virsh", "-c", "qemu:///system", "ttyconsole", domain])
             .output()
             .ok()?;
         let p = String::from_utf8_lossy(&out.stdout).trim().to_string();

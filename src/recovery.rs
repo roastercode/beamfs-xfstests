@@ -319,7 +319,7 @@ impl<'a> Recovery<'a> {
         let _ = Command::new("timeout")
             .arg("20")
             .arg("sudo")
-            .args(["virsh", "send-key", domain, "--codeset", "linux"])
+            .args(["virsh", "-c", "qemu:///system", "send-key", domain, "--codeset", "linux"])
             .args(["KEY_LEFTALT", "KEY_SYSRQ", &format!("KEY_{}", key.to_uppercase())])
             .output();
     }
@@ -330,7 +330,7 @@ impl<'a> Recovery<'a> {
     /// it the only channel that reaches a node in this state.
     fn console_tail(&self, domain: &str, lines: usize) -> String {
         let xml = Command::new("sudo")
-            .args(["virsh", "dumpxml", domain])
+            .args(["virsh", "-c", "qemu:///system", "dumpxml", domain])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_default();
@@ -362,6 +362,7 @@ impl<'a> Recovery<'a> {
             .arg("60")
             .arg("sudo")
             .arg("virsh")
+            .args(["-c", "qemu:///system"])
             .args(args)
             .output();
     }

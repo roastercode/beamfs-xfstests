@@ -224,7 +224,7 @@ fn parse(out: &str) -> Snapshot {
 /// perturbed by the load.
 fn host_probe(domain: &str) -> Snapshot {
     let out = std::process::Command::new("sudo")
-        .args(["virsh", "domstats", domain])
+        .args(["virsh", "-c", "qemu:///system", "domstats", domain])
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())

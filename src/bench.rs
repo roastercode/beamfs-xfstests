@@ -690,36 +690,65 @@ fn not_run_reason(out: &str) -> Option<String> {
     })
 }
 
-/// What the kernel may not say during a test that is to count as passed.
+/// The levels at which a kernel message during a test is an incident.
 ///
 /// check's own _check_dmesg fails a test on the generic reports (BUG:,
 /// WARNING:, Oops:, lockdep, RCU, UBSAN). It does not know what beamfs
-/// says when it finds damage: uncorrectable, corrupt, a stack dumped
-/// without a WARNING line. The shard runner of `run` fails a passed
-/// test on these words, read case aside; sweep and bench took the line
-/// "Passed all" alone until 2.5.2, and a test passed over a filesystem
-/// that had just reported damage. One list, read here and grepped by
-/// runner.sh, which a test below holds identical.
+/// says when it finds damage, and the words 2.5.2 looked for missed
+/// "data_csum bad descriptor" (pr_err) and "recorded errors during a
+/// previous mount" (pr_warn), both seen during the tests of the known
+/// defects of 0.1.26. The level is what the author of a message said
+/// about it: every message of the kernel facility at warn or above, read
+/// with dmesg -x, is an incident. The marker xfstests writes, "run
+/// fstests ...", is warn but of the user facility, and does not count.
 ///
-/// An RS event line counts whatever its uncorrectable= says: with no
-/// injection, a correction during xfstests is one beamfs should not
-/// have had to make.
-const INCIDENT_WORDS: [&str; 6] =
-    ["BUG:", "WARNING:", "Oops", "call trace", "uncorrectable", "corrupt"];
+/// runner.sh greps the same levels; a test below holds the two to one
+/// definition.
+const INCIDENT_LEVELS: [&str; 5] = ["emerg", "alert", "crit", "err", "warn"];
 
-/// The tree checker's report, read as written and not case aside: the
-/// same checker says "no lost pointer seen" at every unmount, and that
-/// is the good news.
+/// The tree checker's report, at whatever level it comes, read as
+/// written: the same checker says "no lost pointer seen", at info, at
+/// every unmount.
 const INCIDENT_EXACT: &str = "LOST POINTER";
 
-/// The lines of a kernel log that name an incident.
+/// A line of beamfs that says it corrected something, at whatever level
+/// it is logged: with no injection, beamfs repaired what it had written
+/// itself.
+const INCIDENT_CORRECTED: &str = " corrected";
+
+/// Messages at an incident level that are not incidents, each with the
+/// reason. Empty: none has been shown harmless yet, and a full sweep is
+/// what will show which, if any, are.
+const INCIDENT_ALLOWED: [(&str, &str); 0] = [];
+
+/// The facility and the level of a line of dmesg -x.
+fn level_of(l: &str) -> Option<(&str, &str)> {
+    let (fac, rest) = l.split_once(':')?;
+    let (lvl, _) = rest.split_once(':')?;
+    let lvl = lvl.trim();
+    ["emerg", "alert", "crit", "err", "warn", "notice", "info", "debug"]
+        .contains(&lvl)
+        .then_some((fac.trim(), lvl))
+}
+
+/// The lines of a kernel log, as dmesg -x prints it, that name an
+/// incident. A log in which no line carries a level was not read with
+/// -x, and is not taken for a clean one.
 fn kernel_incidents(dmesg: &str) -> Vec<String> {
-    let words: Vec<String> = INCIDENT_WORDS.iter().map(|w| w.to_lowercase()).collect();
+    if !dmesg.trim().is_empty() && !dmesg.lines().any(|l| level_of(l).is_some()) {
+        return vec!["the kernel log came without levels: dmesg -x was not understood".to_string()];
+    }
     dmesg
         .lines()
         .filter(|l| {
-            let low = l.to_lowercase();
-            l.contains(INCIDENT_EXACT) || words.iter().any(|w| low.contains(w.as_str()))
+            let l: &str = l;
+            let at_level = level_of(l)
+                .is_some_and(|(fac, lvl)| fac == "kern" && INCIDENT_LEVELS.contains(&lvl));
+            let allowed = INCIDENT_ALLOWED.iter().any(|(m, _)| l.contains(m));
+            let corrected = l
+                .find("beamfs")
+                .is_some_and(|i| l[i..].contains(INCIDENT_CORRECTED));
+            l.contains(INCIDENT_EXACT) || corrected || (at_level && !allowed)
         })
         .map(|l| l.trim().to_string())
         .collect()
@@ -950,12 +979,12 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
         .unwrap_or(0);
 
     // A test passes when check says so and the kernel said nothing,
-    // while it ran, that names an incident (INCIDENT_WORDS,
-    // INCIDENT_EXACT). The ring was cleared before check started, so
+    // while it ran, that names an incident (INCIDENT_LEVELS,
+    // INCIDENT_EXACT, INCIDENT_CORRECTED). The ring was cleared before check started, so
     // all of it is this test's. A log that cannot be read is not a
     // clean one.
     let incidents: Vec<String> = if harness_passed {
-        match c.run("sudo dmesg", Duration::from_secs(30)) {
+        match c.run("sudo dmesg -x", Duration::from_secs(30)) {
             Ok(d) => kernel_incidents(&d),
             Err(e) => vec![format!("the kernel log could not be read: {e}")],
         }
@@ -1023,6 +1052,20 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
                 "passed by xfstests, but the kernel said: {}",
                 incidents.iter().take(3).cloned().collect::<Vec<_>>().join(" | ")
             )
+        } else if !checked && out.contains("output mismatch") {
+            // The test compares its output with what it expects and
+            // failed there; whether it reached an fsck says nothing
+            // about why. The lines of the diff check printed do.
+            let diff: Vec<&str> = out
+                .lines()
+                .map(str::trim)
+                .filter(|l| {
+                    (l.starts_with('+') && !l.starts_with("+++"))
+                        || (l.starts_with('-') && !l.starts_with("---"))
+                })
+                .take(4)
+                .collect();
+            format!("output differs from what the test expects: {}", diff.join(" | "))
         } else if !checked {
             // The single most useful thing to know about a short
             // failure: the filesystem was never checked, so whatever
@@ -2144,6 +2187,7 @@ fn meta_probe(test_dev: &str, scratch_dev: &str) -> String {
          echo \"kmemleak=$(sudo sh -c 'test -e /sys/kernel/debug/kmemleak' && echo present || echo absent)\"; \
          echo \"uptime=$(awk '{{print $1}}' /proc/uptime)\"; \
          echo \"beamfs_loaded=$(grep -c '^beamfs ' /proc/modules)\"; \
+         if grep -q '^beamfs ' /proc/modules; then echo beamfs_in=module; elif grep -qw beamfs /proc/filesystems; then echo beamfs_in=kernel; else echo beamfs_in=absent; fi; \
          echo \"beamfs_srcversion=$(cat /sys/module/beamfs/srcversion 2>/dev/null)\"; \
          m=$(modinfo -n beamfs 2>/dev/null); echo \"beamfs_module=$m\"; \
          if [ -f \"$m\" ]; then echo \"beamfs_module_sha256=$(sha256sum \"$m\" | awk '{{print $1}}')\"; fi; \
@@ -3052,6 +3096,13 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String>
             None => blocking.push(format!("{t} failed and is not a known failure")),
         }
     }
+    for t in &passed_tests {
+        if let Some(why) = known.get(t) {
+            blocking.push(format!(
+                "{t} passed and is listed as a known failure ({why}): the list is out of date"
+            ));
+        }
+    }
     for t in &aborted {
         blocking.push(format!("{t} has no verdict"));
     }
@@ -3369,25 +3420,80 @@ mod tests {
     }
 
     #[test]
-    fn run_and_sweep_fail_a_pass_on_the_same_words() {
+    fn run_and_sweep_fail_a_pass_on_the_same_levels() {
         let runner = include_str!("runner.sh");
-        let words = format!("grep -ciE \"{}\"", INCIDENT_WORDS.join("|"));
+        let levels = format!("grep -cE '^kern +:({}) +:'", INCIDENT_LEVELS.join("|"));
         let exact = format!("grep -c \"{INCIDENT_EXACT}\"");
-        assert!(runner.contains(&words), "runner.sh does not read: {words}");
-        assert!(runner.contains(&exact), "runner.sh does not read: {exact}");
+        let corrected = format!("grep -cE 'beamfs.*{INCIDENT_CORRECTED}'");
+        for want in [&levels, &exact, &corrected] {
+            assert!(runner.contains(want.as_str()), "runner.sh does not read: {want}");
+        }
+        assert!(runner.contains("sudo dmesg -x"), "runner.sh reads dmesg without levels");
     }
 
     #[test]
     fn a_pass_over_reported_damage_is_found() {
-        let d = "[   12.0] run fstests generic/013 at 2026-10-10 09:00:00\n\
-                 [   13.1] beamfs: directory block 812 uncorrectable\n\
-                 [   13.2] beamfs/treecheck: LOST POINTER parent=97 slot=4 held 812\n\
-                 [   14.0] beamfs/treecheck: no lost pointer seen\n\
-                 [   14.1] beamfs: mounted v5 (scheme 2)\n";
+        // dmesg -x of beamfs/005 and beamfs/006, 2026-10-10.
+        let d = "user  :warn  : [46547.065074] run fstests beamfs/006 at 2026-10-10 09:26:32\n\
+                 kern  :info  : [46561.288616] beamfs: mounted v5 (blocks=262144 free=243701)\n\
+                 kern  :info  : [46561.363876] beamfs/treecheck: no lost pointer seen\n\
+                 kern  :info  : [46562.000000] beamfs/inline: ino=3 iblock=0 subblock=0: 1 symbol(s) corrected\n\
+                 kern  :warn  : [46600.156554] beamfs_inline_decode_block_into_buf: 7 callbacks suppressed\n\
+                 kern  :err   : [46600.156560] beamfs/inline: ino=10 iblock=0 data_csum bad descriptor type=0x00 (expected 0x01)\n\
+                 kern  :warn  : [46600.200000] beamfs: vdc recorded errors during a previous mount; running fsck.beamfs is recommended\n\
+                 kern  :info  : [46600.300000] beamfs/treecheck: LOST POINTER parent=97 slot=4 held 812\n\
+                 kern  :info  : [46555.535280] clocksource: Watchdog remote CPU 1 read timed out\n";
         let found = kernel_incidents(d);
-        assert_eq!(found.len(), 2, "{found:?}");
-        assert!(found[1].contains("LOST POINTER"), "{found:?}");
-        assert!(kernel_incidents("[ 1.0] run fstests generic/001 at 2026-10-10\n").is_empty());
+        assert_eq!(found.len(), 5, "{found:?}");
+        assert!(found[0].contains("corrected"), "{found:?}");
+        assert!(found[2].contains("data_csum bad descriptor"), "{found:?}");
+        assert!(found[4].contains("LOST POINTER"), "{found:?}");
+        assert!(kernel_incidents("user  :warn  : [1.0] run fstests generic/001 at 2026-10-10\n").is_empty());
+    }
+
+    #[test]
+    fn a_log_without_levels_is_not_a_clean_one() {
+        let found = kernel_incidents("[ 1.0] run fstests generic/001 at 2026-10-10\n");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("without levels"), "{found:?}");
+        assert!(kernel_incidents("").is_empty());
+    }
+
+    #[test]
+    fn the_probe_says_where_beamfs_runs() {
+        let p = meta_probe("vdb", "vdc");
+        assert!(p.contains("beamfs_in="), "{p}");
+    }
+
+    #[test]
+    fn every_virsh_names_the_system_libvirt() {
+        // Without -c, virsh asks LIBVIRT_DEFAULT_URI, which env -i
+        // removes, and then the session of the user, where the lab's
+        // domains do not exist: nodes status said "no such domain".
+        let files = [
+            ("console.rs", include_str!("console.rs")),
+            ("deploy.rs", include_str!("deploy.rs")),
+            ("evidence.rs", include_str!("evidence.rs")),
+            ("nodes.rs", include_str!("nodes.rs")),
+            ("probe.rs", include_str!("probe.rs")),
+            ("recovery.rs", include_str!("recovery.rs")),
+            ("state.rs", include_str!("state.rs")),
+            ("wedge.rs", include_str!("wedge.rs")),
+        ];
+        for (name, src) in files {
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, l) in lines.iter().enumerate() {
+                if !l.contains("\"virsh\"") || l.trim_start().starts_with("//") {
+                    continue;
+                }
+                let next = lines.get(i + 1).copied().unwrap_or("");
+                assert!(
+                    l.contains("qemu:///system") || next.contains("qemu:///system"),
+                    "{name}:{}: virsh without -c qemu:///system: {l}",
+                    i + 1
+                );
+            }
+        }
     }
 
     #[test]

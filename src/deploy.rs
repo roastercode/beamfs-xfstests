@@ -349,7 +349,7 @@ fn md5(p: &Path) -> Option<String> {
 /// virsh knows. Asking costs one command and cannot drift.
 fn rootfs_path_for(domain: &str) -> Result<String, String> {
     let out = Command::new("sudo")
-        .args(["virsh", "domblklist", domain])
+        .args(["virsh", "-c", "qemu:///system", "domblklist", domain])
         .output()
         .map_err(|e| format!("virsh domblklist: {e}"))?;
     if !out.status.success() {
@@ -470,7 +470,7 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
                  std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
     }
 
-    let st = Command::new("sudo").args(["virsh", "destroy", domain]).output();
+    let st = Command::new("sudo").args(["virsh", "-c", "qemu:///system", "destroy", domain]).output();
     let _ = st;
     std::thread::sleep(Duration::from_secs(3));
 
@@ -526,7 +526,7 @@ pub fn deploy(cfg: &Config, node: &Node, domain: &str) -> Result<(), String> {
         .output();
 
     let out = Command::new("sudo")
-        .args(["virsh", "start", domain])
+        .args(["virsh", "-c", "qemu:///system", "start", domain])
         .output()
         .map_err(|e| format!("virsh start: {e}"))?;
     if !out.status.success() {

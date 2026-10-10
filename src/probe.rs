@@ -81,7 +81,7 @@ impl<'a> Probe<'a> {
         // for it works but depends on quoting that is libvirt's to
         // change, and this is one call either way.
         let out = Command::new("sudo")
-            .args(["virsh", "ttyconsole", domain])
+            .args(["virsh", "-c", "qemu:///system", "ttyconsole", domain])
             .output()
             .ok()?;
         let pty = String::from_utf8_lossy(&out.stdout).trim().to_string();

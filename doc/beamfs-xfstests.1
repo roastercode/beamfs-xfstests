@@ -821,6 +821,29 @@ The test device is the one the node's configuration names. The
 preparation of sweep and bench, the load of trace and the conditions
 of matrix formatted and mounted /dev/vdb whatever the node: the test
 device of x86-01, and of no other node.
+.PP
+Since 2.5.3 a kernel message is an incident by its level, not by its
+words: every message of the kernel facility at warn or above while the
+test ran, read with dmesg -x, the tree checker's LOST POINTER at
+whatever level, and any line of beamfs that says it corrected
+something, at whatever level. The words of 2.5.2 missed what beamfs
+said during the tests of its known defects: "data_csum bad descriptor"
+at err and "recorded errors during a previous mount" at warn. The
+marker xfstests writes is warn, but of the user facility, and does not
+count. A log that comes without levels is not a clean one. No message
+at those levels is excepted yet: one shown harmless will be, with its
+reason, in the source.
+.PP
+Since 2.5.3 a test listed as a known failure that passes makes the
+sweep not clean: the list is out of date, and the line of a test goes
+with the fix of its defect. A test that fails on its expected output
+gives as its reason the first lines of the diff check printed, not
+that it did not reach an fsck. meta.txt carries beamfs_in=, kernel,
+module or absent: on x86-01 beamfs is part of the kernel, and the
+beamfs.ko the image also carries under /lib/modules is not the code
+measured, whatever beamfs_module= says. Every virsh names
+qemu:///system: run under env -i, which removes LIBVIRT_DEFAULT_URI,
+nodes status asked the session of the user and said "no such domain".
 .TP
 .B checkpoint
 Say whether this repository, the layer, the image and the node still
