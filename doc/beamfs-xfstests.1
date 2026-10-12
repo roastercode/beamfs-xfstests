@@ -700,6 +700,11 @@ other. Defaults to tests/known-failures in the beamfs tree
 (BEAMFS_TREE, else ~/git/beamfs); without that file, every failure
 fails the sweep. Since 2.5.2.
 .TP
+.B XFSTESTS_EXPECTED_MESSAGES
+The kernel messages tests provoke on purpose, each set aside for its own
+test: tests/expected-kernel-messages in the beamfs tree, BEAMFS_TREE or
+~/git/beamfs, by default. Since 2.5.4.
+.TP
 .B XFSTESTS_SEED
 Seed for the load, so two trials of one test do the same work and can be
 compared line by line. generic/464 picks its files and write sizes at
@@ -844,6 +849,28 @@ beamfs.ko the image also carries under /lib/modules is not the code
 measured, whatever beamfs_module= says. Every virsh names
 qemu:///system: run under env -i, which removes LIBVIRT_DEFAULT_URI,
 nodes status asked the session of the user and said "no such domain".
+.PP
+Since 2.5.4 a kernel message a test provokes on purpose is set aside
+for that test alone. tests/expected-kernel-messages in the beamfs tree,
+or the file XFSTESTS_EXPECTED_MESSAGES names, lists each one: the test,
+the text the message contains between double quotes, and why. The x86
+sweep of 2026-10-11 failed six tests xfstests had passed on such
+messages: dm-error under the volume for generic/338, 441 and 484, a
+loop device on a full volume for generic/361, mount trying ext4 and
+ext2 on the scratch device for generic/067, exec with an empty argv for
+generic/633. A line without a text or without a reason is refused and
+sets nothing aside, and the tree checker's LOST POINTER and a
+correction by beamfs are never set aside. A sweep keeps the file in its
+record and writes its sha256 to meta.txt as expected_messages=. bench
+reads it too; run, whose runner.sh judges on the node, does not yet.
+.PP
+Since 2.5.4 a test can have a budget of its own, longer than the flat
+one: generic/476 gets 3600 s. It passed in 2653 s in the x86 sweep of
+2026-10-08 and was killed at 1876 s in the one of 2026-10-11. The
+budget line of a sweep names it, and meta.txt carries test_budgets=.
+compare names the version of this tool that judged each run, read from
+the meta.txt of its record, when the two differ: a verdict that changed
+between them may be the rule's and not the code's.
 .TP
 .B checkpoint
 Say whether this repository, the layer, the image and the node still

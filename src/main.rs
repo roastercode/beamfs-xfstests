@@ -302,6 +302,7 @@ deploy   put the newest image and this repo's tools on a node,\n\
          \x20 XFSTESTS_BPF            a script from --probes, attached per test\n\
          \x20 XFSTESTS_BPF_SCRIPTS    where to look for them\n\
          \x20 XFSTESTS_KNOWN_FAILURES failures a sweep may report and still exit 0\n\
+         \x20 XFSTESTS_EXPECTED_MESSAGES kernel messages tests provoke on purpose\n\
          \n\
          a sweep exits 0 when its verdicts are clean, 4 when they are not,\n\
          1 when it could not run\n"
@@ -1077,6 +1078,20 @@ fn show_history() -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
+/// The version of this tool that judged a saved run, out of the
+/// meta.txt of its record; "unknown" for a run that keeps no record, or
+/// whose record says nothing of it.
+fn judged_by(tag: &str) -> String {
+    std::fs::read_to_string(History::default_root().join("sweeps").join(tag).join("meta.txt"))
+        .ok()
+        .and_then(|m| {
+            m.lines()
+                .find_map(|l| l.strip_prefix("bx_version="))
+                .map(|v| v.trim().to_string())
+        })
+        .unwrap_or_else(|| "unknown".into())
+}
+
 fn compare_runs(a: Option<&String>, b: Option<&String>) -> std::process::ExitCode {
     let h = History::new(&History::default_root());
     let runs = h.runs();
@@ -1102,6 +1117,16 @@ fn compare_runs(a: Option<&String>, b: Option<&String>) -> std::process::ExitCod
     let d = History::compare(&p, &c);
     println!();
     println!("  === {base} -> {cur} ===");
+    // The version of this tool that judged each run. A test that fails
+    // on a kernel message since 2.5.2 passed under the rule before it,
+    // whatever the code did: the sweep of 2026-10-11 counted ten
+    // regressions over the one of 2026-10-08, nine of them on messages
+    // the earlier rule did not read.
+    let (by_base, by_cur) = (judged_by(&base), judged_by(&cur));
+    if by_base != by_cur {
+        println!("    judged by beamfs-xfstests {by_base}, then {by_cur}: \
+                  a verdict that changed may be the rule's, not the code's");
+    }
     println!("    unchanged {:>4}", d.unchanged);
     println!("    fixed     {:>4}", d.fixed.len());
     println!("    new       {:>4}", d.new.len());

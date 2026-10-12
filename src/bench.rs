@@ -716,9 +716,11 @@ const INCIDENT_EXACT: &str = "LOST POINTER";
 /// itself.
 const INCIDENT_CORRECTED: &str = " corrected";
 
-/// Messages at an incident level that are not incidents, each with the
-/// reason. Empty: none has been shown harmless yet, and a full sweep is
-/// what will show which, if any, are.
+/// Messages at an incident level that are not incidents for any test,
+/// each with the reason. Empty: none has been shown harmless everywhere.
+/// A message one test provokes on purpose is named, for that test, in
+/// tests/expected-kernel-messages in the beamfs tree, and set aside for
+/// that test alone (2.5.4).
 const INCIDENT_ALLOWED: [(&str, &str); 0] = [];
 
 /// The facility and the level of a line of dmesg -x.
@@ -832,6 +834,88 @@ fn parse_known_failures(text: &str)
         }
     }
     (known, refused)
+}
+
+/// Where the kernel messages tests provoke on purpose are listed:
+/// XFSTESTS_EXPECTED_MESSAGES, else tests/expected-kernel-messages in
+/// the beamfs tree (BEAMFS_TREE, else ~/git/beamfs), beside
+/// tests/known-failures.
+fn expected_messages_path() -> PathBuf {
+    if let Ok(p) = std::env::var("XFSTESTS_EXPECTED_MESSAGES") {
+        return PathBuf::from(p);
+    }
+    let tree = std::env::var("BEAMFS_TREE").unwrap_or_else(|_| {
+        format!("{}/git/beamfs", std::env::var("HOME").unwrap_or_default())
+    });
+    PathBuf::from(tree).join("tests/expected-kernel-messages")
+}
+
+/// A kernel message one test provokes on purpose: the test, and a text
+/// the line of the message contains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExpectedMessage {
+    test: String,
+    text: String,
+}
+
+/// The expected messages: the test, the text the message contains
+/// between double quotes, then why the test provokes it; a line that
+/// starts with # is a comment. A line without a text or without a
+/// reason is refused and sets nothing aside: an allowance nobody can
+/// account for is not one.
+///
+/// The x86 sweep of 2026-10-11 failed nine tests that xfstests had
+/// passed, six of them on messages the tests provoke by design --
+/// dm-error under the volume, a loop device on a full volume -- and a
+/// list that names the test keeps such a message an incident in every
+/// other test.
+fn parse_expected_messages(body: &str) -> (Vec<ExpectedMessage>, Vec<String>) {
+    let mut ok = Vec::new();
+    let mut refused = Vec::new();
+    for line in body.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        let parsed = l.split_once(char::is_whitespace).and_then(|(test, rest)| {
+            let (text, why) = rest.trim_start().strip_prefix('"')?.split_once('"')?;
+            if test.contains('/') && !text.is_empty() && !why.trim().is_empty() {
+                Some(ExpectedMessage { test: test.to_string(), text: text.to_string() })
+            } else {
+                None
+            }
+        });
+        match parsed {
+            Some(e) => ok.push(e),
+            None => refused.push(l.to_string()),
+        }
+    }
+    (ok, refused)
+}
+
+/// The expected messages as the file holds them now; none when it
+/// cannot be read.
+fn load_expected_messages() -> Vec<ExpectedMessage> {
+    std::fs::read_to_string(expected_messages_path())
+        .map(|t| parse_expected_messages(&t).0)
+        .unwrap_or_default()
+}
+
+/// The incidents left once the messages `test` provokes on purpose are
+/// set aside. The tree checker's LOST POINTER and a correction by
+/// beamfs are never set aside, whatever the list says.
+fn unexpected(incidents: Vec<String>, test: &str, expected: &[ExpectedMessage]) -> Vec<String> {
+    incidents
+        .into_iter()
+        .filter(|l| {
+            let never = l.contains(INCIDENT_EXACT)
+                || l.find("beamfs").is_some_and(|i| l[i..].contains(INCIDENT_CORRECTED));
+            let set_aside = expected
+                .iter()
+                .any(|e| e.test == test && l.contains(e.text.as_str()));
+            never || !set_aside
+        })
+        .collect()
 }
 
 fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, String> {
@@ -983,9 +1067,11 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
     // INCIDENT_EXACT, INCIDENT_CORRECTED). The ring was cleared before check started, so
     // all of it is this test's. A log that cannot be read is not a
     // clean one.
+    // A message tests/expected-kernel-messages names for this test is
+    // set aside: the test provokes it on purpose (2.5.4).
     let incidents: Vec<String> = if harness_passed {
         match c.run("sudo dmesg -x", Duration::from_secs(30)) {
-            Ok(d) => kernel_incidents(&d),
+            Ok(d) => unexpected(kernel_incidents(&d), test, &load_expected_messages()),
             Err(e) => vec![format!("the kernel log could not be read: {e}")],
         }
     } else {
@@ -2275,6 +2361,24 @@ fn trial_budget() -> u64 {
         .unwrap_or(1900)
 }
 
+/// Tests that need more than the flat budget on this lab, with the
+/// seconds each gets. The budget is a ceiling on patience, and a test
+/// that ends past it is killed while still working: generic/476, an
+/// all-writes fsstress run, passed in 2653 s in the x86 sweep of
+/// 2026-10-08 (sweep-1791491243) and was killed at 1876 s in the one of
+/// 2026-10-11 (sweep-1791696476).
+const TEST_BUDGETS: [(&str, u64); 1] = [("generic/476", 3600)];
+
+/// The budget of one test in a sweep: the flat one, or the one
+/// TEST_BUDGETS gives it when that is longer.
+fn budget_for(test: &str) -> u64 {
+    let flat = trial_budget();
+    TEST_BUDGETS
+        .iter()
+        .find(|(t, _)| *t == test)
+        .map_or(flat, |(_, s)| flat.max(*s))
+}
+
 /// One line added to meta.txt.
 fn meta_note(record: &std::path::Path, line: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -2494,6 +2598,10 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String>
     }
     let meta_start = write_meta(&c, cfg, node, selection, tests.len(), &record, "start");
     meta_note(&record, &format!("tools_check={tools_note}"));
+    meta_note(&record, &format!(
+        "test_budgets={}",
+        TEST_BUDGETS.iter().map(|(t, s)| format!("{t}:{s}")).collect::<Vec<_>>().join(" ")
+    ));
     println!("  record  : {}", record.display());
     println!();
 
@@ -2581,6 +2689,9 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String>
         .and_then(|v| v.parse().ok())
         .unwrap_or(1900);
     println!("  budget  : {budget_says}s, and the watcher cuts earlier");
+    for (t, s) in TEST_BUDGETS.iter().filter(|(t, _)| tests.iter().any(|x| x == t)) {
+        println!("  budget  : {t}: {}s, its own", budget_says.max(*s));
+    }
 
     for (i, test) in tests.iter().enumerate() {
         if stopping() {
@@ -2711,19 +2822,18 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String>
         // 900 killed generic/269 and generic/464 mid-test and reported
         // them as wedges, which is a measurement of the budget rather
         // than of the filesystem.
-        let budget: u64 = std::env::var("XFSTESTS_TRIAL_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            // 1900, flat, whatever the kernel carries.
-            //
-            // The watcher cuts a test that has stopped writing, so the
-            // budget is a ceiling on patience rather than a judgement.
-            // generic/269 under KASAN took 1859 seconds and produced a
-            // result -- 321 lost blocks, which the old 900 had been
-            // hiding by killing it first -- so the ceiling has to clear
-            // that, and little more: three tests at x8 was two hours
-            // with nothing to read at the end.
-            .unwrap_or(1900);
+        // 1900, flat, whatever the kernel carries, unless
+        // XFSTESTS_TRIAL_TIMEOUT says otherwise; longer for a test
+        // TEST_BUDGETS names (2.5.4).
+        //
+        // The watcher cuts a test that has stopped writing, so the
+        // budget is a ceiling on patience rather than a judgement.
+        // generic/269 under KASAN took 1859 seconds and produced a
+        // result -- 321 lost blocks, which the old 900 had been
+        // hiding by killing it first -- so the ceiling has to clear
+        // that, and little more: three tests at x8 was two hours
+        // with nothing to read at the end.
+        let budget = budget_for(test);
 
         // A bpftrace script, attached for the length of the test.
         //
@@ -3153,6 +3263,28 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String>
         known_path.display(),
         crate::chain::sha256_file(&known_path).unwrap_or_else(|| "absent".into())
     ));
+    // The kernel messages the tests provoke on purpose, as the trials
+    // read them (2.5.4): refused lines said, the file kept beside the
+    // known failures.
+    let expected_path = expected_messages_path();
+    match std::fs::read_to_string(&expected_path) {
+        Ok(body) => {
+            let (expected, refused_lines) = parse_expected_messages(&body);
+            for r in &refused_lines {
+                println!("  expected messages: refused, no text or no reason: {r}");
+            }
+            println!("  expected messages: {} listed in {}",
+                     expected.len(), expected_path.display());
+            keep_in_record(&expected_path, &record);
+        }
+        Err(_) => println!("  expected messages: no {}, every message counts",
+                           expected_path.display()),
+    }
+    meta_note(&record, &format!(
+        "expected_messages={} {}",
+        expected_path.display(),
+        crate::chain::sha256_file(&expected_path).unwrap_or_else(|| "absent".into())
+    ));
     if blocking.is_empty() {
         println!("  === sweep verdict: clean ===");
         meta_note(&record, "gate=clean");
@@ -3508,6 +3640,54 @@ mod tests {
                    Some("R3-2, tests/xfstests/001"));
         assert!(!known.contains_key("generic/013"));
         assert_eq!(refused, vec!["generic/013".to_string()]);
+    }
+
+    #[test]
+    fn an_expected_message_needs_its_text_and_its_reason() {
+        let (ok, refused) = parse_expected_messages(
+            "# generic/338\n\
+             generic/338 \"Buffer I/O error on dev dm-0\" dm-error under the volume\n\
+             generic/441 \"Buffer I/O error on dev dm-0\"\n\
+             generic/067 Can't find ext4\n\
+             \n",
+        );
+        assert_eq!(ok.len(), 1, "{ok:?}");
+        assert_eq!(ok[0].test, "generic/338");
+        assert_eq!(ok[0].text, "Buffer I/O error on dev dm-0");
+        assert_eq!(refused.len(), 2, "{refused:?}");
+    }
+
+    #[test]
+    fn an_expected_message_is_set_aside_for_its_test_alone() {
+        let expected = vec![ExpectedMessage {
+            test: "generic/338".into(),
+            text: "Buffer I/O error on dev dm-0".into(),
+        }];
+        let d = "kern  :err   : [1.0] Buffer I/O error on dev dm-0, logical block 262128, async page read\n\
+                 kern  :err   : [2.0] beamfs: volume failed in directory (-5), refusing further writes\n\
+                 kern  :info  : [3.0] beamfs/treecheck: LOST POINTER parent=97 slot=4 held 812\n";
+        let left = unexpected(kernel_incidents(d), "generic/338", &expected);
+        assert_eq!(left.len(), 2, "{left:?}");
+        assert!(left[0].contains("volume failed"), "{left:?}");
+        assert!(left[1].contains("LOST POINTER"), "{left:?}");
+        let other = unexpected(kernel_incidents(d), "generic/013", &expected);
+        assert_eq!(other.len(), 3, "{other:?}");
+        let lost = vec![ExpectedMessage {
+            test: "generic/338".into(),
+            text: "LOST POINTER".into(),
+        }];
+        assert_eq!(unexpected(kernel_incidents(d), "generic/338", &lost).len(), 3);
+    }
+
+    #[test]
+    fn a_test_named_in_test_budgets_gets_the_longer_budget() {
+        let _g = crate::env_lock();
+        unsafe { std::env::remove_var("XFSTESTS_TRIAL_TIMEOUT") };
+        assert_eq!(budget_for("generic/476"), 3600);
+        assert_eq!(budget_for("generic/013"), 1900);
+        unsafe { std::env::set_var("XFSTESTS_TRIAL_TIMEOUT", "14400") };
+        assert_eq!(budget_for("generic/476"), 14400);
+        unsafe { std::env::remove_var("XFSTESTS_TRIAL_TIMEOUT") };
     }
 
     #[test]
