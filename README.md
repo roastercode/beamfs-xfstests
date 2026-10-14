@@ -3,7 +3,7 @@
 Runs the kernel's filesystem test suite against beamfs, split across the
 lab's nodes, one test per invocation, and keeps a record of every run.
 
-Version 2.5.6. Version 2.5.1, from commit `b22ecb4`, produced the
+Version 2.6.0. Version 2.5.1, from commit `b22ecb4`, produced the
 xfstests results of the beamfs v3 technical report,
 [10.5281/zenodo.23253350](https://doi.org/10.5281/zenodo.23253350).
 
@@ -89,6 +89,47 @@ warning or a soft lockup, or its taint changed during the sweep; when
 the node had to be recovered; when lockdep was not on at the start or
 switched itself off; or when the apparatus failed.
 
+## The plan
+
+612 of the 740 tests of the x86 sweep `sweep-1791798230` were declined
+by xfstests -- reflink, O_DIRECT, quotas, a dm target -- each after the
+preparation, the trial and the evidence of a test that runs: 13 of the
+19 hours of that sweep. Whether xfstests declines a test does not change
+while the node does not, so a sweep asks once.
+
+Each test of the selection is cut before its first line of work. What
+comes before, its preamble, is sourcing, `_begin_fstest`, function
+definitions, assignments, `_require_*`, `_exclude_*`, `_supported_*`
+and the guards that end in `_notrun`. The cut test ends with a
+`_notrun` of its own, and all of them run through one `./check`, from a
+copy of `check`, `common/` and `tests/` under `/var/tmp/bx-plan` on the
+node; `/usr/xfstests` is not written. A test that reaches the end of its
+preamble runs. One that xfstests declines on the way is set aside with
+the reason xfstests gave, in the test's own context. One that leaves no
+answer runs. A requirement written after the preamble is not seen: its
+test runs and is declined as before, a test run for nothing and never
+one hidden.
+
+The plan is kept in `~/.local/share/beamfs-xfstests/plans/<node>/`,
+under a key: the sha256 of the image sealed at deploy, the kernel,
+`check`, `common/` and `tests/`, the module, `mkfs.beamfs` and
+`fsck.beamfs`, `local.config`, the devices and the mkfs options. A sweep
+under a known key reuses its plan; under a new one it makes it first,
+and says how many tests it has asked and how many xfstests declined.
+The declined tests are recorded `NOTRUN`, their reason prefixed with
+`planned:`, and are not run. Ten of them, chosen anew each sweep, run
+anyway as a control: one that runs makes the sweep not clean.
+`XFSTESTS_PLAN=0` runs every test, `XFSTESTS_PLAN_CONTROL` sets the
+number of controls.
+
+`beamfs-xfstests plan --against <sweep>` makes the plan again and sets
+it beside the verdicts of a sweep, by its tag or its directory; it exits
+4 when a test that ran there is declined by the plan. Made by hand on
+x86-01 on 2026-10-14 and set beside `sweep-1791798230`, the plan took
+923 s: no test that ran in that sweep was declined, 563 were declined
+with the reason the sweep gave, and 49 that the sweep saw declined were
+run, their requirement being written after the preamble.
+
 ## Records
 
 Every sweep leaves a record under
@@ -101,6 +142,7 @@ Every sweep leaves a record under
   the tests with a budget of their own, the lists of known failures and
   of expected messages with their sha256; at the end, the recoveries of
   the node and the verdict of the sweep with its reasons;
+- the plan it ran under, `<key>.plan`, named by `plan=` in `meta.txt`;
 - `verdicts.txt`, written as the verdicts come;
 - the output of `check` for each test.
 
@@ -137,6 +179,24 @@ lab.
 
 The full record is in [CHANGELOG.md](CHANGELOG.md); its latest entries
 follow.
+
+### [2.6.0] - 2026-10-14
+
+- A sweep runs only the tests xfstests runs on its node. Each test of
+  the selection is cut before its first line of work and ended by a
+  `_notrun` of its own, and all of them go through one `./check`, from
+  a copy under `/var/tmp/bx-plan`: xfstests answers, in each test's own
+  context, with its own reason. The answer, the plan, is kept under a
+  key made of the sealed image, the kernel, `check`, `common/` and
+  `tests/`, the module, `mkfs.beamfs` and `fsck.beamfs`, `local.config`,
+  the devices and the mkfs options, and reused while the key holds. The
+  tests it declines are recorded `NOTRUN` with `planned:` and their
+  reason, and are not run; ten of them, chosen anew each sweep, run
+  anyway, and one that runs makes the sweep not clean. `XFSTESTS_PLAN=0`
+  runs every test; `XFSTESTS_PLAN_CONTROL` sets the number of controls.
+- `beamfs-xfstests plan [--against <sweep>] [selection]` makes the plan
+  again and, with `--against`, sets it beside the verdicts of a sweep:
+  it exits 4 when a test that ran there is declined by the plan.
 
 ### [2.5.6] - 2026-10-14
 

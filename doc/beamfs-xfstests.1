@@ -450,6 +450,26 @@ Each cell returns the node to the state its condition names rather than
 inheriting what the last one left, and reports what the setup actually
 achieved: a mount that failed silently would otherwise produce a result
 under conditions nobody chose and look exactly like one that worked.
+.TP
+.BI plan " [--against sweep] [selection]"
+Ask xfstests which tests of the selection it runs on the first node,
+and keep the answer, the plan, under the key of that node. Each test is
+cut before its first line of work and ended by a
+.B _notrun
+of its own, and all of them run through one
+.BR ./check ,
+from a copy under
+.I /var/tmp/bx-plan
+on the node;
+.I /usr/xfstests
+is not written. With
+.BR --against ,
+set the plan beside the verdicts of a sweep, named by its tag or its
+directory: a test that ran there and that the plan declines is a test
+the plan would hide. A sweep makes its plan itself when the key of its
+node has none; this command makes it again. See
+.B XFSTESTS_PLAN
+below.
 
 .SH THE TRACE COMMAND
 generic/464 loses blocks on roughly half its runs and takes three
@@ -704,6 +724,30 @@ fails the sweep. Since 2.5.2.
 The kernel messages tests provoke on purpose, each set aside for its own
 test: tests/expected-kernel-messages in the beamfs tree, BEAMFS_TREE or
 ~/git/beamfs, by default. Since 2.5.4.
+.TP
+.B XFSTESTS_PLAN
+0 runs every test of a sweep, without a plan. By default a sweep runs
+only the tests the plan of its node says xfstests runs there, and makes
+the plan first when the key of the node has none. The key is the
+sha256 of the image sealed at deploy, the kernel,
+.BR check ,
+.I common/
+and
+.IR tests/ ,
+the module,
+.B mkfs.beamfs
+and
+.BR fsck.beamfs ,
+.IR local.config ,
+the devices and the mkfs options. The tests the plan declines are
+recorded NOTRUN, their reason prefixed with "planned:", and are not
+run. The plan= line of meta.txt names the plan, which is kept in the
+record. Since 2.6.0.
+.TP
+.B XFSTESTS_PLAN_CONTROL
+How many of the tests the plan declines a sweep runs anyway, chosen
+anew each sweep: 10 by default, 0 for none. One that runs makes the
+sweep not clean: the plan is wrong for that node.
 .TP
 .B XFSTESTS_SEED
 Seed for the load, so two trials of one test do the same work and can be
@@ -1213,6 +1257,13 @@ one bitbake.
 .I ~/.local/share/beamfs-xfstests/traces/
 Captures, one directory per leak.
 .TP
+.I ~/.local/share/beamfs-xfstests/plans/
+The plans, one directory per node, one file per key.
+.TP
+.I /var/tmp/bx-plan/
+On the node, the copy a plan is made from, kept until the next plan or
+the next boot.
+.TP
 .I /var/tmp/beamfs-xfstests/archive/
 Per-commit results, for
 .BR compare .
@@ -1270,6 +1321,12 @@ XFSTESTS_LOAD_PROCS=32 XFSTESTS_LOAD_FILES=50 \\
 exits 0 when its verdicts are clean, 4 when they are not, and 1 when
 it could not run; the reasons are printed at its end and kept in
 meta.txt as gate=.
+.PP
+.B plan
+exits 0 when it made its plan and, with
+.BR --against ,
+the plan hides no test that ran in that sweep; 4 when it hides one; 1
+when it could not run.
 .PP
 Every other command exits 0 if it completed, whatever the tests found,
 and non-zero if it could not run: no node reachable, no test suite on

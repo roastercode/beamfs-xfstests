@@ -2443,6 +2443,47 @@ fn stopping() -> bool {
     STOP.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// `plan`: ask xfstests again which tests of a selection it runs on the
+/// node, keep the answer under the node's key, and set it beside the
+/// verdicts of a sweep when asked to (2.6.0).
+///
+/// Ok(true) when the plan was made and hides no test that ran in the
+/// sweep it is set beside; Ok(false) when it hides one; Err when it
+/// could not be made.
+pub fn plan(cfg: &Config, node: &Node, selection: &str, against: Option<&str>)
+    -> Result<bool, String>
+{
+    let c = NodeConn::new(node, cfg);
+    println!("  node    : {}", node.name);
+    println!("  preparing: stopping what is there, then mkfs and mount (up to 3 min)");
+    match prepare(&c, &cfg.mkfs_options, &cfg.fstyp, tracing_wanted()) {
+        Ok(state) => {
+            for line in state.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                println!("  node    : {line}");
+            }
+        }
+        Err(e) => return Err(format!("cannot prepare the node: {e}")),
+    }
+    let listing = listing_budget();
+    println!("  listing : asking the harness what this selection covers (up to {} min)",
+             listing.as_secs() / 60);
+    let tests = enumerate_tests(&c, selection, listing)?;
+    println!("  tests   : {} in the selection", tests.len());
+    let p = crate::plan::make(&c, cfg, node, &tests)?;
+    crate::plan::summary(&p, &tests);
+    match against {
+        None => Ok(true),
+        Some(a) => {
+            let dir = if a.contains('/') {
+                std::path::PathBuf::from(a)
+            } else {
+                record_dir(a)
+            };
+            crate::plan::against(&p, &tests, &dir)
+        }
+    }
+}
+
 /// Run every test of a selection once, and report what failed.
 ///
 /// Ok(true) when its verdicts are clean, Ok(false) when they are not,
@@ -2584,7 +2625,38 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String>
     println!("  listing : asking the harness what this selection covers \
 (up to {} min)", listing.as_secs() / 60);
     let tests = enumerate_tests(&c, selection, listing)?;
-    println!("  tests   : {} to run", tests.len());
+    println!("  tests   : {} in the selection", tests.len());
+
+    /*
+     * Which of them xfstests will run here, asked once per image
+     * (2.6.0).
+     *
+     * 612 of the 740 tests of sweep-1791798230 were declined by
+     * xfstests, each after the preparation, the trial and the evidence
+     * of a test that runs: 13 of the 19 hours of that sweep. The plan
+     * asks xfstests once, keeps the answer under the node's key, and a
+     * few of the declined tests still run, as a control of it. A plan
+     * that cannot be made costs time, not verdicts: every test runs.
+     */
+    let (node_plan, plan_meta) = match crate::plan::for_sweep(&c, cfg, node, &tests) {
+        Ok(Some(p)) => {
+            let m = format!("plan={} {}", p.key, p.path.display());
+            (Some(p), m)
+        }
+        Ok(None) => (None, "plan=off XFSTESTS_PLAN=0".to_string()),
+        Err(e) => {
+            println!("  plan    : not made, every test runs: {e}");
+            (None, format!("plan=failed {}", e.replace('\n', " ")))
+        }
+    };
+    let split = crate::plan::split(&tests, node_plan.as_ref(), crate::plan::controls(),
+                                   unix_now() / 60);
+    if node_plan.is_some() {
+        println!("  plan    : {} to run, {} declined by xfstests here and set aside, \
+                  {} of the declined run anyway as a control",
+                 split.run.len() - split.control.len(), split.planned.len(),
+                 split.control.len());
+    }
     arm_stop();
     println!("  stop    : touch {} to finish the current test and stop",
              stop_path().display());
@@ -2598,6 +2670,15 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String>
     }
     let meta_start = write_meta(&c, cfg, node, selection, tests.len(), &record, "start");
     meta_note(&record, &format!("tools_check={tools_note}"));
+    meta_note(&record, &format!(
+        "{plan_meta} planned_not_run={} control={} [{}]",
+        split.planned.len(),
+        split.control.len(),
+        split.control.join(" ")
+    ));
+    if let Some(p) = &node_plan {
+        keep_in_record(&p.path, &record);
+    }
     meta_note(&record, &format!(
         "test_budgets={}",
         TEST_BUDGETS.iter().map(|(t, s)| format!("{t}:{s}")).collect::<Vec<_>>().join(" ")
@@ -2671,6 +2752,15 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String>
     // end taint would have been read off the fresh boot.
     let mut recoveries: Vec<String> = Vec::new();
 
+    // The declined tests of the plan: recorded with the reason xfstests
+    // gave, and not run (2.6.0).
+    for (t, why) in &split.planned {
+        let r = format!("planned: {why}");
+        keep_verdict(&record, t, "NOTRUN", 0, &r, None);
+        not_run.push(t.clone());
+        why_not_run.insert(t.clone(), r);
+    }
+
     // Whether this kernel carries a sanitizer.
     //
     // No longer a multiplier -- the budget is flat and the watcher does
@@ -2693,7 +2783,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String>
         println!("  budget  : {t}: {}s, its own", budget_says.max(*s));
     }
 
-    for (i, test) in tests.iter().enumerate() {
+    for (i, test) in split.run.iter().enumerate() {
         if stopping() {
             println!();
             println!("  stopping after {} test(s): the stop file appeared", i);
@@ -2701,7 +2791,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String>
             break;
         }
         let p = Progress::start(
-            &format!("{}/{} {test}", i + 1, tests.len()),
+            &format!("{}/{} {test}", i + 1, split.run.len()),
             &cfg.ssh_key,
             &format!("{}@{}", cfg.user, node.host),
         );
@@ -3109,7 +3199,7 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String>
             say!("    {}", outcome.as_str());
             if !outcome.usable() {
                 say!("    the node did not come back: stopping here, {} test(s) not run",
-                     tests.len() - i - 1);
+                     split.run.len() - i - 1);
                 break;
             }
         }
@@ -3241,6 +3331,20 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String>
              (debug_locks 1 at the start, {locks_end} at the end)"
         )),
         other => blocking.push(format!("lockdep was not on at the start (debug_locks {other})")),
+    }
+    // A control that ran: the plan is wrong for this node (2.6.0).
+    for t in &split.control {
+        if passed_tests.contains(t) || failed.iter().any(|(f, _)| f == t) {
+            blocking.push(format!(
+                "{t} ran, and the plan of this node says xfstests declines it: remake \
+                 the plan (beamfs-xfstests plan), or sweep with XFSTESTS_PLAN=0"
+            ));
+        }
+    }
+    if !split.control.is_empty() {
+        let declined = split.control.iter().filter(|t| not_run.contains(*t)).count();
+        println!("  plan    : control, {declined} of {} declined by xfstests, as planned",
+                 split.control.len());
     }
     for a in &apparatus {
         blocking.push(format!("the apparatus failed: {a}"));

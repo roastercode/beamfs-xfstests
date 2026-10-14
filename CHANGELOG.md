@@ -11,6 +11,24 @@ on the commit they point to. From the next version on, each version adds
 its entry, written with the change, and the README carries the latest
 entries.
 
+## [2.6.0] - 2026-10-14
+
+- A sweep runs only the tests xfstests runs on its node. Each test of
+  the selection is cut before its first line of work and ended by a
+  `_notrun` of its own, and all of them go through one `./check`, from
+  a copy under `/var/tmp/bx-plan`: xfstests answers, in each test's own
+  context, with its own reason. The answer, the plan, is kept under a
+  key made of the sealed image, the kernel, `check`, `common/` and
+  `tests/`, the module, `mkfs.beamfs` and `fsck.beamfs`, `local.config`,
+  the devices and the mkfs options, and reused while the key holds. The
+  tests it declines are recorded `NOTRUN` with `planned:` and their
+  reason, and are not run; ten of them, chosen anew each sweep, run
+  anyway, and one that runs makes the sweep not clean. `XFSTESTS_PLAN=0`
+  runs every test; `XFSTESTS_PLAN_CONTROL` sets the number of controls.
+- `beamfs-xfstests plan [--against <sweep>] [selection]` makes the plan
+  again and, with `--against`, sets it beside the verdicts of a sweep:
+  it exits 4 when a test that ran there is declined by the plan.
+
 ## [2.5.6] - 2026-10-14
 
 - A test that xfstests passed and the kernel did not gives in its

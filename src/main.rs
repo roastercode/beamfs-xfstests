@@ -20,6 +20,7 @@ mod select;
 mod checkpoint;
 mod kernelorg;
 mod tally;
+mod plan;
 mod nodelock;
 mod say;
 mod wedge;
@@ -192,6 +193,7 @@ fn main() -> std::process::ExitCode {
         Some("control") => do_control(&cfg, args.get(2), args.get(3), args.get(4)),
         Some("soak") => do_soak(&cfg, args.get(2)),
         Some("sweep") => do_sweep(&cfg, &args[2..]),
+        Some("plan") => do_plan(&cfg, &args[2..]),
         Some("deploy") => do_deploy(&cfg, args.get(2)),
         Some("nodes") if args.get(2).map(String::as_str) == Some("exec") =>
             nodes::exec(&cfg, &args[3..]),
@@ -248,7 +250,7 @@ fn main() -> std::process::ExitCode {
 
 fn usage() -> std::process::ExitCode {
     eprintln!(
-        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|matrix|bench|baseline|sweep|trend|nodes|deploy|stop]\n\
+        "usage: beamfs-xfstests [run|probe|report|history|compare|trace|analyse|matrix|bench|baseline|sweep|plan|trend|nodes|deploy|stop]\n\
          \n\
          run      shard the suite across the nodes and follow it (default)\n\
          probe    run one test with console capture and sampling\n\
@@ -275,6 +277,9 @@ fn usage() -> std::process::ExitCode {
                     @leaks                 every test that ever leaked\n\
                     @leaks:N               ... in its last N records\n\
                     @seen                  every test the history knows\n\
+         plan     ask xfstests which tests of a selection it runs on the\n\
+         \x20        node, once per image; a sweep runs only those\n\
+         \x20        plan [--against <sweep>] [selection]\n\
          trend    what a test has lost lately, or which tests lose most\n\
                   trend [test]        (no test: the worst first)\n\
          checkpoint say whether this repository, the layer, the image\n\
@@ -303,6 +308,8 @@ deploy   put the newest image and this repo's tools on a node,\n\
          \x20 BEAMFS_NO_BELL          same as --no-bell, for a whole shell\n\
          \x20 XFSTESTS_BPF            a script from --probes, attached per test\n\
          \x20 XFSTESTS_BPF_SCRIPTS    where to look for them\n\
+         \x20 XFSTESTS_PLAN           0 runs every test of a sweep, without a plan\n\
+         \x20 XFSTESTS_PLAN_CONTROL   declined tests a sweep runs anyway, default 10\n\
          \x20 XFSTESTS_KNOWN_FAILURES failures a sweep may report and still exit 0\n\
          \x20 XFSTESTS_EXPECTED_MESSAGES kernel messages tests provoke on purpose\n\
          \n\
@@ -1753,6 +1760,66 @@ fn do_deploy(cfg: &Config, which: Option<&String>) -> std::process::ExitCode {
         Err(e) => {
             eprintln!();
             eprintln!("  {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// `plan [--against <sweep>] [selection]`: ask xfstests again which
+/// tests of a selection it runs on the first node, and set the answer
+/// beside the verdicts of a sweep when asked to (2.6.0).
+fn do_plan(cfg: &Config, args: &[String]) -> std::process::ExitCode {
+    let Some(node) = cfg.nodes.first() else {
+        eprintln!("no nodes configured");
+        return std::process::ExitCode::FAILURE;
+    };
+    let mut against: Option<String> = None;
+    let mut rest: Vec<String> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--against" {
+            let Some(v) = it.next() else {
+                eprintln!("beamfs-xfstests: --against needs a sweep, by its tag or its directory");
+                return std::process::ExitCode::from(2);
+            };
+            against = Some(v.clone());
+        } else {
+            rest.push(a.clone());
+        }
+    }
+    let selection: Vec<String> = match select::expand(&rest) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("beamfs-xfstests: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    // The plan runs check on the node: the node is held as for a sweep,
+    // and the chain has to agree with itself first.
+    let _held = match nodelock::acquire(
+        &node.name,
+        &std::env::args().nth(1).unwrap_or_else(|| "plan".into()),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("beamfs-xfstests: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = checkpoint::gate(cfg, node) {
+        eprintln!("beamfs-xfstests: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
+    let joined = selection.join(" ");
+    let sel = match joined.trim() {
+        "all" | "" => "",
+        x => x,
+    };
+    match bench::plan(cfg, node, sel, against.as_deref()) {
+        Ok(true) => std::process::ExitCode::SUCCESS,
+        Ok(false) => std::process::ExitCode::from(4),
+        Err(e) => {
+            eprintln!("plan: {e}");
             std::process::ExitCode::FAILURE
         }
     }
