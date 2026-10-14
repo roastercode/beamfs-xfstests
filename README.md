@@ -3,7 +3,7 @@
 Runs the kernel's filesystem test suite against beamfs, split across the
 lab's nodes, one test per invocation, and keeps a record of every run.
 
-Version 2.5.5. Version 2.5.1, from commit `b22ecb4`, produced the
+Version 2.5.6. Version 2.5.1, from commit `b22ecb4`, produced the
 xfstests results of the beamfs v3 technical report,
 [10.5281/zenodo.23253350](https://doi.org/10.5281/zenodo.23253350).
 
@@ -138,18 +138,19 @@ lab.
 The full record is in [CHANGELOG.md](CHANGELOG.md); its latest entries
 follow.
 
-### [2.5.5] - 2026-10-14
+### [2.5.6] - 2026-10-14
 
-- The checkpoint compares the newest mainline tag on kernel.org, read
-  with `git ls-remote` within 20 seconds, with
-  `PREFERRED_VERSION_linux-mainline` in the `conf/local.conf` of the
-  build directory of the machine. A build behind kernel.org is a
-  warning, as is kernel.org out of reach: the lab works on the newest
-  release candidate, and a measurement on an older one still describes
-  the kernel it ran.
-- A command that measures prints the warnings of the checkpoint before
-  it starts; only a broken link stops it, as before.
-- The README describes the checkpoint.
+- A test that xfstests passed and the kernel did not gives in its
+  reason every message the kernel said, in the order it came, a repeat
+  counted, where it gave the first three: a list of expected messages
+  made from those reasons missed the rest.
+- A fsck or mkfs that `deploy` could not build shows the whole of what
+  the compiler said, where it showed its last three lines.
+- The checkpoint no longer reports the deployed image as the newest
+  built when there is no image, or no deploy recorded, to compare: it
+  is a warning, as it already was for the commits.
+- The manual says what generic/067 provokes: a mount without a type,
+  which tries every block filesystem the kernel knows.
 
 ## License
 

@@ -1136,7 +1136,7 @@ fn one_trial(c: &NodeConn, test: &str, deadline: Duration) -> Result<Attempt, St
             // check was satisfied; the kernel was not.
             format!(
                 "passed by xfstests, but the kernel said: {}",
-                incidents.iter().take(3).cloned().collect::<Vec<_>>().join(" | ")
+                crate::tally::tally(&incidents)
             )
         } else if !checked && out.contains("output mismatch") {
             // The test compares its output with what it expects and

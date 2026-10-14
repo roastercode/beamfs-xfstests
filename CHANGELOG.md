@@ -11,6 +11,20 @@ on the commit they point to. From the next version on, each version adds
 its entry, written with the change, and the README carries the latest
 entries.
 
+## [2.5.6] - 2026-10-14
+
+- A test that xfstests passed and the kernel did not gives in its
+  reason every message the kernel said, in the order it came, a repeat
+  counted, where it gave the first three: a list of expected messages
+  made from those reasons missed the rest.
+- A fsck or mkfs that `deploy` could not build shows the whole of what
+  the compiler said, where it showed its last three lines.
+- The checkpoint no longer reports the deployed image as the newest
+  built when there is no image, or no deploy recorded, to compare: it
+  is a warning, as it already was for the commits.
+- The manual says what generic/067 provokes: a mount without a type,
+  which tries every block filesystem the kernel knows.
+
 ## [2.5.5] - 2026-10-14
 
 - The checkpoint compares the newest mainline tag on kernel.org, read

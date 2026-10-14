@@ -127,17 +127,34 @@ pub fn verify_local() -> Vec<Finding> {
         }
     }
 
-    match crate::clean::image_is_current() {
-        None => out.push(Finding {
+    // image_is_current has nothing to say when there is nothing to
+    // compare, no image built or no deploy recorded, and nothing to say
+    // is not an agreement.
+    if crate::clean::newest_image().is_none() {
+        out.push(Finding {
             link: "image -> node",
-            level: Level::Fine,
-            detail: "the deployed image is the newest built".into(),
-        }),
-        Some(w) => out.push(Finding {
+            level: Level::Warn,
+            detail: "no image found to compare against".into(),
+        });
+    } else if crate::chain::read().is_none() {
+        out.push(Finding {
             link: "image -> node",
-            level: Level::Stale,
-            detail: w,
-        }),
+            level: Level::Warn,
+            detail: "no deploy recorded to compare against".into(),
+        });
+    } else {
+        match crate::clean::image_is_current() {
+            None => out.push(Finding {
+                link: "image -> node",
+                level: Level::Fine,
+                detail: "the deployed image is the newest built".into(),
+            }),
+            Some(w) => out.push(Finding {
+                link: "image -> node",
+                level: Level::Stale,
+                detail: w,
+            }),
+        }
     }
 
     // The versions, which nothing compared before.

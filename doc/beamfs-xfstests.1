@@ -856,8 +856,9 @@ or the file XFSTESTS_EXPECTED_MESSAGES names, lists each one: the test,
 the text the message contains between double quotes, and why. The x86
 sweep of 2026-10-11 failed six tests xfstests had passed on such
 messages: dm-error under the volume for generic/338, 441 and 484, a
-loop device on a full volume for generic/361, mount trying ext4 and
-ext2 on the scratch device for generic/067, exec with an empty argv for
+loop device on a full volume for generic/361, a mount without
+a type, which tries every block filesystem the kernel knows on the
+scratch device, for generic/067, exec with an empty argv for
 generic/633. A line without a text or without a reason is refused and
 sets nothing aside, and the tree checker's LOST POINTER and a
 correction by beamfs are never set aside. A sweep keeps the file in its

@@ -19,6 +19,7 @@
 mod select;
 mod checkpoint;
 mod kernelorg;
+mod tally;
 mod nodelock;
 mod say;
 mod wedge;

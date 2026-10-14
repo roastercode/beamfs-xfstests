@@ -257,10 +257,8 @@ fn build_tools(deploy_dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
         .output()
         .map_err(|e| format!("make fsck: {e}"))?;
     if !out.status.success() {
-        return Err(format!("fsck did not build: {}",
-                           String::from_utf8_lossy(&out.stderr)
-                               .lines().rev().take(3)
-                               .collect::<Vec<_>>().join(" | ")));
+        return Err(format!("fsck did not build:\n{}",
+                           String::from_utf8_lossy(&out.stderr).trim_end()));
     }
 
     // The same directory the kernel build compiles, found rather than named.
@@ -275,10 +273,8 @@ fn build_tools(deploy_dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
         .output()
         .map_err(|e| format!("cc mkfs: {e}"))?;
     if !out.status.success() {
-        return Err(format!("mkfs did not build: {}",
-                           String::from_utf8_lossy(&out.stderr)
-                               .lines().rev().take(3)
-                               .collect::<Vec<_>>().join(" | ")));
+        return Err(format!("mkfs did not build:\n{}",
+                           String::from_utf8_lossy(&out.stderr).trim_end()));
     }
 
     Ok(vec![
