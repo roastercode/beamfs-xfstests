@@ -186,6 +186,9 @@ pub fn verify_local() -> Vec<Finding> {
         },
     });
 
+    // The kernel itself: the lab works on the newest -rc.
+    out.push(crate::kernelorg::finding());
+
     out
 }
 
@@ -221,6 +224,12 @@ pub fn verify_node(cfg: &Config, node: &Node) -> Vec<Finding> {
 pub fn gate(cfg: &Config, node: &Node) -> Result<(), String> {
     let mut all = verify_local();
     all.extend(verify_node(cfg, node));
+    // A warning does not stop a measurement, but it is said before it:
+    // a sweep on an rc the lab has left still runs, and its record
+    // should not be the first place to say so.
+    for f in all.iter().filter(|f| f.level == Level::Warn) {
+        println!("  warning : {} -- {}", f.link, f.detail);
+    }
     let broken: Vec<&Finding> = all.iter().filter(|f| f.level == Level::Stale).collect();
     if broken.is_empty() {
         return Ok(());

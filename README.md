@@ -3,7 +3,7 @@
 Runs the kernel's filesystem test suite against beamfs, split across the
 lab's nodes, one test per invocation, and keeps a record of every run.
 
-Version 2.5.4. Version 2.5.1, from commit `b22ecb4`, produced the
+Version 2.5.5. Version 2.5.1, from commit `b22ecb4`, produced the
 xfstests results of the beamfs v3 technical report,
 [10.5281/zenodo.23253350](https://doi.org/10.5281/zenodo.23253350).
 
@@ -110,6 +110,23 @@ The trace keeps the kernel log of each test.
 different versions of this tool, names each: a verdict that changed
 between them may be the rule's and not the code's.
 
+## Before a measurement
+
+Before it measures, beamfs-xfstests checks the chain from the
+repositories to the node, and `beamfs-xfstests checkpoint` prints it:
+the sources of beamfs and of its checker against their copies in the
+Yocto layer, the versions they declare, the commits against the image,
+the deployed image against the newest built, and that no other run
+holds the node. A broken link stops the measurement, which would
+describe other code than it names; `XFSTESTS_FORCE=1` takes it anyway.
+
+The checkpoint also compares the newest mainline tag on kernel.org,
+read with `git ls-remote` within 20 seconds, with the kernel the build
+directory of the machine prefers, `PREFERRED_VERSION_linux-mainline` in
+its `conf/local.conf`. A build behind kernel.org is a warning, as is
+kernel.org out of reach: the measurement still describes the kernel it
+ran. The warnings are printed before the measurement starts.
+
 ## Documentation
 
 `doc/beamfs-xfstests.1` is the manual (`man -l doc/beamfs-xfstests.1`):
@@ -121,14 +138,18 @@ lab.
 The full record is in [CHANGELOG.md](CHANGELOG.md); its latest entries
 follow.
 
-### [2.5.4] - 2026-10-12
+### [2.5.5] - 2026-10-14
 
-- README: 2.5.4, and what fails a test or a sweep (`3d01499`)
-- what a test provokes on purpose, and a budget of its own (`ab69fdd`)
-
-### [2.5.3] - 2026-10-10
-
-- an incident is a level, not a word (`921b31e`)
+- The checkpoint compares the newest mainline tag on kernel.org, read
+  with `git ls-remote` within 20 seconds, with
+  `PREFERRED_VERSION_linux-mainline` in the `conf/local.conf` of the
+  build directory of the machine. A build behind kernel.org is a
+  warning, as is kernel.org out of reach: the lab works on the newest
+  release candidate, and a measurement on an older one still describes
+  the kernel it ran.
+- A command that measures prints the warnings of the checkpoint before
+  it starts; only a broken link stops it, as before.
+- The README describes the checkpoint.
 
 ## License
 

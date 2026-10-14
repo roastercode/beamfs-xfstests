@@ -18,6 +18,7 @@
 
 mod select;
 mod checkpoint;
+mod kernelorg;
 mod nodelock;
 mod say;
 mod wedge;

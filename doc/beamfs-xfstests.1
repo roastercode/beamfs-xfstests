@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: GPL-2.0-only
-.TH BEAMFS-XFSTESTS 1 "2026-10-10" "beamfs-xfstests" "beamfs development tools"
+.TH BEAMFS-XFSTESTS 1 "2026-10-14" "beamfs-xfstests" "beamfs development tools"
 
 .TP
 .B sweep \fR[\fIselection\fR]
@@ -890,6 +890,14 @@ broken link refuses the run.
 .B XFSTESTS_FORCE=1
 takes it anyway, which is right for a deliberate comparison against
 older code and wrong for everything else.
+.PP
+Since 2.5.5 the checkpoint also compares the newest mainline tag on
+kernel.org, read with git ls\-remote within 20 seconds, with
+PREFERRED_VERSION_linux\-mainline in conf/local.conf of the build
+directory of the machine. A build behind kernel.org is a warning, and
+so is kernel.org out of reach: the measurement still describes the
+kernel it ran. A command that measures prints the warnings of the
+checkpoint before it starts; only a broken link stops it.
 .SS Display
 Output is one block rewritten in place, as tall as there is news,
 with a spinner that turns while the node is alive. A line is left

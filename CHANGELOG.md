@@ -11,6 +11,19 @@ on the commit they point to. From the next version on, each version adds
 its entry, written with the change, and the README carries the latest
 entries.
 
+## [2.5.5] - 2026-10-14
+
+- The checkpoint compares the newest mainline tag on kernel.org, read
+  with `git ls-remote` within 20 seconds, with
+  `PREFERRED_VERSION_linux-mainline` in the `conf/local.conf` of the
+  build directory of the machine. A build behind kernel.org is a
+  warning, as is kernel.org out of reach: the lab works on the newest
+  release candidate, and a measurement on an older one still describes
+  the kernel it ran.
+- A command that measures prints the warnings of the checkpoint before
+  it starts; only a broken link stops it, as before.
+- The README describes the checkpoint.
+
 ## [2.5.4] - 2026-10-12
 
 - README: 2.5.4, and what fails a test or a sweep (`3d01499`)
