@@ -116,6 +116,20 @@ between them may be the rule's and not the code's.
 commands, environment, the trace, the files. `doc/lab.md` is about the
 lab.
 
+## Changelog
+
+The full record is in [CHANGELOG.md](CHANGELOG.md); its latest entries
+follow.
+
+### [2.5.4] - 2026-10-12
+
+- README: 2.5.4, and what fails a test or a sweep (`3d01499`)
+- what a test provokes on purpose, and a budget of its own (`ab69fdd`)
+
+### [2.5.3] - 2026-10-10
+
+- an incident is a level, not a word (`921b31e`)
+
 ## License
 
 GPL-2.0-only, see `COPYING`.
