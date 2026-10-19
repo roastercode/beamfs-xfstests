@@ -89,6 +89,18 @@ warning or a soft lockup, or its taint changed during the sweep; when
 the node had to be recovered; when lockdep was not on at the start or
 switched itself off; or when the apparatus failed.
 
+## The cover letter
+
+`beamfs-xfstests cover <sweep>...` writes the Testing paragraph of
+`upstream/cover.txt` in place of `@@XFSTESTS@@`, from the records named:
+each must have finished, be clean (`gate=clean`), have recovered no node,
+have run the whole auto group with a verdict for every test, and all must
+name the same code gate tree and measured sources. The paragraph carries
+the counts, the kernel and module, each machine's line with the reasons
+xfstests gave counted by family, and the record tags; ASCII, 75 columns.
+Whether those sources are the series' own is the crate's identity check,
+at the final `upstream` run.
+
 ## The plan
 
 612 of the 740 tests of the x86 sweep `sweep-1791798230` were declined
@@ -122,13 +134,38 @@ anyway as a control: one that runs makes the sweep not clean.
 `XFSTESTS_PLAN=0` runs every test, `XFSTESTS_PLAN_CONTROL` sets the
 number of controls.
 
-`beamfs-xfstests plan --against <sweep>` makes the plan again and sets
-it beside the verdicts of a sweep, by its tag or its directory; it exits
+Every sweep sets its plan beside the newest full sweep of its node, the
+one that ran the harness's default, and says so: `set beside sweep-X:
+N hidden, M run for nothing`. A test the plan declines that ran there
+is hidden by the plan: it runs anyway, as a control, whatever the draw,
+so that the truth decides -- if it runs, the sweep is not clean and says
+why; if xfstests declines it, the node changed and the plan was right.
+The record's `meta.txt` carries the `plan_against=` line. Made by hand,
+`beamfs-xfstests plan --against <sweep>` does the same against a sweep
+named by its tag or its directory; it exits
 4 when a test that ran there is declined by the plan. Made by hand on
 x86-01 on 2026-10-14 and set beside `sweep-1791798230`, the plan took
 923 s: no test that ran in that sweep was declined, 563 were declined
 with the reason the sweep gave, and 49 that the sweep saw declined were
 run, their requirement being written after the preamble.
+
+The plan is set beside whole sweeps only: a record counts when it has as
+many verdicts as `tests=` in its `meta.txt`, so a sweep stopped partway
+is not a reference. The other disagreement is acted on too: a test the
+plan would run that the newest full sweep recorded as declined is set
+aside on the sweep's word, recorded `NOTRUN` with `recorded:` and the
+reason xfstests gave there, named by `plan_aside=` in `meta.txt`;
+`XFSTESTS_ASIDE_CONTROL` (3) of them run anyway, and one that runs
+makes the sweep not clean. The plan cuts a test before its first line
+of work and misses a requirement checked later: 59 such tests on x86-01
+and 60 on compute01 on 2026-10-15, the latter at about 100 s each.
+
+A new key does not ask about every test again. The newest plan of the
+node under another key is the hypothesis: one test per reason it knew
+is asked, a group whose probe answers as before inherits answer and
+cut, the others are asked whole, and the tests it ran inherit as well.
+A rebuilt module changes the key; asking all 739 took 168 min on
+compute01 on 2026-10-15.
 
 ## Records
 
@@ -153,6 +190,18 @@ different versions of this tool, names each: a verdict that changed
 between them may be the rule's and not the code's.
 
 ## Before a measurement
+
+The code first. Every command that drives a node -- sweep, run, probe,
+bench, baseline, control, soak, trace, matrix, scenario -- starts by
+passing the beamfs tree, as it stands, through beamfs-upstream's full
+profile: the checks kernel.org puts a series through, the builds on
+five architectures included. A code that does not pass is not measured.
+The verdict is kept under `code-gate/<tree hash>/` beside the records,
+so the same tree is checked once, and `meta.txt` of every record carries
+a `code_gate=` line naming the verdict the measurement ran under. The
+cover letter's `@@XFSTESTS@@` is the one thing the gate leaves open: it
+is what the sweep is about to produce. `XFSTESTS_UNCHECKED_CODE=1`
+measures anyway, and the record says so.
 
 Before it measures, beamfs-xfstests checks the chain from the
 repositories to the node, and `beamfs-xfstests checkpoint` prints it:
@@ -179,6 +228,24 @@ lab.
 
 The full record is in [CHANGELOG.md](CHANGELOG.md); its latest entries
 follow.
+
+### [2.7.0] - 2026-10-15
+
+- The code gate: every measuring command first passes the beamfs tree
+  through beamfs-upstream's full profile and refuses to measure a code
+  that does not pass; the record names the verdict. See "Before a
+  measurement".
+- 2.9.0: `cover <sweep>...` fills `@@XFSTESTS@@` of the series' cover letter
+  from whole, clean sweep records.
+- 2.8.0: the plan is set beside whole sweeps only; tests the newest full
+  sweep declined while the plan would run them are set aside on its word
+  (`recorded:`, `plan_aside=`, `XFSTESTS_ASIDE_CONTROL`); a new key asks
+  one test per reason and inherits the rest from the previous plan.
+- Every sweep sets its plan beside the newest full sweep of its node and
+  runs, as controls, the tests the plan would hide; `plan_against=` in
+  the record. See "The plan".
+- The selection syntax of `sweep` stays one group per list; a list that
+  names two groups is a defect still open.
 
 ### [2.6.0] - 2026-10-14
 

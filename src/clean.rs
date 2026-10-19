@@ -28,7 +28,7 @@ fn home() -> String {
 }
 
 /// The repository holding the filesystem sources.
-fn repo_dir() -> PathBuf {
+pub(crate) fn repo_dir() -> PathBuf {
     std::env::var("BEAMFS_REPO")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(home()).join("git/beamfs"))

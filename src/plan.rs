@@ -119,6 +119,9 @@ pub(crate) struct Split {
     /// Test and the reason xfstests gave.
     pub planned: Vec<(String, String)>,
     pub control: Vec<String>,
+    /// Test and reason, declined by the newest full sweep of the node
+    /// while the plan would run it: set aside on the sweep's word.
+    pub aside: Vec<(String, String)>,
 }
 
 fn note(s: &str) {
@@ -681,6 +684,45 @@ pub(crate) fn for_sweep(
         ));
         return Ok(Some(plan));
     }
+    // A new key, an old plan: the old one is the hypothesis. One test per
+    // reason it knew is asked; a group whose probe answers as before
+    // inherits answer and cut, the others are asked whole; what it ran
+    // inherits too, at worst running once for nothing. A rebuilt module
+    // changes the key, and asking all 739 again took 168 min on
+    // compute01 on 2026-10-15.
+    let mut missing = missing;
+    if let Some(old) = previous_plan(&node.name, &key) {
+        let probes = probes_of(&old, &missing);
+        if !probes.is_empty() {
+            note(&format!(
+                "  plan    : the key changed since {} ({} min ago): asking one test per \
+                 reason it knew, {} of {}, the rest inherit when the answer holds",
+                short(&old.key),
+                unix_now().saturating_sub(old.made) / 60,
+                probes.len(),
+                missing.len()
+            ));
+            let asked = ask(c, &probes)?;
+            let got = inherit(&old, &asked.tests, &missing);
+            note(&format!(
+                "  plan    : {} declined and {} run inherited; {} test(s) of {} reason(s) \
+                 that answered otherwise are asked whole",
+                got.declined,
+                got.run,
+                got.reasked.len(),
+                got.reasons_changed
+            ));
+            plan.tests.extend(got.tests);
+            plan.cuts.extend(got.cuts);
+            plan.merge(asked);
+            missing.retain(|t| !plan.tests.contains_key(t));
+        }
+    }
+    if missing.is_empty() {
+        save(&plan)?;
+        note(&format!("  plan    : made in {} s, kept in {}", plan.secs, path.display()));
+        return Ok(Some(plan));
+    }
     note(&format!(
         "  plan    : {} test(s) of this selection without an answer under key {}, \
          asking xfstests",
@@ -692,6 +734,104 @@ pub(crate) fn for_sweep(
     save(&plan)?;
     note(&format!("  plan    : made in {} s, kept in {}", plan.secs, path.display()));
     Ok(Some(plan))
+}
+
+/// The newest plan of `node` kept under another key than `key`.
+fn previous_plan(node: &str, key: &str) -> Option<Plan> {
+    let dir = path_for(node, key).parent()?.to_path_buf();
+    let mut best: Option<Plan> = None;
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = e.path();
+        if path.extension().is_none_or(|x| x != "plan") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let p = parse(&text, &path);
+        if p.key == key || p.tests.is_empty() {
+            continue;
+        }
+        if best.as_ref().is_none_or(|b| p.made > b.made) {
+            best = Some(p);
+        }
+    }
+    best
+}
+
+/// One test per reason `old` declined among `missing`: the first of
+/// each group, asked under the new key for the whole group.
+fn probes_of(old: &Plan, missing: &[String]) -> Vec<String> {
+    let mut seen: BTreeMap<&str, &String> = BTreeMap::new();
+    for t in missing {
+        if let Some(Planned::NotRun(r)) = old.tests.get(t) {
+            seen.entry(r.as_str()).or_insert(t);
+        }
+    }
+    seen.into_values().cloned().collect()
+}
+
+/// What `missing` inherits from `old`, given the probes' answers.
+struct Inherited {
+    tests: BTreeMap<String, Planned>,
+    cuts: BTreeMap<String, (usize, String)>,
+    /// Declined tests inherited, and tests run inherited.
+    declined: usize,
+    run: usize,
+    /// Tests of a group whose probe answered otherwise: asked whole.
+    reasked: Vec<String>,
+    reasons_changed: usize,
+}
+
+fn inherit(old: &Plan, probed: &BTreeMap<String, Planned>, missing: &[String]) -> Inherited {
+    let mut got = Inherited {
+        tests: BTreeMap::new(),
+        cuts: BTreeMap::new(),
+        declined: 0,
+        run: 0,
+        reasked: Vec::new(),
+        reasons_changed: 0,
+    };
+    // Per reason, whether its probe answered as the old plan said.
+    let mut holds: BTreeMap<&str, bool> = BTreeMap::new();
+    for t in missing {
+        if let Some(Planned::NotRun(r)) = old.tests.get(t) {
+            if let Some(a) = probed.get(t) {
+                let same = matches!(a, Planned::NotRun(nr) if nr == r);
+                holds.insert(r.as_str(), same);
+                if !same {
+                    got.reasons_changed += 1;
+                }
+            }
+        }
+    }
+    for t in missing {
+        if probed.contains_key(t) {
+            continue;
+        }
+        match old.tests.get(t) {
+            Some(Planned::NotRun(r)) => {
+                if holds.get(r.as_str()).copied().unwrap_or(false) {
+                    got.tests.insert(t.clone(), Planned::NotRun(r.clone()));
+                    if let Some(c) = old.cuts.get(t) {
+                        got.cuts.insert(t.clone(), c.clone());
+                    }
+                    got.declined += 1;
+                } else {
+                    got.reasked.push(t.clone());
+                }
+            }
+            Some(Planned::Run) => {
+                got.tests.insert(t.clone(), Planned::Run);
+                if let Some(c) = old.cuts.get(t) {
+                    got.cuts.insert(t.clone(), c.clone());
+                }
+                got.run += 1;
+            }
+            _ => {}
+        }
+    }
+    got
 }
 
 /// The plan made again for `tests`, whatever the node's key holds.
@@ -724,6 +864,15 @@ pub(crate) fn controls() -> usize {
         .unwrap_or(10)
 }
 
+/// How many tests set aside on a sweep's word run anyway:
+/// XFSTESTS_ASIDE_CONTROL, or 3.
+pub(crate) fn aside_controls() -> usize {
+    std::env::var("XFSTESTS_ASIDE_CONTROL")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(3)
+}
+
 /// Every stride-th of `from`, from an offset the seed gives, at most k.
 fn pick(from: &[String], k: usize, seed: u64) -> Vec<String> {
     if k == 0 || from.is_empty() {
@@ -739,10 +888,35 @@ fn pick(from: &[String], k: usize, seed: u64) -> Vec<String> {
         .collect()
 }
 
-/// What a sweep runs of `tests` under `plan`.
-pub(crate) fn split(tests: &[String], plan: Option<&Plan>, controls: usize, seed: u64) -> Split {
+/// What a sweep runs of `tests` under `plan`, with `forced` run as
+/// controls whatever the draw: the tests the plan declines but a
+/// recorded sweep of this node ran. One that runs makes the sweep not
+/// clean, as any control does; one that xfstests declines says the
+/// node changed and the plan is right.
+///
+/// `aside` is the other disagreement: tests the plan would run that
+/// the newest full sweep of the node recorded as declined, each with
+/// the reason it gave. The plan cuts a test before its first line of
+/// work and misses a requirement checked later; the sweep did not
+/// (59 of them on x86-01, 2026-10-15, 60 on compute01, each run to
+/// hear "not supported"). They are set aside on the sweep's word and
+/// recorded as such, aside_controls() of them running anyway: one that
+/// runs says the record is stale and makes the sweep not clean.
+pub(crate) fn split_with(
+    tests: &[String],
+    plan: Option<&Plan>,
+    controls: usize,
+    seed: u64,
+    forced: &[String],
+    aside: &[(String, String)],
+) -> Split {
     let Some(p) = plan else {
-        return Split { run: tests.to_vec(), planned: Vec::new(), control: Vec::new() };
+        return Split {
+            run: tests.to_vec(),
+            planned: Vec::new(),
+            control: Vec::new(),
+            aside: Vec::new(),
+        };
     };
     let declined: Vec<(String, String)> = tests
         .iter()
@@ -752,17 +926,39 @@ pub(crate) fn split(tests: &[String], plan: Option<&Plan>, controls: usize, seed
         })
         .collect();
     let names: Vec<String> = declined.iter().map(|(t, _)| t.clone()).collect();
-    let control = pick(&names, controls, seed);
+    let aside: Vec<(String, String)> = aside
+        .iter()
+        .filter(|(t, _)| {
+            tests.contains(t) && !names.contains(t) && matches!(p.tests.get(t), Some(Planned::Run))
+        })
+        .cloned()
+        .collect();
+    let aside_names: Vec<String> = aside.iter().map(|(t, _)| t.clone()).collect();
+    let mut control = pick(&names, controls, seed);
+    for t in pick(&aside_names, aside_controls(), seed) {
+        if !control.contains(&t) {
+            control.push(t);
+        }
+    }
+    for f in forced {
+        if names.contains(f) && !control.contains(f) {
+            control.push(f.clone());
+        }
+    }
     let run = tests
         .iter()
-        .filter(|t| control.contains(*t) || !names.contains(*t))
+        .filter(|t| control.contains(*t) || (!names.contains(*t) && !aside_names.contains(*t)))
         .cloned()
         .collect();
     let planned = declined
         .into_iter()
         .filter(|(t, _)| !control.contains(t))
         .collect();
-    Split { run, planned, control }
+    let aside = aside
+        .into_iter()
+        .filter(|(t, _)| !control.contains(t))
+        .collect();
+    Split { run, planned, control, aside }
 }
 
 /// What the plan says of a selection, said.
@@ -818,6 +1014,8 @@ pub(crate) struct Comparison {
     /// Declined there, run by the plan, by the first word of the line
     /// that ended the preamble.
     pub for_nothing: BTreeMap<String, Vec<String>>,
+    /// The same tests, each with the reason the record gave.
+    pub for_nothing_why: Vec<(String, String)>,
     pub unknown: Vec<String>,
     pub other: Vec<String>,
     /// Ran there, declined by the plan: a test the plan would hide.
@@ -842,7 +1040,10 @@ pub(crate) fn compare(p: &Plan, tests: &[String], verdicts: &str) -> Comparison 
         };
         let secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
         let why = it.next().unwrap_or("").trim();
-        let why = why.strip_prefix("planned: ").unwrap_or(why);
+        let why = why
+            .strip_prefix("planned: ")
+            .or_else(|| why.strip_prefix("recorded: "))
+            .unwrap_or(why);
         rec.entry(t).or_insert((v, secs, why));
     }
     let mut c = Comparison::default();
@@ -876,6 +1077,7 @@ pub(crate) fn compare(p: &Plan, tests: &[String], verdicts: &str) -> Comparison 
                     .unwrap_or("?")
                     .to_string();
                 c.for_nothing.entry(w).or_default().push(t.clone());
+                c.for_nothing_why.push((t.clone(), why.to_string()));
             }
             Planned::Unknown(u) if v == "NOTRUN" => c.unknown.push(format!("{t}: {u}")),
             x => c.other.push(format!("{t}: {v} there, {} in the plan", kind(x))),
@@ -922,6 +1124,105 @@ impl Comparison {
         } else {
             note(&format!("  === THE PLAN HIDES {} TEST(S) ===", self.hidden.len()));
         }
+    }
+}
+
+/// The plan set beside the newest full sweep of a node, as every sweep
+/// does before it runs.
+pub(crate) struct Crossed {
+    /// The record it was set beside; None when the node has no full sweep.
+    pub record: Option<PathBuf>,
+    /// Tests that ran there and the plan declines: hidden by it.
+    pub hidden: Vec<String>,
+    /// Tests the plan runs that were declined there: run for nothing.
+    pub for_nothing: usize,
+    /// Those tests, each with the reason the record gave: a sweep sets
+    /// them aside on the record's word, a few running as controls.
+    pub for_nothing_tests: Vec<(String, String)>,
+}
+
+impl Crossed {
+    /// One line for the record's meta.txt.
+    pub fn meta(&self) -> String {
+        match &self.record {
+            Some(r) => format!(
+                "plan_against={} hidden={} for_nothing={} [{}]",
+                r.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+                self.hidden.len(),
+                self.for_nothing,
+                self.hidden.join(" ")
+            ),
+            None => "plan_against=none".to_string(),
+        }
+    }
+}
+
+/// The newest record under `sweeps` of a sweep of `node` that ran the
+/// harness's default, the whole auto group, with every verdict kept.
+pub(crate) fn newest_full_record(sweeps: &Path, node: &str) -> Option<PathBuf> {
+    let mut best: Option<(u64, PathBuf)> = None;
+    for e in std::fs::read_dir(sweeps).ok()?.flatten() {
+        let dir = e.path();
+        let Ok(meta) = std::fs::read_to_string(dir.join("meta.txt")) else {
+            continue;
+        };
+        let of_node = meta.lines().any(|l| {
+            l.strip_prefix("node=").is_some_and(|v| v.split_whitespace().next() == Some(node))
+        });
+        let full = meta
+            .lines()
+            .any(|l| l.starts_with("selection=(none: the harness's default"));
+        if !of_node || !full {
+            continue;
+        }
+        // Whole: as many verdicts as the sweep had tests. A sweep stopped
+        // partway keeps its meta.txt and a short verdicts.txt; set beside
+        // one, the plan looked right about tests nobody had tried
+        // (sweep-1791950153, 42 of 740, taken for compute01's reference
+        // on 2026-10-15).
+        let tests: usize = meta
+            .lines()
+            .find_map(|l| l.strip_prefix("tests=").and_then(|v| v.trim().parse().ok()))
+            .unwrap_or(0);
+        let Ok(verdicts) = std::fs::read_to_string(dir.join("verdicts.txt")) else {
+            continue;
+        };
+        if tests == 0 || verdicts.lines().filter(|l| !l.trim().is_empty()).count() < tests {
+            continue;
+        }
+        let at = meta
+            .lines()
+            .find_map(|l| l.strip_prefix("at=").and_then(|v| v.trim().parse::<u64>().ok()))
+            .unwrap_or(0);
+        if best.as_ref().is_none_or(|(b, _)| at > *b) {
+            best = Some((at, dir));
+        }
+    }
+    best.map(|(_, d)| d)
+}
+
+/// Set the plan beside the newest full sweep of `node`, if it has one.
+pub(crate) fn crossed(p: &Plan, tests: &[String], sweeps: &Path, node: &str) -> Crossed {
+    let Some(record) = newest_full_record(sweeps, node) else {
+        return Crossed {
+            record: None,
+            hidden: Vec::new(),
+            for_nothing: 0,
+            for_nothing_tests: Vec::new(),
+        };
+    };
+    let v = std::fs::read_to_string(record.join("verdicts.txt")).unwrap_or_default();
+    let c = compare(p, tests, &v);
+    Crossed {
+        record: Some(record),
+        hidden: c
+            .hidden
+            .iter()
+            .map(|h| h.split(':').next().unwrap_or("").trim().to_string())
+            .filter(|h| !h.is_empty())
+            .collect(),
+        for_nothing: c.for_nothing.values().map(Vec::len).sum(),
+        for_nothing_tests: c.for_nothing_why,
     }
 }
 
@@ -1061,15 +1362,15 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let s = split(&tests, Some(&p), 0, 0);
+        let s = split_with(&tests, Some(&p), 0, 0, &[], &[]);
         assert_eq!(s.run, vec!["generic/001".to_string(), "generic/005".to_string()]);
         assert_eq!(s.planned.len(), 2);
         assert!(s.control.is_empty());
-        let s = split(&tests, Some(&p), 1, 1);
+        let s = split_with(&tests, Some(&p), 1, 1, &[], &[]);
         assert_eq!(s.control, vec!["generic/004".to_string()]);
         assert_eq!(s.planned, vec![("generic/002".to_string(), "no reflink".to_string())]);
         assert_eq!(s.run.len(), 3);
-        let s = split(&tests, None, 10, 0);
+        let s = split_with(&tests, None, 10, 0, &[], &[]);
         assert_eq!(s.run, tests);
     }
 
@@ -1092,4 +1393,107 @@ mod tests {
         assert!(c.hidden[0].starts_with("generic/004"));
         assert!(c.differ.is_empty() && c.unknown.is_empty() && c.other.is_empty());
     }
+
+    #[test]
+    fn a_hidden_test_is_forced_among_the_controls() {
+        let mut p = Plan::empty("k", Path::new("/nonexistent"), "");
+        for t in ["generic/001", "generic/002", "generic/003"] {
+            p.tests.insert(t.to_string(), Planned::NotRun("no".to_string()));
+        }
+        p.tests.insert("generic/004".to_string(), Planned::Run);
+        let tests: Vec<String> = ["generic/001", "generic/002", "generic/003", "generic/004"]
+            .iter().map(|s| s.to_string()).collect();
+        let s = split_with(&tests, Some(&p), 0, 0, &["generic/002".to_string()], &[]);
+        assert_eq!(s.control, vec!["generic/002".to_string()]);
+        assert!(s.run.contains(&"generic/002".to_string()));
+        assert!(s.run.contains(&"generic/004".to_string()));
+        assert_eq!(s.planned.len(), 2);
+        // a forced name the plan does not decline is not a control
+        let s = split_with(&tests, Some(&p), 0, 0, &["generic/004".to_string()], &[]);
+        assert!(s.control.is_empty());
+    }
+
+    #[test]
+    fn a_test_the_record_declined_is_set_aside_and_some_run_as_controls() {
+        let mut p = Plan::empty("k", Path::new("/nonexistent"), "");
+        let tests: Vec<String> = (1..=7).map(|i| format!("generic/00{i}")).collect();
+        for t in &tests {
+            p.tests.insert(t.clone(), Planned::Run);
+        }
+        let aside: Vec<(String, String)> = (2..=6)
+            .map(|i| (format!("generic/00{i}"), "ACLs not supported".to_string()))
+            .collect();
+        let s = split_with(&tests, Some(&p), 0, 0, &[], &aside);
+        assert!(s.planned.is_empty());
+        assert_eq!(s.control.len(), 3, "{:?}", s.control);
+        assert_eq!(s.aside.len(), 2, "{:?}", s.aside);
+        assert_eq!(s.run.len(), 5, "{:?}", s.run);
+        assert!(s.run.contains(&"generic/001".to_string()));
+        assert!(s.run.contains(&"generic/007".to_string()));
+        for (t, _) in &s.aside {
+            assert!(!s.run.contains(t));
+        }
+        // Without a record, nothing is set aside.
+        let s = split_with(&tests, Some(&p), 0, 0, &[], &[]);
+        assert_eq!(s.run.len(), 7);
+        assert!(s.aside.is_empty());
+    }
+
+    #[test]
+    fn a_new_key_inherits_from_the_old_plan_where_the_probe_holds() {
+        let mut old = Plan::empty("old", Path::new("/nonexistent"), "");
+        for i in 1..=3 {
+            old.tests.insert(format!("generic/00{i}"), Planned::NotRun("no acl".into()));
+            old.cuts.insert(format!("generic/00{i}"), (10, "_require_acls".into()));
+        }
+        for i in 4..=5 {
+            old.tests.insert(format!("generic/00{i}"), Planned::NotRun("no quota".into()));
+        }
+        old.tests.insert("generic/006".into(), Planned::Run);
+        old.tests.insert("generic/007".into(), Planned::Unknown("no answer".into()));
+        let missing: Vec<String> = (1..=8).map(|i| format!("generic/00{i}")).collect();
+        let probes = probes_of(&old, &missing);
+        assert_eq!(probes, vec!["generic/001".to_string(), "generic/004".to_string()]);
+        let mut probed = BTreeMap::new();
+        probed.insert("generic/001".to_string(), Planned::NotRun("no acl".into()));
+        probed.insert("generic/004".to_string(), Planned::Run);
+        let got = inherit(&old, &probed, &missing);
+        assert_eq!(got.declined, 2);
+        assert_eq!(got.run, 1);
+        assert_eq!(got.reasons_changed, 1);
+        assert_eq!(got.reasked, vec!["generic/005".to_string()]);
+        assert!(matches!(got.tests.get("generic/002"), Some(Planned::NotRun(r)) if r == "no acl"));
+        assert_eq!(got.cuts.get("generic/003").map(|c| c.0), Some(10));
+        assert!(matches!(got.tests.get("generic/006"), Some(Planned::Run)));
+        assert!(!got.tests.contains_key("generic/007"));
+        assert!(!got.tests.contains_key("generic/008"));
+        assert!(!got.tests.contains_key("generic/001"));
+    }
+
+    #[test]
+    fn the_newest_full_record_of_a_node_is_found() {
+        let root = std::env::temp_dir().join(format!("bx-plan-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mk = |tag: &str, node: &str, at: u64, full: bool| {
+            let d = root.join(tag);
+            std::fs::create_dir_all(&d).unwrap();
+            let sel = if full { "(none: the harness's default, the auto group)" } else { "generic/001" };
+            std::fs::write(d.join("meta.txt"), format!("=== start ===\nat={at}\nnode={node} 10.0.0.1\nselection={sel}\ntests=1\n")).unwrap();
+            std::fs::write(d.join("verdicts.txt"), "generic/001 PASS 1 \n").unwrap();
+        };
+        mk("sweep-1", "x86-01", 1, true);
+        mk("sweep-2", "x86-01", 2, false);
+        mk("sweep-3", "compute01", 3, true);
+        mk("sweep-4", "x86-01", 4, true);
+        // Newer, full by its selection, stopped after 1 of 5: not whole.
+        let d = root.join("sweep-5");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("meta.txt"), "=== start ===\nat=5\nnode=x86-01 10.0.0.1\nselection=(none: the harness's default, the auto group)\ntests=5\n").unwrap();
+        std::fs::write(d.join("verdicts.txt"), "generic/001 PASS 1 \n").unwrap();
+        let got = newest_full_record(&root, "x86-01").unwrap();
+        assert_eq!(got.file_name().unwrap().to_string_lossy(), "sweep-4");
+        assert!(newest_full_record(&root, "nobody").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
+

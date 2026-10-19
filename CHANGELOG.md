@@ -11,6 +11,49 @@ on the commit they point to. From the next version on, each version adds
 its entry, written with the change, and the README carries the latest
 entries.
 
+## [2.9.0] - 2026-10-19
+
+- `cover <sweep>...` writes the Testing paragraph of `upstream/cover.txt` in
+  place of `@@XFSTESTS@@` from whole, clean sweep records: finished, `gate=clean`,
+  no recovery, the whole auto group with a verdict per test, every record naming
+  the same code gate tree and measured sources. Numbers, kernel, module, machine
+  and record tags come from `meta.txt` and `verdicts.txt`; the reasons xfstests
+  gave are counted by family. ASCII, 75 columns. The sources' identity with the
+  series stays the crate's check at the final run.
+
+## [2.8.0] - 2026-10-17
+
+- The plan is set beside whole sweeps only: `newest_full_record` wants as
+  many verdicts as `tests=` in meta.txt. A sweep stopped partway
+  (sweep-1791950153, 42 of 740) was compute01's reference on 2026-10-15,
+  and the cross-check saw 3 tests run for nothing where the sweep then ran 60.
+- Tests the newest full sweep declined while the plan would run them are set
+  aside on the sweep's word: verdict `NOTRUN 0 recorded: <reason>`, the
+  `plan_aside=` line of meta.txt naming them, `XFSTESTS_ASIDE_CONTROL` (3) of
+  them run anyway as controls; one that runs makes the sweep not clean. The
+  plan cuts a test before its first line of work and misses a requirement
+  checked later: 59 such tests on x86-01 and 60 on compute01 on 2026-10-15,
+  the latter at about 100 s each.
+- `compare` reads `recorded:` verdicts as it reads `planned:` ones.
+- A new key no longer asks xfstests about every test again (168 min on
+  compute01 on 2026-10-15, where a rebuilt module changes the key). The newest
+  plan of the node under another key is the hypothesis: one test per reason it
+  knew is asked; when the answer holds, the group inherits answer and cut,
+  otherwise the whole group is asked again; tests it ran inherit as well.
+  `plan    : the key changed since ...` says what was asked and what inherited.
+
+## [2.7.0] - 2026-10-15
+
+- The code gate: every measuring command first passes the beamfs tree
+  through beamfs-upstream's full profile and refuses to measure a code
+  that does not pass; the record names the verdict. See "Before a
+  measurement" in the README.
+- Every sweep sets its plan beside the newest full sweep of its node and
+  runs, as controls, the tests the plan would hide; `plan_against=` in
+  the record. See "The plan".
+- The selection syntax of `sweep` stays one group per list; a list that
+  names two groups is a defect still open.
+
 ## [2.6.0] - 2026-10-14
 
 - A sweep runs only the tests xfstests runs on its node. Each test of

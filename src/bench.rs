@@ -2320,7 +2320,7 @@ fn write_meta(c: &NodeConn, cfg: &Config, node: &Node, selection: &str,
     let body = format!(
         "=== {when} ===\nat={}\nbx_version={}\nbeamfs_commit={}\nnode={} {}\n\
          fstyp={}\nmkfs_options={}\nselection={}\ntests={tests}\n\
-         budget={}\nkernel_image={kimg}\n{probe}\
+         budget={}\nkernel_image={kimg}\n{gate}\n{probe}\
          --- seal ---\n{seal}\n",
         unix_now(),
         env!("CARGO_PKG_VERSION"),
@@ -2335,6 +2335,7 @@ fn write_meta(c: &NodeConn, cfg: &Config, node: &Node, selection: &str,
             selection
         },
         trial_budget(),
+        gate = crate::gate::meta_line(),
     );
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -2649,13 +2650,51 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String>
             (None, format!("plan=failed {}", e.replace('\n', " ")))
         }
     };
-    let split = crate::plan::split(&tests, node_plan.as_ref(), crate::plan::controls(),
-                                   unix_now() / 60);
+    // The plan beside the newest full sweep of this node, every time: a
+    // test it declines that ran there is run anyway, as a control, and
+    // the record says what the plan was set beside.
+    let sweeps = crate::history::History::default_root().join("sweeps");
+    let crossed = node_plan
+        .as_ref()
+        .map(|p| crate::plan::crossed(p, &tests, &sweeps, &node.name));
+    let mut forced: Vec<String> = Vec::new();
+    if let Some(x) = &crossed {
+        match &x.record {
+            Some(r) => {
+                println!("  plan    : set beside {}: {} hidden, {} run for nothing",
+                         r.file_name().map(|s| s.to_string_lossy().into_owned())
+                             .unwrap_or_default(),
+                         x.hidden.len(), x.for_nothing);
+                if !x.hidden.is_empty() {
+                    println!("  plan    : THE PLAN HIDES {} test(s) that ran there; run anyway \
+                              as controls: {}", x.hidden.len(), x.hidden.join(" "));
+                    forced = x.hidden.clone();
+                }
+            }
+            None => println!("  plan    : no full sweep of this node to set the plan beside"),
+        }
+    }
+    // The tests that sweep declined while the plan would run them: set
+    // aside on its word, a few of them run as controls (2.8.0).
+    let aside: Vec<(String, String)> = crossed
+        .as_ref()
+        .map(|x| x.for_nothing_tests.clone())
+        .unwrap_or_default();
+    let split = crate::plan::split_with(&tests, node_plan.as_ref(), crate::plan::controls(),
+                                        unix_now() / 60, &forced, &aside);
     if node_plan.is_some() {
         println!("  plan    : {} to run, {} declined by xfstests here and set aside, \
                   {} of the declined run anyway as a control",
                  split.run.len() - split.control.len(), split.planned.len(),
                  split.control.len());
+    }
+    {
+        let ctl = aside.iter().filter(|(t, _)| split.control.contains(t)).count();
+        if split.aside.len() + ctl > 0 {
+            println!("  plan    : {} declined by that sweep while the plan would run them: set \
+                      aside on its word, {} of them run anyway as a control",
+                     split.aside.len() + ctl, ctl);
+        }
     }
     arm_stop();
     println!("  stop    : touch {} to finish the current test and stop",
@@ -2678,6 +2717,9 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String>
     ));
     if let Some(p) = &node_plan {
         keep_in_record(&p.path, &record);
+    }
+    if let Some(x) = &crossed {
+        meta_note(&record, &x.meta());
     }
     meta_note(&record, &format!(
         "test_budgets={}",
@@ -2759,6 +2801,19 @@ pub fn sweep(cfg: &Config, node: &Node, selection: &str) -> Result<bool, String>
         keep_verdict(&record, t, "NOTRUN", 0, &r, None);
         not_run.push(t.clone());
         why_not_run.insert(t.clone(), r);
+    }
+    // Declined by the newest full sweep of this node while the plan
+    // would run them: set aside on the sweep's word, recorded with the
+    // reason xfstests gave there (2.8.0).
+    for (t, why) in &split.aside {
+        let r = format!("recorded: {why}");
+        keep_verdict(&record, t, "NOTRUN", 0, &r, None);
+        not_run.push(t.clone());
+        why_not_run.insert(t.clone(), r);
+    }
+    if !split.aside.is_empty() {
+        let names: Vec<&str> = split.aside.iter().map(|(t, _)| t.as_str()).collect();
+        meta_note(&record, &format!("plan_aside={} [{}]", names.len(), names.join(" ")));
     }
 
     // Whether this kernel carries a sanitizer.

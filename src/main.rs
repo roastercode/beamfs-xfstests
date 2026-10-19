@@ -17,9 +17,11 @@
 //! TCG, and the suite is around 737 tests.
 
 mod select;
+mod gate;
 mod checkpoint;
 mod kernelorg;
 mod tally;
+mod cover;
 mod plan;
 mod nodelock;
 mod say;
@@ -159,7 +161,7 @@ fn main() -> std::process::ExitCode {
         args.get(1).map(String::as_str),
         // Commands that read or prepare rather than measure. None of
         // them is long enough to walk away from, so none of them rings.
-        Some("report" | "history" | "compare" | "trend" | "deploy"
+        Some("report" | "history" | "compare" | "trend" | "deploy" | "cover"
              | "nodes" | "checkpoint" | "--help" | "-h" | "stop")
     );
 
@@ -175,6 +177,21 @@ fn main() -> std::process::ExitCode {
      */
     if args.iter().skip(1).any(|a| a == "--help" || a == "-h") {
         return usage();
+    }
+
+    // The code first. Every command that measures goes through the gate;
+    // the ones that read, prepare or stop do not.
+    if matches!(
+        args.get(1).map(String::as_str),
+        Some("probe" | "trace" | "matrix" | "bench" | "control" | "soak" | "sweep"
+             | "baseline" | "run" | "scenario")
+            | None
+    ) {
+        if let Err(e) = gate::require(args.get(1).map(String::as_str).unwrap_or("run")) {
+            eprintln!("  {e}");
+            eprintln!("  nothing was measured");
+            return std::process::ExitCode::FAILURE;
+        }
     }
 
     let code = match args.get(1).map(String::as_str) {
@@ -227,6 +244,7 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::SUCCESS;
         }
         Some("baseline") => do_baseline(&cfg, args.get(2), args.get(3), args.get(4)),
+        Some("cover") => cover::fill(&args[2..]),
         /* The usage text lists run as a command, so it is one. */
         Some("run") => run(&cfg),
         Some("--help" | "-h") => usage(),
@@ -262,6 +280,8 @@ fn usage() -> std::process::ExitCode {
          matrix   vary one condition at a time and see which the leak needs\n\
          bench    measure a test, a group or the whole suite, and compare\n\
          baseline run the same code several times and report the spread\n\
+         cover    write the cover letter's Testing paragraph from whole, clean\n\
+                  sweep records: cover <sweep>... (fills @@XFSTESTS@@)\n\
          control  run one test against beamfs and a sound filesystem,\n\
          \x20        same devices, and say which is implicated\n\
          \x20        control [test] [trials] [fstyp,fstyp]\n\

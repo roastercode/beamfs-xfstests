@@ -1,6 +1,6 @@
 [package]
 name = "beamfs-xfstests"
-version = "2.6.0"
+version = "2.9.0"
 edition = "2021"
 license = "GPL-2.0-only"
 authors = ["Aurelien Desbrieres <aurelien@hackers.camp>"]
@@ -15,3 +15,4 @@ overflow-checks = true
 
 [dependencies]
 liveblock = "0.1"
+beamfs-upstream = { path = "../beamfs-upstream" }
