@@ -247,6 +247,10 @@ fn main() -> std::process::ExitCode {
         Some("cover") => cover::fill(&args[2..]),
         /* The usage text lists run as a command, so it is one. */
         Some("run") => run(&cfg),
+        Some("--version" | "-V") => {
+            println!("beamfs-xfstests {}", env!("CARGO_PKG_VERSION"));
+            return std::process::ExitCode::SUCCESS;
+        }
         Some("--help" | "-h") => usage(),
         // A typo must not start a campaign. "analyses" for "analyse"
         // fell through to run, which tried the aarch64 cluster -- powered
@@ -315,7 +319,8 @@ deploy   put the newest image and this repo's tools on a node,\n\
                   stop --hard         restart a node that will not let go\n\
          \n\
          options:\n\
-           --no-bell               finish without ringing\n\
+           --no-bell               finish without ringing
+--version               print the version and exit\n\
            --probes                list the bpftrace scripts and exit\n\
          \n\
          environment:\n\

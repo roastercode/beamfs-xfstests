@@ -11,6 +11,11 @@ on the commit they point to. From the next version on, each version adds
 its entry, written with the change, and the README carries the latest
 entries.
 
+## [2.9.2] - 2026-10-24
+
+- `--version` (`-V`) prints the version and exits; every other
+  beamfs tool had one.
+
 ## [2.9.1] - 2026-10-24
 
 - Built against beamfs-upstream 0.9.0: the shared checker builds the filesystem
