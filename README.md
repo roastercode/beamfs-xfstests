@@ -235,6 +235,8 @@ follow.
   through beamfs-upstream's full profile and refuses to measure a code
   that does not pass; the record names the verdict. See "Before a
   measurement".
+- 2.9.1: built against beamfs-upstream 0.9.0, the hexagon build and the
+  MAINTAINERS order check (Cargo.lock).
 - 2.9.0: `cover <sweep>...` fills `@@XFSTESTS@@` of the series' cover letter
   from whole, clean sweep records.
 - 2.8.0: the plan is set beside whole sweeps only; tests the newest full
